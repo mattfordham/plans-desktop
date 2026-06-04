@@ -10,6 +10,10 @@ let package = Package(
         .executableTarget(
             name: "Plans",
             path: "Sources/Plans"
+        ),
+        .testTarget(
+            name: "PlansTests",
+            dependencies: ["Plans"]
         )
     ]
 )
