@@ -1,0 +1,414 @@
+# plans-cc Desktop App — Build Spec
+
+This document is a self-contained specification for building a native macOS
+desktop app that surfaces task data managed by **plans-cc**, a lightweight task
+management system for Claude Code. You do not need any prior knowledge of
+plans-cc to build this app — everything required is defined below.
+
+You are expected to build this in a **separate project/directory** from
+plans-cc itself. The plans-cc repository is referenced only as the source of
+truth for two data contracts (the registry file and the task-file format),
+which are fully described here.
+
+---
+
+## 1. Purpose & the Two Surfaces
+
+plans-cc stores tasks as markdown files inside a `.plans/` directory at the
+root of each project (repo) a developer works in. A single developer typically
+has many such projects scattered across their machine. There is currently no
+way to see work across all of them at once — you must `cd` into each project
+individually.
+
+This app fixes that. It is a personal, machine-wide viewer for plans-cc tasks
+across **all** registered projects. It has two surfaces, at two altitudes:
+
+### Surface A — Menu bar "glance" (the 20,000-foot view)
+
+A macOS menu bar item that gives an at-a-glance summary of work across every
+known project, without opening a window. From the menu bar the user should be
+able to see, per project:
+
+- The project's name (derive from the last path component of the project root)
+- A breakdown of its task counts **by status** (e.g. 2 in-progress, 1 review,
+  5 pending) rendered compactly using the glyph/label vocabulary in §5.
+
+The glance is for "what's hot right now, everywhere" — it is counts and status,
+not task bodies. Clicking a project (or a "Open browser" affordance) should
+**drill down** into the browser window (Surface B), ideally pre-focused on that
+project.
+
+### Surface B — Cross-project browser window
+
+A full window for actually reading and triaging work. It must let the user:
+
+- **Read full task bodies** — the title and the markdown sections (What, Why,
+  How with its checklist, Verification, etc.) for any task in any project.
+- **Filter by status across ALL projects at once** — e.g. "show me everything
+  that is `in-progress` everywhere", regardless of which project it lives in.
+  Filtering is global, not scoped to one project.
+- **Sort by staleness** — order tasks (or projects) by how recently they were
+  touched, so stale/forgotten work floats up. Use the registry `lastSeen`
+  timestamp (§4) as the staleness signal for a project; for finer-grained task
+  staleness you may use the task file's modification time and/or the
+  `**Created:**` field (§4.3).
+- **Drill down from the glance** — opening the window from a project in the menu
+  bar should land the user on that project's tasks.
+
+> This spec defines **what** these surfaces must do and the exact **data
+> contracts** they consume. It deliberately does **not** prescribe UI layout,
+> view hierarchy, app architecture, or framework internals beyond "native
+> macOS, menu bar + window." Those choices are yours.
+
+---
+
+## 2. Hard Constraint: Read-Only
+
+**The app is a pure viewer. It MUST NEVER write to any `.plans/` directory, edit
+or create task files, change task status, or move tasks between projects.** It
+reads the registry and the task files and displays them. That is all. Any
+mutation of plans-cc data is explicitly out of scope and must not be
+implemented. Treat all `.plans/` content as read-only input.
+
+(The registry file at `~/.claude/plans-cc/projects.json` is written by the
+plans-cc tooling itself; the app reads it but does not need to write it. See §4
+for the one tolerable exception note — even there, writing is optional and not
+required.)
+
+---
+
+## 3. Platform & Distribution
+
+- **Platform:** native macOS, written in **Swift**.
+- **Form factor:** a menu bar item (Surface A) plus a window (Surface B).
+- **Audience:** this is **personal tooling** for a single developer's own
+  machine. It is **not** a shipped product.
+- **Distribution:** built and installed **separately** from the plans-cc npm
+  package. It is its own project with its own build. Do not attempt to bundle it
+  into, or ship it via, `npx plans-cc`.
+- **No code-signing or notarization is required.** Because it is personal tooling
+  run locally by its author, you do not need to sign or notarize the build.
+
+---
+
+## 4. Data Contract 1 — The Registry
+
+The app discovers which projects exist by reading a single machine-wide registry
+file written by plans-cc.
+
+### 4.1 Location
+
+```
+~/.claude/plans-cc/projects.json
+```
+
+(`~` is the current user's home directory.)
+
+### 4.2 Schema
+
+```json
+{
+  "version": 1,
+  "projects": [
+    { "path": "/Users/alice/code/my-app",   "lastSeen": "2026-06-04T14:01:33.000Z" },
+    { "path": "/Users/alice/work/other-repo", "lastSeen": "2026-05-30T09:12:00.000Z" }
+  ]
+}
+```
+
+Field definitions:
+
+| Field | Type | Meaning |
+|-------|------|---------|
+| `version` | integer | Schema version. Currently always `1`. Treat unknown future versions defensively. |
+| `projects` | array | The list of known projects. May be empty. |
+| `projects[].path` | string | **Absolute** filesystem path to a project root. The project's `.plans/` directory lives at `<path>/.plans/`. |
+| `projects[].lastSeen` | string | ISO 8601 timestamp of the last time the project was "touched" (a plans-cc action ran in it). Use this as the project-level staleness/recency signal. |
+
+Notes:
+- Projects self-register: every time a plans-cc action runs in a project (its
+  dashboard launches, or `/plan-init` or `/plan-capture` runs), plans-cc appends
+  or updates that project's entry and refreshes `lastSeen`. The app does not
+  control this; it just reads the current state.
+- Paths are deduplicated by exact string. No symlink canonicalization is done by
+  the producer, so two different paths pointing at the same directory may both
+  appear. Do not assume paths are canonicalized.
+
+### 4.3 Live-prune semantics (the reader's job)
+
+An entry is **stale** if its `.plans/` directory no longer exists — i.e. if
+`<path>/.plans/` is not present on disk (the project was deleted, moved, or the
+`.plans/` dir was removed). The reader must:
+
+- **Ignore/drop** any registry entry whose `<path>/.plans/` does not exist. Do
+  not show those projects.
+- You are not required to rewrite the registry file to remove stale entries —
+  the plans-cc tooling self-heals the file on its next write. Simply skipping
+  stale entries when reading is sufficient and keeps the app read-only.
+
+### 4.4 Tolerance: missing / empty / corrupt
+
+The registry file may be in any of these states, and the app **must handle all
+of them gracefully without crashing**:
+
+- **Missing** — the file does not exist (no project has ever registered, or
+  plans-cc is not installed). Treat as **zero known projects**.
+- **Empty** — zero-byte file, or `{ "version": 1, "projects": [] }`. Treat as
+  **zero known projects**.
+- **Corrupt** — invalid JSON, or valid JSON of the wrong shape (e.g. `projects`
+  is missing or not an array). Treat as **zero known projects** and never throw.
+
+In every degenerate case the correct behavior is the same: show "no projects"
+(an empty but functional UI), and keep polling/watching so the app recovers
+automatically once a valid registry appears. Never surface a crash or a fatal
+error dialog for a bad registry.
+
+---
+
+## 5. Data Contract 2 — The `.plans/` Task Files
+
+For each non-stale project from the registry, read its tasks from
+`<path>/.plans/`. The format below is the contract. The plans-cc repository
+contains a **reference implementation of these exact parse rules** in
+`lib/parse-tasks.js` — treat it as the source of truth. It is JavaScript; you
+will re-implement the same behavior in Swift, but it should mirror what that
+file does. A summary of its behavior is given in §5.5.
+
+### 5.1 Directory layout under each project root
+
+```
+<project-root>/
+  .plans/
+    pending/        # active task files (NNN-slug.md) — see §5.2 for statuses
+    completed/      # archived, completed task files (NNN-slug.md)
+    config.json     # project settings: { "next_id": <int>, "git_commits": <bool>, ... }
+    CONTEXT.md      # project knowledge      (optional to parse)
+    PROGRESS.md     # current work status    (optional to parse)
+    HISTORY.md      # completed-work archive (optional to parse)
+```
+
+- `pending/` and `completed/` are the two directories that contain task files.
+  Either may be missing or empty — handle that.
+- `config.json` holds project-level settings such as `next_id` (the next task
+  id to allocate) and `git_commits` (whether plans-cc auto-commits). You may read
+  it but it is not required for the core views.
+- The three top-level `.md` docs are project-level prose and are **optional to
+  parse**. You may surface them later but they are not required for the views in
+  §1.
+
+### 5.2 Task filename format
+
+```
+NNN-slug.md
+```
+
+- `NNN` is a **3-digit zero-padded** task id, e.g. `006`, `012`, `001`.
+- The id is literally **the first 3 characters of the filename**.
+- The rest is a human-readable slug derived from the title, e.g.
+  `006-system-wide-dashboard.md`.
+- Only files ending in `.md` are task files.
+
+### 5.3 Task markdown structure
+
+Each task file is markdown with this shape (example abbreviated):
+
+```markdown
+# System-wide plans registry + desktop app handoff spec
+
+**ID:** 006
+**Created:** 2026-04-13T00:00
+**Type:** feature
+**Status:** in-progress
+**Branch:** feature/006-system-wide-dashboard
+**Blocked by:** 004 005
+
+## What
+Prose describing the task.
+
+## Why
+Prose describing the motivation.
+
+## How
+- [x] Step 1: Do the first thing
+- [x] Step 2: Do the second thing
+- [ ] Step 3: Do the third thing
+
+## Verification
+1. Numbered checks the user runs to confirm the work.
+```
+
+Elements to parse:
+
+- **Title** — the first line beginning with `# ` (a single leading `# ` then a
+  space). Everything after `# ` on that line, trimmed, is the title.
+- **Bold "frontmatter" fields** — lines of the form `**Field:** value` appearing
+  near the top of the file. They are inline-bold markdown, not YAML. Match them
+  with a per-line pattern anchored to the start of a line. The fields are:
+
+  | Field | Required | Notes |
+  |-------|----------|-------|
+  | `**ID:**` | yes | The 3-digit id; matches the filename prefix. |
+  | `**Created:**` | usually | A timestamp (ISO-ish, e.g. `2026-04-13T00:00`). Use as a fallback staleness signal. |
+  | `**Type:**` | usually | One of the type vocabulary (§5.4). |
+  | `**Status:**` | usually | One of the status vocabulary (§5.4). |
+  | `**Branch:**` | optional | Git branch name, when the task uses one. |
+  | `**Blocked by:**` | optional | Space/comma-separated list of 3-digit task ids this task depends on. |
+
+  Parse defensively: any field may be absent. A missing `**Status:**` for a file
+  in `pending/` should be treated as unknown rather than crashing.
+
+- **`##` sections** — second-level headings delimit sections. The common ones
+  are **What**, **Why**, **How**, and **Verification**. Other sections you may
+  encounter include **Impact Scope**, **Notes**, **Changes**, **Assumptions**,
+  and **Issues**. A section runs from its `## Heading` line until the next `## `
+  line (or end of file). Render section bodies as markdown in the browser
+  window.
+
+### 5.3.1 Checkbox progress convention (inside `## How`)
+
+The `## How` section contains the task's steps as **markdown checkboxes**:
+
+- `- [ ] ...` — an **incomplete** step.
+- `- [x] ...` — a **complete** step (also accept uppercase `- [X]`).
+
+**Progress = completed checkboxes / total checkboxes, counted only within the
+`## How` section.** Do not count checkboxes that appear in other sections.
+Concretely: start counting after the `## How` line, stop at the next `## ` line,
+and within that range count lines matching `- [ ]` / `- [x]`. A task with no
+checkboxes in How has progress `0/0` (show it as no-progress, not as complete).
+
+### 5.4 Vocabularies (exact strings)
+
+**Status** (the value of `**Status:**`):
+
+| Status | Meaning |
+|--------|---------|
+| `pending` | Captured but not yet fleshed out. |
+| `elaborated` | Has Why/How/Verification filled in; ready to start. |
+| `in-progress` | Actively being worked on. |
+| `review` | Execution complete, awaiting user review. |
+| `in-review` | Actively being walked through in review. |
+| `completed` | Done and archived. |
+
+Directory ↔ status relationship:
+- Files in `pending/` may carry any of: `pending`, `elaborated`, `in-progress`,
+  `review`, `in-review`.
+- Files in `completed/` carry `completed`. (Treat the containing directory as
+  authoritative for completion: a file in `completed/` is completed regardless of
+  what its `**Status:**` line says.)
+
+**Type** (the value of `**Type:**`):
+
+| Type | Inferred from |
+|------|---------------|
+| `bug` | fix / bug / broken / error / crash / fail |
+| `feature` | add / new / implement / create / support |
+| `refactor` | refactor / clean / reorganize / restructure |
+| `chore` | update / upgrade / config / setup / docs / test |
+
+### 5.5 Reference implementation summary (`lib/parse-tasks.js`)
+
+The plans-cc repo's `lib/parse-tasks.js` is the source of truth. Mirror this
+behavior in Swift:
+
+1. List `.md` files in `pending/` and `completed/`.
+2. For each file, derive `id = filename[0..<3]`.
+3. Find the title from the first `# ` line.
+4. Extract `Type`, `Status`, and `Blocked by` via per-line `**Field:**` patterns
+   anchored to line start. (`Status` for a `completed/` file is forced to
+   `completed`.)
+5. Parse `Blocked by` into a list of 3-digit ids; a task is **blocked** if any of
+   those ids is not present in `completed/`.
+6. Count How-section checkboxes into `{ done, total }` as in §5.3.1.
+7. Produce a per-project summary of counts by status:
+   `{ pending, elaborated, in-progress, review, in-review, completed }`.
+8. Sort active tasks by status priority
+   `in-progress > in-review > review > elaborated > pending`, then by id.
+
+You may extend beyond this (e.g. capturing full section bodies for the browser
+window, reading `Created`/`Branch`), but do not contradict it.
+
+---
+
+## 6. Glance Vocabulary — Status & Type Glyphs
+
+For the menu bar glance (Surface A), counts should be conveyed compactly using a
+consistent glyph/label scheme so the user can read state without words. The
+scheme below is a **suggested starting point — refine it to taste**; the only
+hard requirement is that the six statuses are visually distinguishable and the
+glance is legible at a glance.
+
+### Status glyphs (suggested)
+
+| Status | Glyph | Short label | Color intent |
+|--------|-------|-------------|--------------|
+| `in-progress` | 🔨 | WIP | active / blue |
+| `in-review` | 👀 | REVIEWING | attention / yellow |
+| `review` | 🟡 | REVIEW | attention / yellow |
+| `elaborated` | 📋 | READY | neutral / teal |
+| `pending` | ⚪ | TODO | muted / gray |
+| `completed` | ✅ | DONE | success / green |
+
+A compact per-project glance line might read, for example:
+`my-app — 🔨2 🟡1 ⚪5` (2 in-progress, 1 in review-ish, 5 pending). You may
+instead use SF Symbols, colored dots, or badge counts — your choice — as long as
+the six statuses remain distinguishable.
+
+### Type glyphs (suggested)
+
+| Type | Glyph | Short label |
+|------|-------|-------------|
+| `bug` | 🐞 | bug |
+| `feature` | ✨ | feat |
+| `refactor` | ♻️ | refactor |
+| `chore` | 🔧 | chore |
+
+Type is most useful in the browser window (Surface B) as a per-task badge; the
+glance can ignore type and group purely by status if that reads more cleanly.
+
+---
+
+## 7. Live-Update Expectation
+
+The app must reflect changes to the data **without the user manually
+refreshing**. Tasks are edited continuously by plans-cc as work proceeds (status
+changes, checkboxes tick, new task files appear), and the registry itself gains
+new entries as new projects self-register.
+
+Requirements:
+
+- Changes to any registered project's `.plans/` directory (new/edited/removed
+  task files, status changes, checkbox progress) should appear in the UI
+  automatically and reasonably promptly.
+- The **registry file** (`~/.claude/plans-cc/projects.json`) can also change at
+  any time as new projects self-register or `lastSeen` updates. **Re-read it
+  periodically** so newly registered projects appear without restarting the app.
+
+The mechanism is **your choice** — filesystem watching (FSEvents / DispatchSource
+/ `FileSystemWatcher`), periodic polling, or a hybrid. Pick whatever is simplest
+and reliable for personal tooling. Polling every few seconds is perfectly
+acceptable. Always re-validate stale projects (§4.3) on each refresh so deleted
+projects drop out.
+
+---
+
+## 8. Acceptance Summary
+
+A correct build of this app:
+
+1. Reads `~/.claude/plans-cc/projects.json`, tolerating missing/empty/corrupt
+   files as "zero projects" without crashing.
+2. Drops/ignores registered projects whose `<path>/.plans/` no longer exists.
+3. For each live project, parses tasks from `.plans/pending/` and
+   `.plans/completed/` per the §5 contract (id from filename, title, frontmatter
+   fields, sections, How-checkbox progress, status/type vocabularies), mirroring
+   `lib/parse-tasks.js`.
+4. **Menu bar glance:** shows per-project task counts broken down by status using
+   a distinguishable glyph/label scheme.
+5. **Browser window:** reads full task bodies, filters by status across all
+   projects at once, sorts by staleness, and is reachable by drilling down from
+   the glance.
+6. Updates live (watch or poll) and periodically re-reads the registry.
+7. Is **read-only** — never writes to, edits, or moves any `.plans/` data.
+8. Is native macOS (Swift), menu bar + window, built/installed separately from
+   the plans-cc npm package, with no signing/notarization requirement.
