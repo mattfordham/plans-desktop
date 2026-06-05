@@ -60,5 +60,9 @@ struct PlansApp: App {
             PlanDetailView(rowID: rowID)
                 .environment(store)
         }
+        // A roomy default so the detail body (header + markdown sections +
+        // read-only How checklist) is comfortably visible without resizing on
+        // first open — wide enough that markdown lines don't wrap prematurely.
+        .defaultSize(width: 900, height: 600)
     }
 }
