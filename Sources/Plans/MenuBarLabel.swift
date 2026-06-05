@@ -58,9 +58,9 @@ struct MenuBarLabel: View {
     /// image (not expected).
     ///
     /// `colorScheme` is injected into the rendered content's environment so the
-    /// appearance-adaptive colors (label color for digits, the subtle pill
-    /// background) bake correctly for the current light/dark appearance — the
-    /// bitmap does not auto-adapt once rendered.
+    /// appearance-adaptive label color for the digits bakes correctly for the
+    /// current light/dark appearance — the bitmap does not auto-adapt once
+    /// rendered.
     private func renderedImage(
         for counts: [(status: TaskStatus, count: Int)],
         colorScheme: ColorScheme
@@ -83,21 +83,20 @@ struct MenuBarLabel: View {
 /// state (no counts) it shows only the bare `list.bullet` icon. When there are
 /// counts it drops the leading icon and shows, per `iconSpaceCounts` entry, the
 /// status's `glanceGlyph` in its `glanceColor` immediately followed by the
-/// count, all sitting inside a subtle rounded pill background. Extracted so it
+/// count, with light padding around the badges (no background). Extracted so it
 /// can be fed to `ImageRenderer`.
 ///
-/// Appearance handling: the digit color and the pill background are
-/// appearance-adaptive semantic colors, and the caller injects
-/// `\.colorScheme` so they bake correctly into the (otherwise static) bitmap.
-/// The `glanceColor` glyphs are fixed brand hues meant to read vividly in both
-/// modes, so they stay as-is.
+/// Appearance handling: the digit color is an appearance-adaptive semantic
+/// color, and the caller injects `\.colorScheme` so it bakes correctly into the
+/// (otherwise static) bitmap. The `glanceColor` glyphs are fixed brand hues
+/// meant to read vividly in both modes, so they stay as-is.
 private struct MenuBarLabelContent: View {
     let counts: [(status: TaskStatus, count: Int)]
     let fontSize: CGFloat
 
     var body: some View {
         if counts.isEmpty {
-            // Empty state: only the bare icon (no pill).
+            // Empty state: only the bare icon.
             Image(systemName: "list.bullet")
                 .font(.system(size: fontSize))
         } else {
@@ -116,15 +115,11 @@ private struct MenuBarLabelContent: View {
                     .font(.system(size: fontSize))
                 }
             }
-            // Subtle rounded pill behind the badges. Padding gives the content
-            // breathing room; the faint primary fill stays low-contrast and
-            // follows the injected color scheme.
+            // Padding gives the badges breathing room within the menu bar's
+            // icon space (kept after removing the former pill background so the
+            // badge spacing is unchanged).
             .padding(.horizontal, 5)
             .padding(.vertical, 2)
-            .background(
-                RoundedRectangle(cornerRadius: 5, style: .continuous)
-                    .fill(Color.primary.opacity(0.08))
-            )
         }
     }
 }

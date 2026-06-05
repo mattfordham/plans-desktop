@@ -8,7 +8,8 @@ import SwiftUI
 ///   summary. Iterating `TaskStatus.glanceOrder` (the TUI `STAT_CARDS` order,
 ///   `completed` excluded), each status with a non-zero `counts` entry shows its
 ///   real SF Symbol `Image(systemName: status.symbolName)` in
-///   `status.glanceColor` next to the count. Zero-count statuses are dropped.
+///   `status.glanceColor` next to the count. Every status is shown; zero-count
+///   statuses are rendered dimmed (50% white) rather than dropped.
 /// - **Body:** one tappable row per active plan from
 ///   `BrowserViewModel.activeRows(project)` (already non-completed and sorted by
 ///   `TaskParser`). Each row shows the task's status icon via the symbol-based
@@ -29,12 +30,12 @@ struct ProjectCard: View {
     /// the row's composite `TaskRow.ID`.
     @Environment(\.openWindow) private var openWindow
 
-    /// The non-zero status counts to show in the header, in `glanceOrder`.
-    /// Statuses absent from `counts` or with a `0` count are dropped.
+    /// The status counts to show in the header, in `glanceOrder`. EVERY status
+    /// is included; statuses absent from `counts` or with a `0` count surface as
+    /// a `0` and are rendered dimmed (50% white) rather than dropped.
     private var statusCounts: [(status: TaskStatus, count: Int)] {
-        TaskStatus.glanceOrder.compactMap { status in
-            guard let count = project.counts[status], count > 0 else { return nil }
-            return (status, count)
+        TaskStatus.glanceOrder.map { status in
+            (status, project.counts[status] ?? 0)
         }
     }
 
@@ -58,7 +59,13 @@ struct ProjectCard: View {
             // height. Mirrors the wrapper Spacer in `BrowserWindow.cardGrid`.
             Spacer(minLength: 0)
         }
-        .padding(14)
+        // Asymmetric padding so the visible gap under the LAST plan row matches
+        // the gap above the header. Each plan row carries `.padding(.vertical, 5)`
+        // (see `planRow`), so the final row already contributes ~5pt below itself;
+        // we subtract that from the bottom edge (14 − 5 = 9) to even it out.
+        .padding(.top, 14)
+        .padding(.horizontal, 14)
+        .padding(.bottom, 9)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(.background.secondary, in: RoundedRectangle(cornerRadius: 12))
         .overlay(
@@ -83,11 +90,13 @@ struct ProjectCard: View {
                 HStack(spacing: 4) {
                     Image(systemName: entry.status.symbolName)
                         .imageScale(.large)
-                        .foregroundStyle(entry.status.glanceColor)
+                        // Zero-count statuses dim to 50% white so they read as
+                        // present-but-empty; non-zero keep the vivid glance hue.
+                        .foregroundStyle(entry.count == 0 ? Color.white.opacity(0.5) : entry.status.glanceColor)
                         .frame(width: 20, alignment: .center)
                     Text("\(entry.count)")
                         .font(.body)
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(entry.count == 0 ? Color.white.opacity(0.5) : Color.secondary)
                 }
             }
         }
