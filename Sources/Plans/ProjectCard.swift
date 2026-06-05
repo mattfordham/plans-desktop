@@ -137,9 +137,13 @@ struct ProjectCard: View {
     ///   inter-column gap is recreated with per-cell `.padding(.trailing, 8)` on
     ///   columns 1–3 — this keeps the visual column spacing without introducing
     ///   any Grid spacing for the highlight to break across.
-    /// - `.frame(maxHeight: .infinity)` lets every cell fill the row height so the
-    ///   `.background` spans the full row height; `.padding(.vertical, 5)` on the
-    ///   GridRow sets the row's height/tap area.
+    /// - `.padding(.vertical, 5)` on the GridRow sets the row's height/tap area and
+    ///   the `.background` naturally spans that content height. We deliberately do
+    ///   NOT use `.frame(maxHeight: .infinity)` here: that makes each row a greedy
+    ///   vertical slack-absorber, so when LazyVGrid hands the card a taller cell the
+    ///   rows expand and distribute the extra height (drifting toward center). With
+    ///   rows content-sized, the card's trailing `Spacer` (and the cardGrid wrapper
+    ///   Spacer) absorb all the slack and the rows stay pinned under the header.
     @ViewBuilder
     private func planRow(_ row: TaskRow) -> some View {
         let indicator = row.indicator
@@ -174,7 +178,6 @@ struct ProjectCard: View {
         // Row-level chrome: ONE continuous rounded highlight + a single hit-test
         // shape + the tap gesture, applied to the whole row so the pill spans all
         // columns with no inter-column gaps (Grid `horizontalSpacing` is 0).
-        .frame(maxHeight: .infinity)
         .padding(.vertical, 5)
         .background(
             RoundedRectangle(cornerRadius: 6)
