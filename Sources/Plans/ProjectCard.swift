@@ -94,7 +94,16 @@ struct ProjectCard: View {
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
         } else {
-            VStack(alignment: .leading, spacing: 2) {
+            // A `Grid` (not a VStack of HStacks) so every column auto-sizes to
+            // the widest cell ACROSS ALL ROWS — that gives the id / [type] /
+            // title columns a consistent left edge on every row (a table look).
+            // `.topLeading` keeps multi-line titles top-aligned with the icon.
+            //
+            // `horizontalSpacing: 0` (the inter-column gap is recreated via
+            // per-cell trailing padding instead): with zero Grid spacing the
+            // row's single highlight `.background` is one continuous region with
+            // no gaps for it to break across — see `planRow`.
+            Grid(alignment: .topLeading, horizontalSpacing: 0, verticalSpacing: 2) {
                 ForEach(rows) { row in
                     planRow(row)
                 }
@@ -102,43 +111,67 @@ struct ProjectCard: View {
         }
     }
 
-    /// A single tappable plan row: the status icon (blocked takes precedence),
-    /// the short 3-char task id, an optional `[type]` tag, and the title. The
-    /// whole row is the tap target (sets `selectedRowID`); the selected row is
-    /// subtly highlighted.
+    /// A single tappable plan row as a `GridRow`: the status icon (blocked takes
+    /// precedence), the short 3-char task id, an always-present `[type]` cell,
+    /// and the title. The whole row is the tap target (sets `selectedRowID`);
+    /// the selected row is subtly highlighted.
+    ///
+    /// Implementation notes (chosen to keep Grid's cross-row column sizing
+    /// intact — wrapping the row in a Button would defeat that):
+    ///
+    /// - The `[type]` cell is ALWAYS emitted (an empty monospaced `Text` when
+    ///   `row.type` is nil) so column 3 exists in every row and stays aligned.
+    /// - Continuous highlight: the selection pill, hit-test shape and tap gesture
+    ///   are applied ONCE to the whole `GridRow` (not per cell), so they span the
+    ///   entire row as a single rounded rectangle. To guarantee the background is
+    ///   gap-free, the enclosing `Grid` uses `horizontalSpacing: 0` and the
+    ///   inter-column gap is recreated with per-cell `.padding(.trailing, 8)` on
+    ///   columns 1–3 — this keeps the visual column spacing without introducing
+    ///   any Grid spacing for the highlight to break across.
+    /// - `.frame(maxHeight: .infinity)` lets every cell fill the row height so the
+    ///   `.background` spans the full row height; `.padding(.vertical, 5)` on the
+    ///   GridRow sets the row's height/tap area.
+    @ViewBuilder
     private func planRow(_ row: TaskRow) -> some View {
         let indicator = row.indicator
         let isSelected = row.id == selectedRowID
-        return Button {
-            selectedRowID = row.id
-        } label: {
-            HStack(alignment: .top, spacing: 8) {
-                Image(systemName: indicator.symbolName)
-                    .imageScale(.large)
-                    .foregroundStyle(indicator.color)
-                    .frame(width: 20, alignment: .center)
-                Text(row.task.id)
-                    .font(.system(.body, design: .monospaced))
-                    .foregroundStyle(.secondary)
-                if let type = row.type {
-                    Text("[\(type.label)]")
-                        .font(.system(.body, design: .monospaced))
-                        .foregroundStyle(.tertiary)
-                }
-                Text(row.title ?? "(untitled)")
-                    .font(.body)
-                    .fixedSize(horizontal: false, vertical: true)
-                Spacer(minLength: 0)
-            }
-            .padding(.vertical, 5)
-            .padding(.horizontal, 6)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .contentShape(Rectangle())
-            .background(
-                RoundedRectangle(cornerRadius: 6)
-                    .fill(isSelected ? Color.accentColor.opacity(0.15) : .clear)
-            )
+        let typeText = row.type.map { "[\($0.label)]" } ?? ""
+
+        GridRow {
+            Image(systemName: indicator.symbolName)
+                .imageScale(.large)
+                .foregroundStyle(indicator.color)
+                .frame(width: 20, alignment: .center)
+                .padding(.trailing, 8)
+
+            Text(row.task.id)
+                .font(.system(.body, design: .monospaced))
+                .foregroundStyle(.secondary)
+                .padding(.trailing, 8)
+
+            // Always-present cell (empty string when no type) so column 3 stays
+            // aligned across every row.
+            Text(typeText)
+                .font(.system(.body, design: .monospaced))
+                .foregroundStyle(.tertiary)
+                .padding(.trailing, 8)
+
+            Text(row.title ?? "(untitled)")
+                .font(.body)
+                .fixedSize(horizontal: false, vertical: true)
+                .gridColumnAlignment(.leading)
+                .frame(maxWidth: .infinity, alignment: .leading)
         }
-        .buttonStyle(.plain)
+        // Row-level chrome: ONE continuous rounded highlight + a single hit-test
+        // shape + the tap gesture, applied to the whole row so the pill spans all
+        // columns with no inter-column gaps (Grid `horizontalSpacing` is 0).
+        .frame(maxHeight: .infinity)
+        .padding(.vertical, 5)
+        .background(
+            RoundedRectangle(cornerRadius: 6)
+                .fill(isSelected ? Color.accentColor.opacity(0.15) : .clear)
+        )
+        .contentShape(Rectangle())
+        .onTapGesture { selectedRowID = row.id }
     }
 }
