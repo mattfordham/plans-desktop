@@ -43,41 +43,50 @@ let entries: [IconEntry] = [
 
 // MARK: - Drawing
 
-/// Brand gradient stops (diagonal blue → purple → pink), matching the
-/// "colorful gradient" brief and reading well on light/dark Dock backgrounds.
+/// Brand gradient stops — a subtle, dark diagonal blue → purple → pink.
+/// Muted/desaturated so the icon reads as a calm dark tile (like a native
+/// macOS app), with the white glyph providing the contrast.
 let gradientColors: [NSColor] = [
-    NSColor(srgbRed: 0.20, green: 0.45, blue: 0.98, alpha: 1.0), // blue
-    NSColor(srgbRed: 0.55, green: 0.30, blue: 0.95, alpha: 1.0), // purple
-    NSColor(srgbRed: 0.98, green: 0.35, blue: 0.70, alpha: 1.0), // pink
+    NSColor(srgbRed: 0.16, green: 0.20, blue: 0.38, alpha: 1.0), // dark blue
+    NSColor(srgbRed: 0.26, green: 0.18, blue: 0.36, alpha: 1.0), // dark purple
+    NSColor(srgbRed: 0.38, green: 0.18, blue: 0.32, alpha: 1.0), // dark pink/plum
 ]
 
 /// Draws the full icon into the current graphics context for a given pixel size.
 func drawIcon(pixelSize: Int) {
     let size = CGFloat(pixelSize)
-    let rect = NSRect(x: 0, y: 0, width: size, height: size)
+
+    // Native macOS app icons inset the squircle tile within the full bounding
+    // box, leaving a transparent margin (the tile is ~80% of the canvas). This
+    // keeps the icon from looking oversized next to system icons in the Dock.
+    let tileFraction: CGFloat = 0.80
+    let tileSide = size * tileFraction
+    let tileOrigin = (size - tileSide) / 2.0
+    let tileRect = NSRect(x: tileOrigin, y: tileOrigin, width: tileSide, height: tileSide)
 
     // macOS Big Sur+ icons use a superellipse-ish corner radius of roughly
-    // 0.2237 of the icon side. A rounded rect approximates this closely enough
+    // 0.2237 of the tile side. A rounded rect approximates this closely enough
     // for our purposes.
-    let cornerRadius = size * 0.2237
-    let roundedPath = NSBezierPath(roundedRect: rect, xRadius: cornerRadius, yRadius: cornerRadius)
+    let cornerRadius = tileSide * 0.2237
+    let roundedPath = NSBezierPath(roundedRect: tileRect, xRadius: cornerRadius, yRadius: cornerRadius)
 
     NSGraphicsContext.current?.saveGraphicsState()
     roundedPath.addClip()
 
-    // Diagonal gradient (45°) across the full canvas.
+    // Diagonal gradient (45°) across the tile.
     if let gradient = NSGradient(colors: gradientColors) {
-        gradient.draw(in: rect, angle: 45)
+        gradient.draw(in: tileRect, angle: 45)
     } else {
         gradientColors.first?.setFill()
-        rect.fill()
+        tileRect.fill()
     }
 
     NSGraphicsContext.current?.restoreGraphicsState()
 
-    // Centered white `list.bullet` glyph, sized to ~57% of the canvas.
-    let glyphFraction: CGFloat = 0.57
-    let glyphSide = size * glyphFraction
+    // Centered white `list.bullet` glyph. Sized relative to the tile (not the
+    // full canvas) with extra padding so it doesn't crowd the tile edges.
+    let glyphFraction: CGFloat = 0.46
+    let glyphSide = tileSide * glyphFraction
 
     let symbolConfig = NSImage.SymbolConfiguration(
         pointSize: glyphSide,
