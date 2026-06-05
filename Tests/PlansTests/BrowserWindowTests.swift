@@ -57,9 +57,7 @@ final class BrowserWindowTests: XCTestCase {
     /// flatten every project's `activeRows` and find the row with `targetID`.
     /// Returns `nil` when no active row across any project matches.
     private func resolveSelectedRow(_ projects: [ProjectTasks], _ targetID: TaskRow.ID) -> TaskRow? {
-        projects
-            .flatMap { BrowserViewModel.activeRows($0) }
-            .first { $0.id == targetID }
+        BrowserViewModel.resolveRow(in: projects, id: targetID)
     }
 
     // MARK: - (a) TaskType glyph + label totality
@@ -275,6 +273,21 @@ final class BrowserWindowTests: XCTestCase {
         )
         XCTAssertNil(resolveSelectedRow([p1], "/proj1/099"))
         XCTAssertNotNil(resolveSelectedRow([p1], "/proj1/001"))
+    }
+
+    // MARK: - BrowserViewModel.resolveRow (shared cross-project lookup)
+
+    /// The shared `resolveRow` helper finds a composite id belonging to the
+    /// SECOND project even when both projects reuse task id "001".
+    func testResolveRowFindsRowInSecondProject() {
+        let row = BrowserViewModel.resolveRow(in: twoProjectFixture(), id: "/proj2/001")
+        XCTAssertEqual(row?.id, "/proj2/001")
+        XCTAssertEqual(row?.projectPath, "/proj2")
+    }
+
+    /// `resolveRow` returns `nil` for an id present in no project's active rows.
+    func testResolveRowReturnsNilForAbsentId() {
+        XCTAssertNil(BrowserViewModel.resolveRow(in: twoProjectFixture(), id: "/proj1/999"))
     }
 
     // MARK: - How checklist parsing (read-only render support)

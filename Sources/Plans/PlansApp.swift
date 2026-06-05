@@ -50,5 +50,15 @@ struct PlansApp: App {
                 .environment(store)
         }
         .defaultLaunchBehavior(.presented)
+
+        // Surface B detail — a standalone, value-based window per plan (§011).
+        // Tapping a plan row in the browser opens this via `openWindow(id:value:)`,
+        // keyed on the row's composite `TaskRow.ID`. `PlanDetailView` resolves the
+        // id back to a row against the shared store and renders its body; passing a
+        // value lets SwiftUI dedupe/reuse a window per plan id.
+        WindowGroup("Plan", id: "plan-detail", for: TaskRow.ID.self) { $rowID in
+            PlanDetailView(rowID: rowID)
+                .environment(store)
+        }
     }
 }

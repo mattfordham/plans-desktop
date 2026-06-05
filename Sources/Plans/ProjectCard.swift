@@ -14,19 +14,20 @@ import SwiftUI
 ///   `TaskParser`). Each row shows the task's status icon via the symbol-based
 ///   `TaskStatusIndicator` (blocked takes precedence), the short 3-char task id,
 ///   an optional `[type.label]` tag (`TaskType.label`), and the title. Tapping a
-///   row sets `selectedRowID` to that row's id; the header/project is NOT a tap
+///   row opens that plan's detail in a separate window (`openWindow(id:value:)`,
+///   §011) — it no longer sets a selection; the header/project is NOT a tap
 ///   target. When there are no active plans the body shows a muted empty state.
 ///
 /// The card is strictly READ-ONLY (§2): it only reads from the injected
-/// `ProjectTasks` and drives selection through the `selectedRowID` binding. It
-/// has NO toggles, status pickers, How checkboxes, or any FS-mutating calls.
+/// `ProjectTasks` and opens a detail window on tap. It has NO toggles, status
+/// pickers, How checkboxes, or any FS-mutating calls.
 struct ProjectCard: View {
     /// The project this card renders. Read-only; never mutated.
     let project: ProjectTasks
 
-    /// The dashboard's currently selected plan row id, driven by tapping a row
-    /// in this (or any sibling) card. `nil` when nothing is selected.
-    @Binding var selectedRowID: TaskRow.ID?
+    /// Opens the standalone plan-detail window (§011) for a tapped row, keyed on
+    /// the row's composite `TaskRow.ID`.
+    @Environment(\.openWindow) private var openWindow
 
     /// The non-zero status counts to show in the header, in `glanceOrder`.
     /// Statuses absent from `counts` or with a `0` count are dropped.
@@ -122,32 +123,28 @@ struct ProjectCard: View {
 
     /// A single tappable plan row as a `GridRow`: the status icon (blocked takes
     /// precedence), the short 3-char task id, an always-present `[type]` cell,
-    /// and the title. The whole row is the tap target (sets `selectedRowID`);
-    /// the selected row is subtly highlighted.
+    /// and the title. The whole row is the tap target — tapping opens the plan's
+    /// detail in a separate window (`openWindow(id:value:)`, §011).
     ///
     /// Implementation notes (chosen to keep Grid's cross-row column sizing
     /// intact — wrapping the row in a Button would defeat that):
     ///
     /// - The `[type]` cell is ALWAYS emitted (an empty monospaced `Text` when
     ///   `row.type` is nil) so column 3 exists in every row and stays aligned.
-    /// - Continuous highlight: the selection pill, hit-test shape and tap gesture
-    ///   are applied ONCE to the whole `GridRow` (not per cell), so they span the
-    ///   entire row as a single rounded rectangle. To guarantee the background is
-    ///   gap-free, the enclosing `Grid` uses `horizontalSpacing: 0` and the
-    ///   inter-column gap is recreated with per-cell `.padding(.trailing, 8)` on
-    ///   columns 1–3 — this keeps the visual column spacing without introducing
-    ///   any Grid spacing for the highlight to break across.
-    /// - `.padding(.vertical, 5)` on the GridRow sets the row's height/tap area and
-    ///   the `.background` naturally spans that content height. We deliberately do
-    ///   NOT use `.frame(maxHeight: .infinity)` here: that makes each row a greedy
-    ///   vertical slack-absorber, so when LazyVGrid hands the card a taller cell the
-    ///   rows expand and distribute the extra height (drifting toward center). With
-    ///   rows content-sized, the card's trailing `Spacer` (and the cardGrid wrapper
-    ///   Spacer) absorb all the slack and the rows stay pinned under the header.
+    /// - The hit-test shape and tap gesture are applied ONCE to the whole
+    ///   `GridRow` (not per cell), so the entire row is a single tap target. With
+    ///   the enclosing `Grid` at `horizontalSpacing: 0`, the inter-column gap is
+    ///   recreated with per-cell `.padding(.trailing, 8)` on columns 1–3.
+    /// - `.padding(.vertical, 5)` on the GridRow sets the row's height/tap area.
+    ///   We deliberately do NOT use `.frame(maxHeight: .infinity)` here: that makes
+    ///   each row a greedy vertical slack-absorber, so when LazyVGrid hands the card
+    ///   a taller cell the rows expand and distribute the extra height (drifting
+    ///   toward center). With rows content-sized, the card's trailing `Spacer` (and
+    ///   the cardGrid wrapper Spacer) absorb all the slack and the rows stay pinned
+    ///   under the header.
     @ViewBuilder
     private func planRow(_ row: TaskRow) -> some View {
         let indicator = row.indicator
-        let isSelected = row.id == selectedRowID
         let typeText = row.type.map { "[\($0.label)]" } ?? ""
 
         GridRow {
@@ -175,15 +172,13 @@ struct ProjectCard: View {
                 .gridColumnAlignment(.leading)
                 .frame(maxWidth: .infinity, alignment: .leading)
         }
-        // Row-level chrome: ONE continuous rounded highlight + a single hit-test
-        // shape + the tap gesture, applied to the whole row so the pill spans all
-        // columns with no inter-column gaps (Grid `horizontalSpacing` is 0).
+        // Row-level chrome: a single hit-test shape + the tap gesture applied to
+        // the whole row so the entire row is one tap target (no inter-column gaps
+        // since the Grid `horizontalSpacing` is 0). Tapping opens the plan detail
+        // in its own window. No `.frame(maxHeight: .infinity)` so rows stay
+        // content-sized and top-anchored (see the height note above).
         .padding(.vertical, 5)
-        .background(
-            RoundedRectangle(cornerRadius: 6)
-                .fill(isSelected ? Color.accentColor.opacity(0.15) : .clear)
-        )
         .contentShape(Rectangle())
-        .onTapGesture { selectedRowID = row.id }
+        .onTapGesture { openWindow(id: "plan-detail", value: row.id) }
     }
 }

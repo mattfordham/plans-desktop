@@ -1,30 +1,15 @@
 import SwiftUI
 
-/// Surface B/C: the cross-project dashboard window (§008). A project-centric
-/// **card dashboard** with a collapsible plan-detail panel:
+/// Surface B/C: the cross-project dashboard window (§008). A pure, full-width
+/// **card dashboard**: a `ScrollView` + `LazyVGrid` of `ProjectCard`s, one per
+/// registered project, recency-sorted (`sortByStaleness`, most-recently-seen
+/// first). Each card shows the project name, a per-status count summary, and its
+/// outstanding (non-completed) plan rows.
 ///
-/// - **Content (primary, default = full-width):** a `ScrollView` + `LazyVGrid`
-///   of `ProjectCard`s, one per registered project, recency-sorted
-///   (`sortByStaleness`, most-recently-seen first). Each card shows the project
-///   name, a per-status count summary, and its outstanding (non-completed) plan
-///   rows. Tapping a plan row selects it. This is the DEFAULT view — pure cards,
-///   no detail pane.
-/// - **Detail (right, collapsed by default):** the selected plan's rendered body
-///   — title, project + status line, and each `## ` section as markdown, with
-///   the `## How` section as a read-only checklist (never interactive, §2). The
-///   column is hidden until a plan is clicked, and a "Close" control returns to
-///   the pure card view.
-///
-/// The "closed by default, opens on click, closable" behavior is achieved by
-/// CONDITIONAL COMPOSITION rather than `NavigationSplitView`'s column-visibility
-/// enum: a two-column split's visibility enum (`.doubleColumn` / `.detailOnly`)
-/// cannot express "show only the content column," so it can't model a detail
-/// pane that is fully hidden by default. Instead the layout is an `HStack` whose
-/// detail column (an `HSplitView`-style divider + the detail renderer) is only
-/// INSERTED when `selectedRowID != nil`, animated. When nothing is selected the
-/// card grid is the sole, full-width view (the pure dashboard); clicking a plan
-/// inserts the detail column; the Close control clears `selectedRowID` and
-/// removes it again. See Assumptions for why.
+/// Tapping a plan row opens that plan's detail in a SEPARATE WINDOW (§011, via
+/// `ProjectCard`'s `openWindow(id: "plan-detail", value:)`) rather than an
+/// inline drawer — this window has no detail pane, no `HSplitView`, and holds no
+/// selection state.
 ///
 /// The view ONLY reads from the injected `PlansStore` — it never writes,
 /// creates, moves, or deletes any `.plans/` data (§2 read-only).
@@ -45,11 +30,6 @@ struct BrowserWindow: View {
     /// The padding around the grid content inside the scroll view.
     static let gridPadding: CGFloat = 16
 
-    /// The id of the currently selected plan row across ALL projects' active
-    /// rows, or `nil` when nothing is selected (the default: detail collapsed,
-    /// pure card view).
-    @State private var selectedRowID: TaskRow.ID?
-
     /// The measured available content width of the card grid's scroll viewport,
     /// fed by a `GeometryReader` width probe (see `cardGrid`). Drives the
     /// responsive column count. `0` until the first layout pass measures it.
@@ -68,47 +48,11 @@ struct BrowserWindow: View {
         BrowserViewModel.sortByStaleness(store.projects)
     }
 
-    /// The currently selected row resolved from `selectedRowID` by scanning
-    /// EVERY project's active rows (not a single drilled-down project, which no
-    /// longer exists). `nil` when nothing is selected or the prior selection
-    /// closed/disappeared.
-    private var selectedRow: TaskRow? {
-        guard let id = selectedRowID else { return nil }
-        return store.projects
-            .flatMap { BrowserViewModel.activeRows($0) }
-            .first { $0.id == id }
-    }
-
     var body: some View {
-        // The card grid is always present. When a plan is selected, the detail
-        // pane is shown beside it in a user-resizable `HSplitView`; otherwise the
-        // grid is the sole, full-width view (the default pure-dashboard state).
-        //
-        // The detail pane is kept as a single, stably-identified subview (the
-        // `if` only toggles between the grid-only `HStack` and the split) so
-        // switching from one plan to another does NOT tear down and rebuild the
-        // detail column — only its content rebuilds, which keeps plan-switching
-        // responsive instead of re-creating the whole pane each time.
-        Group {
-            if selectedRow != nil {
-                HSplitView {
-                    // The grid is the flexible side (grows/shrinks with the
-                    // window and the divider). The detail pane carries a bounded
-                    // min…max range plus a modest ideal, so the divider has real
-                    // slack to drag (a maxWidth-less, greedy grid pane would pin
-                    // the divider and make it un-draggable) and the pane opens at
-                    // a sensible width rather than overly wide.
-                    cardGrid
-                        .frame(minWidth: 400, maxWidth: .infinity)
-                    detail
-                        .frame(minWidth: 300, idealWidth: 340, maxWidth: 520)
-                }
-            } else {
-                cardGrid
-                    .frame(maxWidth: .infinity)
-            }
-        }
-        .frame(minWidth: 480, minHeight: 520)
+        // A pure, full-width card dashboard. Tapping a plan row opens that plan's
+        // detail in a separate window (§011); this window has no detail pane.
+        cardGrid
+            .frame(minWidth: 480, minHeight: 520)
     }
 
     // MARK: - Content: the recency-sorted card grid (dashboard)
@@ -150,7 +94,7 @@ struct BrowserWindow: View {
                         // re-introduce the stretch. The `.id` stays on this wrapper
                         // so the ScrollViewReader drill-down still targets the cell.
                         VStack(spacing: 0) {
-                            ProjectCard(project: project, selectedRowID: $selectedRowID)
+                            ProjectCard(project: project)
                             Spacer(minLength: 0)
                         }
                         .id(project.projectPath)
@@ -180,8 +124,7 @@ struct BrowserWindow: View {
             }
             // §004 drill-down handoff: when the menu bar set a target project
             // (`store.selectedProjectPath`) before opening this window, anchor the
-            // grid to that project's card. Pure scroll — never opens the detail
-            // panel (`selectedRowID` stays nil) and never mutates `.plans/` (§2).
+            // grid to that project's card. Pure scroll — never mutates `.plans/` (§2).
             .onAppear { scrollToSelectedProject(proxy) }
             .onChange(of: store.selectedProjectPath) { _, _ in
                 scrollToSelectedProject(proxy)
@@ -190,157 +133,15 @@ struct BrowserWindow: View {
     }
 
     /// Scrolls the card grid to `store.selectedProjectPath`'s card if it matches a
-    /// live project. The card's `.id(projectPath)` is the scroll target. Does NOT
-    /// touch `selectedRowID` (detail stays collapsed) and performs no writes. On
-    /// `.onAppear` the grid may not have laid out yet, so the scroll is also
-    /// dispatched to the next runloop tick to reliably anchor on first paint.
+    /// live project. The card's `.id(projectPath)` is the scroll target. Performs
+    /// no writes. On `.onAppear` the grid may not have laid out yet, so the scroll
+    /// is also dispatched to the next runloop tick to reliably anchor on first paint.
     private func scrollToSelectedProject(_ proxy: ScrollViewProxy) {
         guard let path = store.selectedProjectPath,
               store.projects.contains(where: { $0.projectPath == path }) else { return }
         proxy.scrollTo(path, anchor: .top)
         DispatchQueue.main.async {
             proxy.scrollTo(path, anchor: .top)
-        }
-    }
-
-    // MARK: - Right: the selected task's rendered body
-
-    /// The right pane: the selected task's title, a status line, and its `## `
-    /// sections rendered as markdown (the `## How` section rendered as a read-
-    /// only checklist). Shows a muted placeholder when nothing is selected.
-    @ViewBuilder
-    private var detail: some View {
-        if let row = selectedRow {
-            VStack(alignment: .leading, spacing: 0) {
-                // The Close control: collapses the detail column back to the
-                // pure card view by clearing the selection. Inline (not a
-                // toolbar) since the detail isn't hosted in a NavigationStack.
-                HStack {
-                    Spacer()
-                    Button {
-                        selectedRowID = nil
-                    } label: {
-                        Label("Close", systemImage: "xmark")
-                            .labelStyle(.titleAndIcon)
-                    }
-                    .buttonStyle(.borderless)
-                    .help("Close the plan detail")
-                }
-                .padding(.horizontal, 12)
-                .padding(.top, 10)
-
-                ScrollView {
-                    VStack(alignment: .leading, spacing: 16) {
-                        detailHeader(row)
-                        ForEach(Array(row.task.sections.enumerated()), id: \.offset) { _, section in
-                            sectionView(section)
-                        }
-                    }
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(20)
-                }
-                .textSelection(.enabled)
-            }
-        } else {
-            VStack {
-                Text("Select a plan")
-                    .foregroundStyle(.secondary)
-            }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
-        }
-    }
-
-    /// The detail header: the title as a prominent heading, the owning project's
-    /// name (since there is no longer a selected sidebar project for context),
-    /// plus a status line (the type badge and the status's `filterLabel`).
-    private func detailHeader(_ row: TaskRow) -> some View {
-        VStack(alignment: .leading, spacing: 4) {
-            Text(row.projectName)
-                .font(.body)
-                .foregroundStyle(.secondary)
-
-            Text(row.title ?? "(untitled)")
-                .font(.title)
-                .fontWeight(.semibold)
-
-            HStack(spacing: 6) {
-                // The status icon + color (blocked takes precedence), matching
-                // the cards and the menu-bar glance via the same `symbolName`.
-                let indicator = row.indicator
-                Image(systemName: indicator.symbolName)
-                    .imageScale(.medium)
-                    .foregroundStyle(indicator.color)
-                    .frame(width: 20, alignment: .center)
-                if row.task.isBlocked {
-                    Text("Blocked")
-                        .foregroundStyle(TaskStatusIndicator.blockedColor)
-                } else if let status = row.task.status {
-                    Text(status.filterLabel)
-                }
-                if let type = row.type {
-                    Text("·").foregroundStyle(.secondary)
-                    Text("[\(type.label)]")
-                }
-            }
-            .font(.body)
-            .foregroundStyle(.secondary)
-        }
-    }
-
-    /// Renders one `## ` section: its heading, then its body. The `## How`
-    /// section is rendered specially as a read-only checklist; all others render
-    /// their body as markdown paragraphs.
-    @ViewBuilder
-    private func sectionView(_ section: TaskSection) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text(section.heading)
-                .font(.headline)
-
-            if section.heading == "How" {
-                howChecklist(section.body)
-            } else {
-                markdownBody(section.body)
-            }
-        }
-    }
-
-    /// Renders a section body as markdown, one paragraph at a time. The body is
-    /// split on blank lines; each paragraph is parsed with
-    /// `AttributedString(markdown:)`, falling back to plain `Text` when parsing
-    /// fails or yields nil. Performs no writes — purely presentational.
-    @ViewBuilder
-    private func markdownBody(_ body: String) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
-            ForEach(Array(BrowserViewModel.paragraphs(body).enumerated()), id: \.offset) { _, paragraph in
-                markdownParagraph(paragraph)
-            }
-        }
-    }
-
-    /// Renders a single paragraph as markdown, tolerating parse failures by
-    /// falling back to plain text. Uses an options value that does not throw on
-    /// the default markdown grammar; the whole parse is wrapped in `try?`.
-    private func markdownParagraph(_ paragraph: String) -> Text {
-        let options = AttributedString.MarkdownParsingOptions(
-            interpretedSyntax: .inlineOnlyPreservingWhitespace
-        )
-        if let attributed = try? AttributedString(markdown: paragraph, options: options) {
-            return Text(attributed)
-        }
-        return Text(paragraph)
-    }
-
-    /// Renders the `## How` body as a READ-ONLY checklist. Lines matching
-    /// `- [ ]` / `- [x]` / `- [X]` become a `Label` with `square` /
-    /// `checkmark.square`; the checkbox prefix is stripped from the step text.
-    /// These are never interactive (§2): no `Toggle`, no `Button`, no binding,
-    /// no writes.
-    @ViewBuilder
-    private func howChecklist(_ body: String) -> some View {
-        VStack(alignment: .leading, spacing: 6) {
-            ForEach(Array(BrowserViewModel.howSteps(body).enumerated()), id: \.offset) { _, step in
-                Label(step.text, systemImage: step.done ? "checkmark.square" : "square")
-            }
         }
     }
 }
@@ -398,6 +199,18 @@ enum BrowserViewModel {
     /// `TaskRow`s carrying the owning project identity. This helper does NOT
     /// re-sort — it preserves `TaskParser`'s order — and performs no I/O or
     /// SwiftUI work.
+    /// Resolves a composite row id to its `TaskRow` by scanning EVERY project's
+    /// active rows (the same cross-project lookup the browser window and the
+    /// standalone plan-detail window both need). Flattens `activeRows` over all
+    /// projects and returns the first row whose `id` matches; `nil` when no
+    /// active row across any project matches (e.g. a completed/closed task or a
+    /// project that disappeared). Pure value work — no I/O, no SwiftUI.
+    static func resolveRow(in projects: [ProjectTasks], id: TaskRow.ID) -> TaskRow? {
+        projects
+            .flatMap { activeRows($0) }
+            .first { $0.id == id }
+    }
+
     static func activeRows(_ project: ProjectTasks) -> [TaskRow] {
         project.activeTasks.map { task in
             TaskRow(
