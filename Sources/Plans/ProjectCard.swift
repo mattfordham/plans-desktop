@@ -90,13 +90,13 @@ struct ProjectCard: View {
                 HStack(spacing: 4) {
                     Image(systemName: entry.status.symbolName)
                         .imageScale(.large)
-                        // Zero-count statuses dim to 25% white so they read as
+                        // Zero-count statuses dim to 10% white so they read as
                         // present-but-empty; non-zero keep the vivid glance hue.
-                        .foregroundStyle(entry.count == 0 ? Color.white.opacity(0.25) : entry.status.glanceColor)
+                        .foregroundStyle(entry.count == 0 ? Color.white.opacity(0.1) : entry.status.glanceColor)
                         .frame(width: 20, alignment: .center)
                     Text("\(entry.count)")
                         .font(.body)
-                        .foregroundStyle(entry.count == 0 ? Color.white.opacity(0.25) : Color.secondary)
+                        .foregroundStyle(entry.count == 0 ? Color.white.opacity(0.1) : Color.secondary)
                 }
             }
         }
