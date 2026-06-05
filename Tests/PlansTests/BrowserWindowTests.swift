@@ -301,4 +301,41 @@ final class BrowserWindowTests: XCTestCase {
             ["first para line one\nfirst para line two", "second para", "third"]
         )
     }
+
+    // MARK: - columnCount (responsive grid)
+
+    /// A narrow viewport (300pt) fits zero full `cardMinWidth` columns by the raw
+    /// formula, but the `max(1, …)` floor guarantees a single column so the grid
+    /// is never empty. usable = 300 - 32 = 268; per-column footprint = 400 + 16 =
+    /// 416; 268 / 416 = 0 → max(1, 0) = 1.
+    func testColumnCountNarrowWidthYieldsOneColumn() {
+        XCTAssertEqual(BrowserWindow.columnCount(forWidth: 300), 1)
+    }
+
+    /// The floor holds even at a tiny / degenerate width (50pt): the raw quotient
+    /// is 0 (or could go negative once padding exceeds the width), yet the column
+    /// count never drops below 1.
+    func testColumnCountFloorHoldsAtTinyWidth() {
+        XCTAssertEqual(BrowserWindow.columnCount(forWidth: 50), 1)
+    }
+
+    /// At the legacy reference width (820pt) the new 400pt card min yields a
+    /// SINGLE column. usable = 820 - 32 = 788; per-column footprint = 400 + 16 =
+    /// 416; 788 / 416 = 1.89 → Int = 1 → max(1, 1) = 1. (Pre-400 this was 2; the
+    /// window can now shrink below 820 anyway, so 820 is no longer a floor.)
+    func testColumnCountAtLegacyReferenceWidthYieldsOneColumn() {
+        XCTAssertEqual(BrowserWindow.columnCount(forWidth: 820), 1)
+    }
+
+    /// A roomier viewport (1000pt) yields EXACTLY 2 columns under the 400pt card
+    /// min. usable = 1000 - 32 = 968; 968 / 416 = 2.32 → Int = 2 → max(1, 2) = 2.
+    func testColumnCountAtRoomyWidthYieldsTwoColumns() {
+        XCTAssertEqual(BrowserWindow.columnCount(forWidth: 1000), 2)
+    }
+
+    /// A wide viewport (2000pt) reflows to 4 columns. usable = 2000 - 32 = 1968;
+    /// 1968 / 416 = 4.73 → Int = 4 → max(1, 4) = 4.
+    func testColumnCountWideWidthYieldsFourColumns() {
+        XCTAssertEqual(BrowserWindow.columnCount(forWidth: 2000), 4)
+    }
 }

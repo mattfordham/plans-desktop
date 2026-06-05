@@ -31,10 +31,37 @@ import SwiftUI
 struct BrowserWindow: View {
     @Environment(PlansStore.self) private var store
 
+    // MARK: - Layout constants (single source of truth for the grid math)
+
+    /// The responsive minimum card width. The column count is derived by fitting
+    /// as many `cardMinWidth`-wide columns (plus `gridSpacing` gutters) into the
+    /// available content width as will fit. Low-confidence estimate (see §009
+    /// Assumptions) to confirm at the observation step.
+    static let cardMinWidth: CGFloat = 400
+
+    /// The inter-column / inter-row spacing of the grid.
+    static let gridSpacing: CGFloat = 16
+
+    /// The padding around the grid content inside the scroll view.
+    static let gridPadding: CGFloat = 16
+
     /// The id of the currently selected plan row across ALL projects' active
     /// rows, or `nil` when nothing is selected (the default: detail collapsed,
     /// pure card view).
     @State private var selectedRowID: TaskRow.ID?
+
+    /// The measured available content width of the card grid's scroll viewport,
+    /// fed by a `GeometryReader` width probe (see `cardGrid`). Drives the
+    /// responsive column count. `0` until the first layout pass measures it.
+    @State private var gridWidth: CGFloat = 0
+
+    /// Pure width → column-count function: fits as many `cardMinWidth` columns
+    /// (plus a `gridSpacing` gutter each) into the padded content width as will
+    /// fit, with a floor of 1. No side effects and no view-state reads, so it is
+    /// directly unit-testable (segment 2) without instantiating the view.
+    static func columnCount(forWidth width: CGFloat) -> Int {
+        max(1, Int((width - 2 * gridPadding) / (cardMinWidth + gridSpacing)))
+    }
 
     /// The projects sorted by staleness (recency) for the card grid.
     private var sortedProjects: [ProjectTasks] {
@@ -81,7 +108,7 @@ struct BrowserWindow: View {
                     .frame(maxWidth: .infinity)
             }
         }
-        .frame(minWidth: 820, minHeight: 520)
+        .frame(minWidth: 480, minHeight: 520)
     }
 
     // MARK: - Content: the recency-sorted card grid (dashboard)
@@ -94,22 +121,57 @@ struct BrowserWindow: View {
         ScrollViewReader { proxy in
             ScrollView {
                 LazyVGrid(
-                    // Three equal flexible columns → each card is ~1/3 of the
-                    // available width, growing/shrinking with the window and the
-                    // split divider rather than packing by a fixed minimum.
+                    // Responsive equal-flexible columns: the count is derived from
+                    // the measured viewport width (`gridWidth`) via the pure
+                    // `columnCount(forWidth:)` helper, so cards reflow 1→2→3→4… as
+                    // the window/split divider resizes while still sharing width
+                    // evenly. LazyVGrid sizes each cell to its ROW's max height, so
+                    // each card is wrapped in a top-anchor VStack + trailing Spacer
+                    // (see the ForEach below) to keep the card content-sized and
+                    // pinned to the top of a taller cell rather than stretched.
+                    // (`alignment:` here is HORIZONTAL only and stays at the
+                    // default `.center`; cards fill their column via maxWidth so it
+                    // has no visible effect.)
                     columns: Array(
-                        repeating: GridItem(.flexible(), spacing: 16),
-                        count: 3
+                        repeating: GridItem(.flexible(), spacing: Self.gridSpacing),
+                        count: BrowserWindow.columnCount(forWidth: gridWidth)
                     ),
-                    spacing: 16
+                    spacing: Self.gridSpacing
                 ) {
                     ForEach(sortedProjects, id: \.projectPath) { project in
-                        ProjectCard(project: project, selectedRowID: $selectedRowID)
-                            .id(project.projectPath)
+                        // Top-anchor wrapper: LazyVGrid sizes every cell in a row
+                        // to the row's max height, which would otherwise stretch a
+                        // short card's background/border to fill the whole cell.
+                        // Keeping the card content-sized and pairing it with a
+                        // trailing `Spacer(minLength: 0)` lets the spacer absorb the
+                        // extra cell height so the card's chrome hugs its content
+                        // and pins to the TOP of the cell. ProjectCard's own frame
+                        // intentionally sets NO maxHeight — adding one here would
+                        // re-introduce the stretch. The `.id` stays on this wrapper
+                        // so the ScrollViewReader drill-down still targets the cell.
+                        VStack(spacing: 0) {
+                            ProjectCard(project: project, selectedRowID: $selectedRowID)
+                            Spacer(minLength: 0)
+                        }
+                        .id(project.projectPath)
                     }
                 }
-                .padding(16)
+                .padding(Self.gridPadding)
             }
+            // Width-probe approach (low-confidence layout choice, see §009
+            // Assumptions): a zero-impact `GeometryReader` lives in the
+            // ScrollView's `.background` so it measures the VIEWPORT width without
+            // contributing to the scroll content's intrinsic height (avoiding the
+            // greedy-GeometryReader-in-ScrollView zero-height/layout-loop trap).
+            // Only the width is read and pushed into `gridWidth` via a preference
+            // key; the column count is the sole derived value.
+            .background(
+                GeometryReader { geo in
+                    Color.clear
+                        .preference(key: GridWidthKey.self, value: geo.size.width)
+                }
+            )
+            .onPreferenceChange(GridWidthKey.self) { gridWidth = $0 }
             .overlay {
                 if sortedProjects.isEmpty {
                     Text("No projects")
@@ -280,6 +342,18 @@ struct BrowserWindow: View {
                 Label(step.text, systemImage: step.done ? "checkmark.square" : "square")
             }
         }
+    }
+}
+
+/// Carries the card grid's measured viewport width up from a `GeometryReader`
+/// width probe (in `cardGrid`'s `.background`) to `BrowserWindow.gridWidth`,
+/// keeping the width read out of the scroll content's vertical layout so it
+/// can't collapse the grid or trip a layout loop. Reduces by taking the latest
+/// (max) reported width.
+private struct GridWidthKey: PreferenceKey {
+    static let defaultValue: CGFloat = 0
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        value = max(value, nextValue())
     }
 }
 
