@@ -130,6 +130,12 @@ struct ProjectTasks {
     /// The project's display name — the last path component of `projectPath`.
     let projectName: String
 
+    /// The registry `lastSeen` value, carried verbatim as the raw ISO string
+    /// (parsing to a `Date` is deferred to sort time in the browser view model,
+    /// keeping this Foundation-only type free of date interpretation). `""` when
+    /// no `lastSeen` was supplied (e.g. older call sites / tests).
+    let lastSeen: String
+
     /// All parsed tasks for the project (pending + completed), in directory-scan
     /// order (`pending/` then `completed/`, each sorted by filename).
     let tasks: [Task]
@@ -182,7 +188,12 @@ struct TaskParser {
     /// first, then each task's `isBlocked` is computed — `true` when ANY id in
     /// its `**Blocked by:**` list is NOT present among the completed ids
     /// (§5.5 step 5).
-    func parseProject(at projectPath: String) -> ProjectTasks {
+    ///
+    /// `lastSeen` is the registry staleness signal carried through verbatim
+    /// (defaulting to `""` so call sites/tests that omit it still compile). It is
+    /// stored raw on `ProjectTasks`; the ISO→`Date` parse happens at sort time in
+    /// the browser view model, keeping this parser Foundation-only.
+    func parseProject(at projectPath: String, lastSeen: String = "") -> ProjectTasks {
         let plansDir = URL(fileURLWithPath: projectPath)
             .appendingPathComponent(".plans")
         let pendingDir = plansDir.appendingPathComponent("pending")
@@ -229,6 +240,7 @@ struct TaskParser {
         return ProjectTasks(
             projectPath: projectPath,
             projectName: projectName,
+            lastSeen: lastSeen,
             tasks: tasks,
             counts: counts,
             activeTasks: activeTasks

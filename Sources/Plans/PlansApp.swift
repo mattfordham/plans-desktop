@@ -38,10 +38,15 @@ struct PlansApp: App {
         // handle taps reliably (the default `.menu` style does not).
         .menuBarExtraStyle(.window)
 
-        // Surface B — cross-project browser window
+        // Surface B — cross-project browser window. `.defaultLaunchBehavior(.presented)`
+        // shows it automatically at launch so the browser is visible immediately
+        // rather than only after a menu-bar drill-down; the delegate's one-shot
+        // `reload()` has already run, so it paints with live data. With no
+        // pre-selection it opens in the default cross-project state.
         Window("Plans", id: "browser") {
             BrowserWindow()
                 .environment(store)
         }
+        .defaultLaunchBehavior(.presented)
     }
 }

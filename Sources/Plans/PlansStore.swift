@@ -43,7 +43,7 @@ final class PlansStore {
     /// `.plans/` directories yield empty results rather than crashing).
     func reload() {
         projects = registryReader.readProjects().map { project in
-            taskParser.parseProject(at: project.path)
+            taskParser.parseProject(at: project.path, lastSeen: project.lastSeen)
         }
     }
 }
