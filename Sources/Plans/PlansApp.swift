@@ -30,9 +30,14 @@ struct PlansApp: App {
     private var store: PlansStore { appDelegate.store }
 
     var body: some Scene {
-        // Surface A — menu bar "glance"
-        MenuBarExtra("Plans", systemImage: "list.bullet") {
+        // Surface A — menu bar "glance". The `content:label:` overload lets the
+        // icon-space label (`MenuBarLabel`) render a live, colored count summary
+        // that updates with the store's 5s poll, instead of a static icon.
+        MenuBarExtra {
             MenuBarView()
+                .environment(store)
+        } label: {
+            MenuBarLabel()
                 .environment(store)
         }
         // A free-floating panel so the custom dotted, tappable rows render and

@@ -24,6 +24,31 @@ final class PlansStore {
     /// This is the Surface A → Surface B handoff seam read by task #005.
     var selectedProjectPath: String?
 
+    /// The statuses surfaced in the menu bar icon space, in a fresh order that
+    /// leads with actively-running work: in-progress → review → in-review. This
+    /// is INTENTIONALLY distinct from `TaskStatus.glanceOrder` (the TUI
+    /// dashboard order used by the drop-down rows) and is local to the icon
+    /// space, where the goal is at-a-glance awareness of work in motion.
+    private static let iconSpaceOrder: [TaskStatus] = [
+        .inProgress, .review, .inReview,
+    ]
+
+    /// The per-status totals shown in the menu bar icon label, aggregated across
+    /// every live project. Only the three `iconSpaceOrder` statuses are
+    /// considered, in that order; any whose total across all projects is 0 is
+    /// omitted (so an empty array means "nothing in motion" and the label falls
+    /// back to the bare icon). Reuses each `project.counts[status]` verbatim —
+    /// no new parsing happens here.
+    var iconSpaceCounts: [(status: TaskStatus, count: Int)] {
+        Self.iconSpaceOrder.compactMap { status in
+            let total = projects.reduce(0) { sum, project in
+                sum + (project.counts[status] ?? 0)
+            }
+            guard total > 0 else { return nil }
+            return (status, total)
+        }
+    }
+
     /// The registry reader used by `reload()` to discover live projects.
     @ObservationIgnored private let registryReader: RegistryReader
 

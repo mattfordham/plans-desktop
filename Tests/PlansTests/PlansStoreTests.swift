@@ -232,4 +232,122 @@ final class PlansStoreTests: XCTestCase {
         store.stopPolling()
         XCTAssertFalse(store.isPolling)
     }
+
+    // MARK: - iconSpaceCounts
+
+    func testIconSpaceCountsSumsAcrossMultipleProjects() throws {
+        let alpha = try makeProjectDir(name: "alpha")
+        let beta = try makeProjectDir(name: "beta")
+        // alpha: 1 in-progress, 1 review
+        try writeTaskFile(
+            projectDir: alpha,
+            filename: "001-a.md",
+            text: "# A\n\n**Status:** in-progress",
+            in: "pending"
+        )
+        try writeTaskFile(
+            projectDir: alpha,
+            filename: "002-a.md",
+            text: "# A2\n\n**Status:** review",
+            in: "pending"
+        )
+        // beta: 2 in-progress, 1 in-review
+        try writeTaskFile(
+            projectDir: beta,
+            filename: "001-b.md",
+            text: "# B\n\n**Status:** in-progress",
+            in: "pending"
+        )
+        try writeTaskFile(
+            projectDir: beta,
+            filename: "002-b.md",
+            text: "# B2\n\n**Status:** in-progress",
+            in: "pending"
+        )
+        try writeTaskFile(
+            projectDir: beta,
+            filename: "003-b.md",
+            text: "# B3\n\n**Status:** in-review",
+            in: "pending"
+        )
+
+        let reader = try makeReader(projectPaths: [alpha.path, beta.path])
+        let store = PlansStore(registryReader: reader)
+        store.reload()
+
+        let entries = store.iconSpaceCounts
+        XCTAssertEqual(entries.map(\.status), [.inProgress, .review, .inReview])
+        XCTAssertEqual(entries.map(\.count), [3, 1, 1])
+    }
+
+    func testIconSpaceCountsOmitsZeroCountStatuses() throws {
+        let projectDir = try makeProjectDir(name: "alpha")
+        // Only review tasks; in-progress and in-review absent.
+        try writeTaskFile(
+            projectDir: projectDir,
+            filename: "001-a.md",
+            text: "# A\n\n**Status:** review",
+            in: "pending"
+        )
+        // Plus statuses outside the icon-space set, which must not appear.
+        try writeTaskFile(
+            projectDir: projectDir,
+            filename: "002-a.md",
+            text: "# A2\n\n**Status:** pending",
+            in: "pending"
+        )
+        try writeTaskFile(
+            projectDir: projectDir,
+            filename: "003-a.md",
+            text: "# A3\n\n**Status:** completed",
+            in: "completed"
+        )
+
+        let reader = try makeReader(projectPaths: [projectDir.path])
+        let store = PlansStore(registryReader: reader)
+        store.reload()
+
+        let entries = store.iconSpaceCounts
+        XCTAssertEqual(entries.map(\.status), [.review])
+        XCTAssertEqual(entries.map(\.count), [1])
+    }
+
+    func testIconSpaceCountsOrdersInProgressReviewInReview() throws {
+        let projectDir = try makeProjectDir(name: "alpha")
+        try writeTaskFile(
+            projectDir: projectDir,
+            filename: "001-a.md",
+            text: "# A\n\n**Status:** in-review",
+            in: "pending"
+        )
+        try writeTaskFile(
+            projectDir: projectDir,
+            filename: "002-a.md",
+            text: "# A2\n\n**Status:** review",
+            in: "pending"
+        )
+        try writeTaskFile(
+            projectDir: projectDir,
+            filename: "003-a.md",
+            text: "# A3\n\n**Status:** in-progress",
+            in: "pending"
+        )
+
+        let reader = try makeReader(projectPaths: [projectDir.path])
+        let store = PlansStore(registryReader: reader)
+        store.reload()
+
+        XCTAssertEqual(
+            store.iconSpaceCounts.map(\.status),
+            [.inProgress, .review, .inReview]
+        )
+    }
+
+    func testIconSpaceCountsIsEmptyForEmptyStore() throws {
+        let reader = try makeReader(projectPaths: [])
+        let store = PlansStore(registryReader: reader)
+        store.reload()
+
+        XCTAssertTrue(store.iconSpaceCounts.isEmpty)
+    }
 }
