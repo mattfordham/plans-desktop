@@ -154,4 +154,82 @@ final class PlansStoreTests: XCTestCase {
 
         XCTAssertEqual(store.projects.count, 0)
     }
+
+    // MARK: - startPolling() / stopPolling()
+
+    func testStartPollingPerformsInitialLoadSynchronously() throws {
+        let projectDir = try makeProjectDir(name: "alpha")
+        try writeTaskFile(
+            projectDir: projectDir,
+            filename: "001-first.md",
+            text: "# First\n\n**Status:** pending",
+            in: "pending"
+        )
+
+        let reader = try makeReader(projectPaths: [projectDir.path])
+        let store = PlansStore(registryReader: reader)
+        // No timer firing involved: the load must happen synchronously.
+        store.startPolling()
+        defer { store.stopPolling() }
+
+        XCTAssertEqual(store.projects.count, 1)
+        let project = try XCTUnwrap(store.projects.first)
+        XCTAssertEqual(project.projectName, "alpha")
+        XCTAssertEqual(project.counts[.pending], 1)
+    }
+
+    func testReloadReflectsFilesystemChangeAfterInitialLoad() throws {
+        let projectDir = try makeProjectDir(name: "alpha")
+        try writeTaskFile(
+            projectDir: projectDir,
+            filename: "001-first.md",
+            text: "# First\n\n**Status:** pending",
+            in: "pending"
+        )
+
+        let reader = try makeReader(projectPaths: [projectDir.path])
+        let store = PlansStore(registryReader: reader)
+        store.startPolling()
+        defer { store.stopPolling() }
+
+        let initial = try XCTUnwrap(store.projects.first)
+        XCTAssertEqual(initial.counts[.pending], 1)
+
+        // Simulate a live `.plans/` change, then re-read directly (rather than
+        // waiting on the wall-clock timer fire).
+        try writeTaskFile(
+            projectDir: projectDir,
+            filename: "002-second.md",
+            text: "# Second\n\n**Status:** completed",
+            in: "completed"
+        )
+        store.reload()
+
+        let updated = try XCTUnwrap(store.projects.first)
+        XCTAssertEqual(updated.counts[.pending], 1)
+        XCTAssertEqual(updated.counts[.completed], 1)
+    }
+
+    func testStartPollingInstallsTimerAndStopPollingInvalidatesIt() throws {
+        let projectDir = try makeProjectDir(name: "alpha")
+        let reader = try makeReader(projectPaths: [projectDir.path])
+        let store = PlansStore(registryReader: reader)
+
+        XCTAssertFalse(store.isPolling)
+
+        store.startPolling()
+        XCTAssertTrue(store.isPolling)
+
+        store.stopPolling()
+        XCTAssertFalse(store.isPolling)
+    }
+
+    func testStopPollingIsSafeWhenNotPolling() throws {
+        let reader = try makeReader(projectPaths: [])
+        let store = PlansStore(registryReader: reader)
+
+        // Should be a no-op rather than crashing.
+        store.stopPolling()
+        XCTAssertFalse(store.isPolling)
+    }
 }
