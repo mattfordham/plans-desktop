@@ -1,3 +1,5 @@
 .plans
 .build/
 Plans.app/
+
+.worktrees/
