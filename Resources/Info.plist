@@ -8,6 +8,8 @@
     <string>local.plans-cc.viewer</string>
     <key>CFBundleName</key>
     <string>Plans</string>
+    <key>CFBundleIconFile</key>
+    <string>Plans</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>NSPrincipalClass</key>

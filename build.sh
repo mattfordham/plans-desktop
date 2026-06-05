@@ -16,6 +16,11 @@ mkdir -p "$APP/Contents/MacOS"
 # Copy the static Info.plist into the bundle.
 cp Resources/Info.plist "$APP/Contents/Info.plist"
 
+# Copy the app icon into the bundle's Resources directory. CFBundleIconFile in
+# Info.plist points at "Plans", which macOS resolves to Plans.icns here.
+mkdir -p "$APP/Contents/Resources"
+cp Resources/Plans.icns "$APP/Contents/Resources/Plans.icns"
+
 # Symlink the release executable into the bundle (simplest for local dev;
 # `open Plans.app` works fine with a symlinked binary for unsigned apps).
 ln -sf "$(pwd)/.build/release/Plans" "$APP/Contents/MacOS/Plans"
