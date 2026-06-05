@@ -47,6 +47,15 @@ struct ProjectCard: View {
             header
             Divider()
             body(for: rows)
+            // Top-anchor: LazyVGrid sizes every cell to its ROW's max height, so
+            // a short card handed a taller cell would let this VStack distribute
+            // the slack and drift its content toward vertical center. A trailing
+            // `Spacer(minLength: 0)` absorbs the extra height so header + divider
+            // + plan rows stay grouped at the TOP. The card's frame deliberately
+            // sets NO maxHeight (below), so a content-sized card still hugs its
+            // content — the Spacer only does work when the card is given extra
+            // height. Mirrors the wrapper Spacer in `BrowserWindow.cardGrid`.
+            Spacer(minLength: 0)
         }
         .padding(14)
         .frame(maxWidth: .infinity, alignment: .leading)
