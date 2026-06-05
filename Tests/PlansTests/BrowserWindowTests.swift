@@ -32,12 +32,16 @@ final class BrowserWindowTests: XCTestCase {
         )
     }
 
-    /// Builds a `ProjectTasks` fixture directly with empty count/active sets.
+    /// Builds a `ProjectTasks` fixture directly. `activeTasks` defaults to empty
+    /// so staleness-only tests can ignore it; tests exercising `activeRows`
+    /// populate it explicitly (the parser pre-sorts active tasks, so the fixture
+    /// supplies them in the desired final order).
     private func makeProject(
         path: String,
         name: String,
         lastSeen: String = "",
-        tasks: [Task] = []
+        tasks: [Task] = [],
+        activeTasks: [Task] = []
     ) -> ProjectTasks {
         ProjectTasks(
             projectPath: path,
@@ -45,8 +49,17 @@ final class BrowserWindowTests: XCTestCase {
             lastSeen: lastSeen,
             tasks: tasks,
             counts: [:],
-            activeTasks: []
+            activeTasks: activeTasks
         )
+    }
+
+    /// Replicates the BrowserWindow view's cross-project selected-row resolution:
+    /// flatten every project's `activeRows` and find the row with `targetID`.
+    /// Returns `nil` when no active row across any project matches.
+    private func resolveSelectedRow(_ projects: [ProjectTasks], _ targetID: TaskRow.ID) -> TaskRow? {
+        projects
+            .flatMap { BrowserViewModel.activeRows($0) }
+            .first { $0.id == targetID }
     }
 
     // MARK: - (a) TaskType glyph + label totality
@@ -165,95 +178,103 @@ final class BrowserWindowTests: XCTestCase {
         XCTAssertEqual(sorted.map(\.projectName), ["alpha", "bravo", "charlie"])
     }
 
-    // MARK: - (c) visibleTasks cross-project filter + drill-down
+    // MARK: - (c) activeRows: one project's card rows
 
-    /// Two projects; the second reuses an id from the first to prove composite
-    /// ids stay unique.
+    /// Two projects; the second reuses task id "001" from the first to prove the
+    /// composite id (`projectPath + "/" + task.id`) disambiguates them. Each
+    /// project's `activeTasks` is supplied already non-completed and in final
+    /// order (the parser pre-sorts; `activeRows` must NOT re-sort).
     private func twoProjectFixture() -> [ProjectTasks] {
         let p1 = makeProject(
             path: "/proj1",
             name: "proj1",
-            tasks: [
+            activeTasks: [
                 makeTask(id: "001", status: .inProgress),
                 makeTask(id: "002", status: .pending),
-                makeTask(id: "003", status: nil),
             ]
         )
         let p2 = makeProject(
             path: "/proj2",
             name: "proj2",
-            tasks: [
+            activeTasks: [
                 makeTask(id: "001", status: .inProgress),
-                makeTask(id: "004", status: .completed),
             ]
         )
         return [p1, p2]
     }
 
-    func testVisibleTasksEverythingWhenNoFilters() {
-        let rows = BrowserViewModel.visibleTasks(
-            projects: twoProjectFixture(),
-            status: nil,
-            projectPath: nil
+    /// `activeRows` maps a project's `activeTasks` to `TaskRow`s in the SAME
+    /// order, with composite ids, and never re-sorts.
+    func testActiveRowsPreservesOrderWithCompositeIds() {
+        let project = makeProject(
+            path: "/p",
+            name: "p",
+            activeTasks: [
+                makeTask(id: "001", status: .inProgress),
+                makeTask(id: "002", status: .pending),
+            ]
         )
-        // Every outstanding task across both projects; the completed task (004)
-        // is omitted even under "All" — the browser never shows finished work.
-        XCTAssertEqual(
-            rows.map(\.id),
-            ["/proj1/001", "/proj1/002", "/proj1/003", "/proj2/001"]
-        )
+        let rows = BrowserViewModel.activeRows(project)
+        XCTAssertEqual(rows.map(\.id), ["/p/001", "/p/002"])
     }
 
-    func testVisibleTasksAlwaysExcludesCompletedEvenUnderAll() {
-        let rows = BrowserViewModel.visibleTasks(
-            projects: twoProjectFixture(),
-            status: nil,
-            projectPath: nil
-        )
-        XCTAssertFalse(
-            rows.contains { $0.task.status == .completed },
-            "completed tasks must never appear in the browser"
-        )
+    /// A project carrying an empty `activeTasks` yields no rows.
+    func testActiveRowsEmptyWhenNoActiveTasks() {
+        let project = makeProject(path: "/p", name: "p", activeTasks: [])
+        XCTAssertTrue(BrowserViewModel.activeRows(project).isEmpty)
     }
 
-    func testVisibleTasksStatusFilterAcrossAllProjectsExcludesNilStatus() {
-        let rows = BrowserViewModel.visibleTasks(
-            projects: twoProjectFixture(),
-            status: .inProgress,
-            projectPath: nil
+    /// `activeRows` carries the owning project's identity onto each row.
+    func testActiveRowsCarriesProjectIdentity() {
+        let project = makeProject(
+            path: "/p",
+            name: "myproj",
+            activeTasks: [makeTask(id: "001", status: .inProgress)]
         )
-        // Both projects' in-progress tasks; the nil-status task (003) excluded.
-        XCTAssertEqual(rows.map(\.id), ["/proj1/001", "/proj2/001"])
+        let row = BrowserViewModel.activeRows(project).first
+        XCTAssertEqual(row?.projectPath, "/p")
+        XCTAssertEqual(row?.projectName, "myproj")
+        XCTAssertEqual(row?.id, "/p/001")
     }
 
-    func testVisibleTasksDrillDownScopesToOneProject() {
-        let rows = BrowserViewModel.visibleTasks(
-            projects: twoProjectFixture(),
-            status: nil,
-            projectPath: "/proj2"
-        )
-        // Scoped to proj2; its completed task (004) is still omitted.
-        XCTAssertEqual(rows.map(\.id), ["/proj2/001"])
+    // MARK: - Cross-project selected-row resolution (mirrors the view)
+
+    /// The view resolves `selectedRowID` by scanning EVERY project's active rows.
+    /// A composite id belonging to the SECOND project resolves to that project's
+    /// row even though both projects share task id "001".
+    func testResolveSelectedRowFindsRowInSecondProject() {
+        let row = resolveSelectedRow(twoProjectFixture(), "/proj2/001")
+        XCTAssertEqual(row?.id, "/proj2/001")
+        XCTAssertEqual(row?.projectPath, "/proj2")
     }
 
-    func testVisibleTasksStatusAndProjectIntersection() {
-        let rows = BrowserViewModel.visibleTasks(
-            projects: twoProjectFixture(),
-            status: .inProgress,
-            projectPath: "/proj1"
-        )
-        XCTAssertEqual(rows.map(\.id), ["/proj1/001"])
+    /// The first project's "001" resolves independently of the second's.
+    func testResolveSelectedRowDisambiguatesSharedTaskIdAcrossProjects() {
+        let row = resolveSelectedRow(twoProjectFixture(), "/proj1/001")
+        XCTAssertEqual(row?.projectPath, "/proj1")
     }
 
-    func testVisibleTasksPreservesRegistryOrderNotStalenessSort() {
-        // Even with lastSeen that would reorder under sortByStaleness, the
-        // helper preserves the given array (registry) order.
-        let p1 = makeProject(path: "/old", name: "old", lastSeen: "2020-01-01T00:00:00Z",
-                             tasks: [makeTask(id: "001")])
-        let p2 = makeProject(path: "/new", name: "new", lastSeen: "2030-01-01T00:00:00Z",
-                             tasks: [makeTask(id: "002")])
-        let rows = BrowserViewModel.visibleTasks(projects: [p1, p2], status: nil, projectPath: nil)
-        XCTAssertEqual(rows.map(\.id), ["/old/001", "/new/002"])
+    /// An id present in no project's active rows resolves to `nil`.
+    func testResolveSelectedRowReturnsNilForAbsentId() {
+        XCTAssertNil(resolveSelectedRow(twoProjectFixture(), "/proj1/999"))
+    }
+
+    /// An id belonging to a completed/closed task (never in any `activeTasks`)
+    /// resolves to `nil` — the detail panel can't open on finished work.
+    func testResolveSelectedRowReturnsNilForCompletedTaskId() {
+        // p1's `tasks` includes a completed task, but `activeTasks` excludes it,
+        // so its composite id is unresolvable.
+        let p1 = makeProject(
+            path: "/proj1",
+            name: "proj1",
+            tasks: [
+                makeTask(id: "001", status: .inProgress),
+                makeTask(id: "099", status: .completed),
+            ],
+            activeTasks: [makeTask(id: "001", status: .inProgress)]
+        )
+        XCTAssertNil(resolveSelectedRow([p1], "/proj1/099"))
+        XCTAssertNotNil(resolveSelectedRow([p1], "/proj1/001"))
     }
 
     // MARK: - How checklist parsing (read-only render support)

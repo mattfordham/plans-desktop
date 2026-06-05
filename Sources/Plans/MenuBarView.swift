@@ -2,8 +2,8 @@ import SwiftUI
 
 /// Surface A content: the menu bar item's drop-down panel (the §4 "glance").
 ///
-/// Renders one row per live project showing its name and a colored dot + count
-/// for each non-zero, non-completed status, iterating `TaskStatus.glanceOrder`
+/// Renders one row per live project showing its name and a per-status icon +
+/// count for each non-zero, non-completed status, iterating `TaskStatus.glanceOrder`
 /// (the plans-cc TUI dashboard's `STAT_CARDS` order, which omits `completed`).
 /// Empty states cover both a project with no outstanding tasks and the
 /// no-projects case (§4.4 / §8.1).
@@ -62,8 +62,8 @@ struct MenuBarView: View {
     }
 }
 
-/// A single project's glance row: the project name plus a colored dot + count
-/// for every status that has a non-zero count, in `TaskStatus.glanceOrder`
+/// A single project's glance row: the project name plus a per-status icon +
+/// count for every status that has a non-zero count, in `TaskStatus.glanceOrder`
 /// (the TUI dashboard order). `completed` is excluded from that order, so
 /// finished tasks never appear. Zero-count statuses (absent from `counts` or
 /// `0`) are also omitted. A project with no outstanding tasks shows a muted
@@ -93,9 +93,10 @@ private struct ProjectGlanceRow: View {
             } else {
                 ForEach(statusCounts, id: \.status) { entry in
                     HStack(spacing: 2) {
-                        Image(systemName: "circle.fill")
-                            .font(.system(size: 7))
+                        Image(systemName: entry.status.symbolName)
+                            .imageScale(.small)
                             .foregroundStyle(entry.status.glanceColor)
+                            .frame(width: 14, alignment: .center)
                         Text("\(entry.count)")
                     }
                 }

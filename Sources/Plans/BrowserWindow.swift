@@ -1,209 +1,144 @@
 import SwiftUI
 
-/// Surface B: the cross-project browser window (§1). A 3-pane
-/// `NavigationSplitView`:
+/// Surface B/C: the cross-project dashboard window (§008). A project-centric
+/// **card dashboard** with a collapsible plan-detail panel:
 ///
-/// - **Left (sidebar):** a global status filter (All + the outstanding §5.4
-///   statuses; `completed` is omitted entirely) plus the project list sorted by
-///   staleness (`lastSeen` descending, unparseable/absent last). Selecting a
-///   project scopes the middle list to it; "All projects" returns to
-///   cross-project.
-/// - **Middle:** the flattened, filtered task list — outstanding tasks across
-///   ALL live projects (or scoped to the drilled-down project), filtered to the
-///   selected status (or all). Completed tasks never appear. Each row shows a
-///   colored type-badge dot, the task id, and the title.
-/// - **Right:** the selected task's rendered body — title, status line, and each
-///   `## ` section as markdown, with the `## How` section as a read-only
-///   checklist (never interactive, §2).
+/// - **Content (primary, default = full-width):** a `ScrollView` + `LazyVGrid`
+///   of `ProjectCard`s, one per registered project, recency-sorted
+///   (`sortByStaleness`, most-recently-seen first). Each card shows the project
+///   name, a per-status count summary, and its outstanding (non-completed) plan
+///   rows. Tapping a plan row selects it. This is the DEFAULT view — pure cards,
+///   no detail pane.
+/// - **Detail (right, collapsed by default):** the selected plan's rendered body
+///   — title, project + status line, and each `## ` section as markdown, with
+///   the `## How` section as a read-only checklist (never interactive, §2). The
+///   column is hidden until a plan is clicked, and a "Close" control returns to
+///   the pure card view.
+///
+/// The "closed by default, opens on click, closable" behavior is achieved by
+/// CONDITIONAL COMPOSITION rather than `NavigationSplitView`'s column-visibility
+/// enum: a two-column split's visibility enum (`.doubleColumn` / `.detailOnly`)
+/// cannot express "show only the content column," so it can't model a detail
+/// pane that is fully hidden by default. Instead the layout is an `HStack` whose
+/// detail column (an `HSplitView`-style divider + the detail renderer) is only
+/// INSERTED when `selectedRowID != nil`, animated. When nothing is selected the
+/// card grid is the sole, full-width view (the pure dashboard); clicking a plan
+/// inserts the detail column; the Close control clears `selectedRowID` and
+/// removes it again. See Assumptions for why.
 ///
 /// The view ONLY reads from the injected `PlansStore` — it never writes,
 /// creates, moves, or deletes any `.plans/` data (§2 read-only).
 struct BrowserWindow: View {
     @Environment(PlansStore.self) private var store
 
-    /// The selected global status filter. `nil` means "All" (no status scope).
-    @State private var selectedStatus: TaskStatus?
-
-    /// The selected project's path, or `nil` for cross-project ("All projects").
-    /// Pre-seeded from `store.selectedProjectPath` on appear so a menu-bar
-    /// drill-down lands on that project.
-    @State private var selectedProjectPath: String?
-
-    /// The id of the currently selected task row in the middle list, or `nil`
-    /// when nothing is selected (the right pane shows the placeholder).
+    /// The id of the currently selected plan row across ALL projects' active
+    /// rows, or `nil` when nothing is selected (the default: detail collapsed,
+    /// pure card view).
     @State private var selectedRowID: TaskRow.ID?
 
-    /// The projects sorted by staleness for the sidebar list.
+    /// The projects sorted by staleness (recency) for the card grid.
     private var sortedProjects: [ProjectTasks] {
         BrowserViewModel.sortByStaleness(store.projects)
     }
 
-    /// The flattened, filtered rows for the middle pane. Cross-project unless a
-    /// project is selected (drill-down); status-scoped unless "All". Order is
-    /// the store's registry order (NOT the staleness sort) so the task list is
-    /// deterministic and independent of the sidebar ordering.
-    private var visibleRows: [TaskRow] {
-        BrowserViewModel.visibleTasks(
-            projects: store.projects,
-            status: selectedStatus,
-            projectPath: selectedProjectPath
-        )
-    }
-
-    /// The currently selected row resolved from `selectedRowID` against the
-    /// current `visibleRows`. `nil` when nothing is selected or the prior
-    /// selection fell out of the filtered set.
+    /// The currently selected row resolved from `selectedRowID` by scanning
+    /// EVERY project's active rows (not a single drilled-down project, which no
+    /// longer exists). `nil` when nothing is selected or the prior selection
+    /// closed/disappeared.
     private var selectedRow: TaskRow? {
         guard let id = selectedRowID else { return nil }
-        return visibleRows.first { $0.id == id }
+        return store.projects
+            .flatMap { BrowserViewModel.activeRows($0) }
+            .first { $0.id == id }
     }
 
     var body: some View {
-        NavigationSplitView {
-            sidebar
-        } content: {
-            taskList
-        } detail: {
-            detail
+        // The card grid is always present. When a plan is selected, the detail
+        // pane is shown beside it in a user-resizable `HSplitView`; otherwise the
+        // grid is the sole, full-width view (the default pure-dashboard state).
+        //
+        // The detail pane is kept as a single, stably-identified subview (the
+        // `if` only toggles between the grid-only `HStack` and the split) so
+        // switching from one plan to another does NOT tear down and rebuild the
+        // detail column — only its content rebuilds, which keeps plan-switching
+        // responsive instead of re-creating the whole pane each time.
+        Group {
+            if selectedRow != nil {
+                HSplitView {
+                    // The grid is the flexible side (grows/shrinks with the
+                    // window and the divider). The detail pane carries a bounded
+                    // min…max range plus a modest ideal, so the divider has real
+                    // slack to drag (a maxWidth-less, greedy grid pane would pin
+                    // the divider and make it un-draggable) and the pane opens at
+                    // a sensible width rather than overly wide.
+                    cardGrid
+                        .frame(minWidth: 400, maxWidth: .infinity)
+                    detail
+                        .frame(minWidth: 300, idealWidth: 340, maxWidth: 520)
+                }
+            } else {
+                cardGrid
+                    .frame(maxWidth: .infinity)
+            }
         }
         .frame(minWidth: 820, minHeight: 520)
-        .onAppear {
-            // Honor the §004 drill-down handoff: if the menu bar pre-selected a
-            // project, land on it. Only adopt it when it matches a live project
-            // so a stale selection doesn't leave the sidebar pointing at nothing.
-            if let path = store.selectedProjectPath,
-               store.projects.contains(where: { $0.projectPath == path }) {
-                selectedProjectPath = path
-            }
-        }
     }
 
-    // MARK: - Left: status filter + project list
+    // MARK: - Content: the recency-sorted card grid (dashboard)
 
-    private var sidebar: some View {
-        List {
-            Section("Status") {
-                // "All" clears the status scope.
-                Button {
-                    selectedStatus = nil
-                } label: {
-                    statusRow(label: "All", isSelected: selectedStatus == nil)
-                }
-                .buttonStyle(.plain)
-
-                // The outstanding statuses only. `completed` is omitted entirely
-                // from the browser (it surfaces neither in the filter nor the
-                // task list), so we iterate `glanceOrder` (which excludes it).
-                // Each row shows the same status glyph + color as the task rows.
-                ForEach(TaskStatus.glanceOrder, id: \.self) { status in
-                    Button {
-                        selectedStatus = status
-                    } label: {
-                        statusRow(
-                            label: status.filterLabel,
-                            glyph: status.glanceGlyph,
-                            color: status.glanceColor,
-                            isSelected: selectedStatus == status
-                        )
+    /// The dashboard content column: a `ScrollView` + adaptive `LazyVGrid` of
+    /// `ProjectCard`s over the recency-sorted projects. Wrapped in a
+    /// `ScrollViewReader` and each card item tagged with `.id(projectPath)` so a
+    /// menu-bar drill-down (segment 4) can scroll the grid to a target project.
+    private var cardGrid: some View {
+        ScrollViewReader { proxy in
+            ScrollView {
+                LazyVGrid(
+                    // Three equal flexible columns → each card is ~1/3 of the
+                    // available width, growing/shrinking with the window and the
+                    // split divider rather than packing by a fixed minimum.
+                    columns: Array(
+                        repeating: GridItem(.flexible(), spacing: 16),
+                        count: 3
+                    ),
+                    spacing: 16
+                ) {
+                    ForEach(sortedProjects, id: \.projectPath) { project in
+                        ProjectCard(project: project, selectedRowID: $selectedRowID)
+                            .id(project.projectPath)
                     }
-                    .buttonStyle(.plain)
+                }
+                .padding(16)
+            }
+            .overlay {
+                if sortedProjects.isEmpty {
+                    Text("No projects")
+                        .foregroundStyle(.secondary)
                 }
             }
-
-            Section("Projects") {
-                // "All projects" clears the project scope (cross-project view).
-                Button {
-                    selectedProjectPath = nil
-                } label: {
-                    statusRow(
-                        label: "All projects",
-                        isSelected: selectedProjectPath == nil
-                    )
-                }
-                .buttonStyle(.plain)
-
-                ForEach(sortedProjects, id: \.projectPath) { project in
-                    Button {
-                        selectedProjectPath = project.projectPath
-                    } label: {
-                        statusRow(
-                            label: project.projectName,
-                            isSelected: selectedProjectPath == project.projectPath
-                        )
-                    }
-                    .buttonStyle(.plain)
-                }
-            }
-        }
-        .listStyle(.sidebar)
-        .navigationTitle("Plans")
-    }
-
-    /// A single sidebar row: an optional status glyph in its status color, a
-    /// label, and a checkmark when selected. A fixed-width glyph slot keeps the
-    /// labels left-aligned whether or not a glyph is present (e.g. "All").
-    private func statusRow(
-        label: String,
-        glyph: String? = nil,
-        color: Color? = nil,
-        isSelected: Bool
-    ) -> some View {
-        HStack(spacing: 8) {
-            Text(glyph ?? " ")
-                .font(.system(.body, design: .monospaced))
-                .foregroundStyle(color ?? .secondary)
-                .frame(width: 12, alignment: .center)
-            Text(label)
-            Spacer(minLength: 8)
-            if isSelected {
-                Image(systemName: "checkmark")
-                    .foregroundStyle(.secondary)
-            }
-        }
-        .contentShape(Rectangle())
-    }
-
-    // MARK: - Middle: the flattened, filtered task list
-
-    /// The middle pane: a `List(selection:)` over the cross-project (or drilled-
-    /// down) filtered rows. Each row shows the §6 type badge, the task id, and
-    /// the title. Selection drives the right detail pane.
-    private var taskList: some View {
-        List(visibleRows, selection: $selectedRowID) { row in
-            taskRow(row)
-        }
-        .navigationTitle("Tasks")
-        .overlay {
-            if visibleRows.isEmpty {
-                Text("No tasks")
-                    .foregroundStyle(.secondary)
+            // §004 drill-down handoff: when the menu bar set a target project
+            // (`store.selectedProjectPath`) before opening this window, anchor the
+            // grid to that project's card. Pure scroll — never opens the detail
+            // panel (`selectedRowID` stays nil) and never mutates `.plans/` (§2).
+            .onAppear { scrollToSelectedProject(proxy) }
+            .onChange(of: store.selectedProjectPath) { _, _ in
+                scrollToSelectedProject(proxy)
             }
         }
     }
 
-    /// A single task row: the status glyph in the status color (matching the
-    /// plans-cc TUI dashboard), the short task id (the 3-char `task.id`, NOT the
-    /// composite row id/path), an optional `[type]` tag, and the title (falling
-    /// back to "(untitled)").
-    private func taskRow(_ row: TaskRow) -> some View {
-        let indicator = row.indicator
-        return HStack(spacing: 8) {
-            Text(indicator.glyph)
-                .font(.system(.body, design: .monospaced))
-                .foregroundStyle(indicator.color)
-                .frame(width: 12, alignment: .center)
-            Text(row.task.id)
-                .font(.system(.body, design: .monospaced))
-                .foregroundStyle(.secondary)
-            if let type = row.type {
-                Text("[\(type.label)]")
-                    .font(.system(.caption, design: .monospaced))
-                    .foregroundStyle(.tertiary)
-            }
-            Text(row.title ?? "(untitled)")
-                .lineLimit(1)
+    /// Scrolls the card grid to `store.selectedProjectPath`'s card if it matches a
+    /// live project. The card's `.id(projectPath)` is the scroll target. Does NOT
+    /// touch `selectedRowID` (detail stays collapsed) and performs no writes. On
+    /// `.onAppear` the grid may not have laid out yet, so the scroll is also
+    /// dispatched to the next runloop tick to reliably anchor on first paint.
+    private func scrollToSelectedProject(_ proxy: ScrollViewProxy) {
+        guard let path = store.selectedProjectPath,
+              store.projects.contains(where: { $0.projectPath == path }) else { return }
+        proxy.scrollTo(path, anchor: .top)
+        DispatchQueue.main.async {
+            proxy.scrollTo(path, anchor: .top)
         }
-        .tag(row.id)
     }
 
     // MARK: - Right: the selected task's rendered body
@@ -214,41 +149,66 @@ struct BrowserWindow: View {
     @ViewBuilder
     private var detail: some View {
         if let row = selectedRow {
-            ScrollView {
-                VStack(alignment: .leading, spacing: 16) {
-                    detailHeader(row)
-                    ForEach(Array(row.task.sections.enumerated()), id: \.offset) { _, section in
-                        sectionView(section)
+            VStack(alignment: .leading, spacing: 0) {
+                // The Close control: collapses the detail column back to the
+                // pure card view by clearing the selection. Inline (not a
+                // toolbar) since the detail isn't hosted in a NavigationStack.
+                HStack {
+                    Spacer()
+                    Button {
+                        selectedRowID = nil
+                    } label: {
+                        Label("Close", systemImage: "xmark")
+                            .labelStyle(.titleAndIcon)
                     }
+                    .buttonStyle(.borderless)
+                    .help("Close the plan detail")
                 }
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(20)
+                .padding(.horizontal, 12)
+                .padding(.top, 10)
+
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 16) {
+                        detailHeader(row)
+                        ForEach(Array(row.task.sections.enumerated()), id: \.offset) { _, section in
+                            sectionView(section)
+                        }
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(20)
+                }
+                .textSelection(.enabled)
             }
-            .textSelection(.enabled)
         } else {
             VStack {
-                Text("Select a task")
+                Text("Select a plan")
                     .foregroundStyle(.secondary)
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
     }
 
-    /// The detail header: the title as a prominent heading plus a status line
-    /// (the type badge and the status's `filterLabel` when present).
+    /// The detail header: the title as a prominent heading, the owning project's
+    /// name (since there is no longer a selected sidebar project for context),
+    /// plus a status line (the type badge and the status's `filterLabel`).
     private func detailHeader(_ row: TaskRow) -> some View {
         VStack(alignment: .leading, spacing: 4) {
+            Text(row.projectName)
+                .font(.body)
+                .foregroundStyle(.secondary)
+
             Text(row.title ?? "(untitled)")
                 .font(.title)
                 .fontWeight(.semibold)
 
             HStack(spacing: 6) {
-                // The status glyph + color (blocked takes precedence), matching
-                // the task rows and the sidebar filter.
+                // The status icon + color (blocked takes precedence), matching
+                // the cards and the menu-bar glance via the same `symbolName`.
                 let indicator = row.indicator
-                Text(indicator.glyph)
-                    .font(.system(.subheadline, design: .monospaced))
+                Image(systemName: indicator.symbolName)
+                    .imageScale(.medium)
                     .foregroundStyle(indicator.color)
+                    .frame(width: 20, alignment: .center)
                 if row.task.isBlocked {
                     Text("Blocked")
                         .foregroundStyle(TaskStatusIndicator.blockedColor)
@@ -260,7 +220,7 @@ struct BrowserWindow: View {
                     Text("[\(type.label)]")
                 }
             }
-            .font(.subheadline)
+            .font(.body)
             .foregroundStyle(.secondary)
         }
     }
@@ -357,39 +317,21 @@ struct TaskRow: Identifiable {
 /// logic is unit-testable as plain values (segment 2 tests these directly).
 /// This namespace performs NO I/O and never mutates `.plans/` data.
 enum BrowserViewModel {
-    /// Flattens tasks across `projects` into renderable rows, applying the
-    /// global status filter and optional project drill-down.
+    /// The clickable plan rows for ONE project's card (Surface C dashboard).
     ///
-    /// - `projectPath` non-nil scopes to only that project's tasks (drill-down).
-    /// - `status` non-nil keeps only tasks whose `status` matches; tasks with a
-    ///   `nil` status are excluded while a status filter is active and included
-    ///   only under "All" (`status == nil`).
-    /// - `completed` tasks are ALWAYS excluded — the browser omits finished work
-    ///   entirely (matching the menu-bar glance), so even "All" never shows them.
-    /// - Both filters nil → every outstanding task from every project.
-    ///
-    /// Order is deterministic: `projects` in their given (registry) order — this
-    /// helper does NOT re-sort — and within each project the existing `tasks`
-    /// order. Performs no I/O and touches no SwiftUI.
-    static func visibleTasks(
-        projects: [ProjectTasks],
-        status: TaskStatus?,
-        projectPath: String?
-    ) -> [TaskRow] {
-        projects
-            .filter { projectPath == nil || $0.projectPath == projectPath }
-            .flatMap { project in
-                project.tasks
-                    .filter { $0.status != .completed }
-                    .filter { status == nil || $0.status == status }
-                    .map { task in
-                        TaskRow(
-                            projectPath: project.projectPath,
-                            projectName: project.projectName,
-                            task: task
-                        )
-                    }
-            }
+    /// Maps the project's `activeTasks` (already non-completed, non-nil-status,
+    /// and pre-sorted by status priority then id ascending by `TaskParser`) into
+    /// `TaskRow`s carrying the owning project identity. This helper does NOT
+    /// re-sort — it preserves `TaskParser`'s order — and performs no I/O or
+    /// SwiftUI work.
+    static func activeRows(_ project: ProjectTasks) -> [TaskRow] {
+        project.activeTasks.map { task in
+            TaskRow(
+                projectPath: project.projectPath,
+                projectName: project.projectName,
+                task: task
+            )
+        }
     }
 
     /// Splits a section body into paragraphs on blank lines for per-paragraph
