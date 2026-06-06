@@ -246,28 +246,40 @@ struct ProjectCard: View {
     private func rowActions(_ row: TaskRow) -> some View {
         Group {
             if runner.isRunning(taskID: row.task.id) {
-                // Tapping the live spinner pops the run's progress dialog in
+                // Tapping the live spinner toggles the run's progress dialog in
                 // place, anchored just below the spinner, with the run's live log.
+                // The `.popover` is attached to the bare spinner glyph (not the
+                // padded hit area) so its `.point(.bottom)` anchor centers the
+                // arrow on the spinner's true center; the leading padding /
+                // content shape / tap gesture wrap that anchored glyph.
                 ProgressView()
                     .controlSize(.small)
-                    .padding(.leading, 8)
-                    .contentShape(Rectangle())
-                    .onTapGesture { progressPopoverTaskID = row.task.id }
-                    .help("Show progress")
                     .popover(isPresented: progressPopover(for: row.task.id),
                              attachmentAnchor: .point(.bottom),
                              arrowEdge: .top) {
                         // Same dialog the detail view presents as a sheet; here it
-                        // pops over the spinner. On close, drop the finished run
-                        // and reload so the task's new status surfaces — mirrors
-                        // the detail view's sheet teardown.
+                        // pops over the spinner. The explicit 480pt width (matching
+                        // the sheet's own `minWidth`) gives the popover a stable
+                        // width from first paint so the inset log field fills it
+                        // immediately instead of resizing after the first layout
+                        // pass. On close, drop the finished run and reload so the
+                        // task's new status surfaces — mirrors the detail view's
+                        // sheet teardown.
                         RunProgressSheet(run: runner.run(for: row.task.id),
                                          taskID: row.task.id)
+                            .frame(width: 480)
                             .onDisappear {
                                 runner.dismiss(taskID: row.task.id)
                                 store.reload()
                             }
                     }
+                    .padding(.leading, 8)
+                    .contentShape(Rectangle())
+                    .onTapGesture {
+                        // Toggle: clicking the spinner again while open closes it.
+                        progressPopoverTaskID = (progressPopoverTaskID == row.task.id) ? nil : row.task.id
+                    }
+                    .help("Show progress")
             } else if PlanDetailView.canElaborate(status: row.task.status,
                                                   isBlocked: row.task.isBlocked) {
                 RowActionGlyph(systemImage: "sparkles", help: "Elaborate this plan") {
