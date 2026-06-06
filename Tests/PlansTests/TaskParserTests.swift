@@ -424,7 +424,10 @@ final class TaskParserTests: XCTestCase {
             in: "pending"
         )
         let project = TaskParser().parseProject(at: tempDir.path)
-        XCTAssertEqual(project.projectName, tempDir.lastPathComponent)
+        // The project name is the titleized last path component (the raw dir
+        // name is run through `String.titleized()` at the single derivation
+        // site in `TaskParser`).
+        XCTAssertEqual(project.projectName, tempDir.lastPathComponent.titleized())
         XCTAssertEqual(project.projectPath, tempDir.path)
     }
 }

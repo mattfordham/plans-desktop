@@ -235,7 +235,7 @@ struct TaskParser {
                 return lhs.id < rhs.id
             }
 
-        let projectName = URL(fileURLWithPath: projectPath).lastPathComponent
+        let projectName = URL(fileURLWithPath: projectPath).lastPathComponent.titleized()
 
         return ProjectTasks(
             projectPath: projectPath,
