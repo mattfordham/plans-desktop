@@ -95,6 +95,16 @@ struct ProjectCard: View {
             header
             Divider()
             body(for: rows)
+            // Top-anchor the header + body and bottom-anchor the footer: LazyVGrid
+            // sizes every cell to its ROW's max height, so a short card handed a
+            // taller cell has slack to distribute. This `Spacer(minLength: 0)` sits
+            // BETWEEN the body and the footer, so it absorbs all that slack in the
+            // middle — keeping header/divider/plan rows pinned to the TOP and the
+            // git footer pinned to the BOTTOM edge of the card. The card's frame
+            // sets NO maxHeight (below), so a content-sized card still hugs its
+            // content — the Spacer only does work when the card is given extra
+            // height. Mirrors the wrapper Spacer in `BrowserWindow.cardGrid`.
+            Spacer(minLength: 0)
             // Git status footer (#026): mirrors the header's treatment — the
             // header is FOLLOWED by a `Divider()` (bottom separator); the footer
             // is PRECEDED by one (its top border). Only emitted for git repos so
@@ -103,23 +113,15 @@ struct ProjectCard: View {
                 Divider()
                 gitFooter
             }
-            // Top-anchor: LazyVGrid sizes every cell to its ROW's max height, so
-            // a short card handed a taller cell would let this VStack distribute
-            // the slack and drift its content toward vertical center. A trailing
-            // `Spacer(minLength: 0)` absorbs the extra height so header + divider
-            // + plan rows stay grouped at the TOP. The card's frame deliberately
-            // sets NO maxHeight (below), so a content-sized card still hugs its
-            // content — the Spacer only does work when the card is given extra
-            // height. Mirrors the wrapper Spacer in `BrowserWindow.cardGrid`.
-            Spacer(minLength: 0)
         }
-        // Asymmetric padding so the visible gap under the LAST plan row matches
-        // the gap above the header. Each plan row carries `.padding(.vertical, 5)`
-        // (see `planRow`), so the final row already contributes ~5pt below itself;
-        // we subtract that from the bottom edge (14 − 5 = 9) to even it out.
+        // Bottom padding matches the header's 14pt top gap. When the git footer
+        // is present it's the bottom-most element (a plain HStack with no vertical
+        // padding of its own), so it needs the full 14pt. With no footer the last
+        // element is a plan row that already carries `.padding(.vertical, 5)` (see
+        // `planRow`), so we subtract that to even out the gap (14 − 5 = 9).
         .padding(.top, 14)
         .padding(.horizontal, 14)
-        .padding(.bottom, 9)
+        .padding(.bottom, project.gitBranch != nil ? 14 : 9)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(.background.secondary, in: RoundedRectangle(cornerRadius: 12))
         .overlay(
