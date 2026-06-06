@@ -108,6 +108,16 @@ enum RunEvent: Codable, Equatable {
     }
 }
 
+/// Which skill the bundled Node runner should drive for a hand-off.
+///
+/// Mirrors the Node script's `--mode` flag (`run-task.ts`). `execute` runs
+/// `plan-execute` in mandatory worktree isolation; `elaborate` runs
+/// `plan-elaborate` autonomously to flesh out a pending task.
+enum RunMode: String {
+    case execute
+    case elaborate
+}
+
 /// A `RunEvent` paired with a fresh `UUID` so the SwiftUI log list can iterate
 /// `runner.lines` with stable identity (chosen over view-side `.enumerated()`
 /// so appends don't re-key earlier rows). One is created per decoded line.
@@ -158,11 +168,13 @@ final class TaskRunner {
 
     // MARK: - Public API
 
-    /// Launches the bundled Node script for `taskID` in `projectPath`. Guards
-    /// against double-launch while a run is in flight, resets prior run state,
-    /// then resolves `node` + the bundled script. On a missing precondition it
-    /// sets `error` (and leaves `isRunning` false) instead of spawning.
-    func run(projectPath: String, taskID: String) {
+    /// Launches the bundled Node script for `taskID` in `projectPath`, driving
+    /// the skill selected by `mode` (`.execute` → `plan-execute` in worktree
+    /// isolation; `.elaborate` → autonomous `plan-elaborate`). Guards against
+    /// double-launch while a run is in flight, resets prior run state, then
+    /// resolves `node` + the bundled script. On a missing precondition it sets
+    /// `error` (and leaves `isRunning` false) instead of spawning.
+    func run(projectPath: String, taskID: String, mode: RunMode = .execute) {
         guard !isRunning else { return }
 
         // Reset prior run state.
@@ -196,7 +208,7 @@ final class TaskRunner {
                 return
             }
             self.spawn(nodePath: nodePath, scriptURL: scriptURL,
-                       projectPath: projectPath, taskID: taskID)
+                       projectPath: projectPath, taskID: taskID, mode: mode)
         }
     }
 
@@ -212,13 +224,14 @@ final class TaskRunner {
     // MARK: - Spawning
 
     private func spawn(nodePath: String, scriptURL: URL,
-                       projectPath: String, taskID: String) {
+                       projectPath: String, taskID: String, mode: RunMode) {
         let proc = Process()
         proc.executableURL = URL(fileURLWithPath: nodePath)
         proc.arguments = [
             scriptURL.path,
             "--project-root", projectPath,
             "--task-id", taskID,
+            "--mode", mode.rawValue,
         ]
 
         let stdoutPipe = Pipe()

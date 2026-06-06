@@ -113,17 +113,34 @@ struct PlanDetailView: View {
             .font(.body)
             .foregroundStyle(.secondary)
 
-            // "Work this task" — hands the plan off to the bundled Agent-SDK
-            // runner. Enabled only for an elaborated/in-progress, non-blocked
-            // task, and never while a run is already in flight.
-            Button {
-                runner.run(projectPath: row.projectPath, taskID: row.task.id)
-            } label: {
-                Label("Work this task", systemImage: "play.fill")
+            HStack(spacing: 8) {
+                // "Elaborate" — hands a pending plan off to the bundled runner
+                // in autonomous `plan-elaborate` mode. Enabled only for a
+                // pending, non-blocked task, and never while a run is in flight.
+                Button {
+                    runner.run(projectPath: row.projectPath,
+                               taskID: row.task.id, mode: .elaborate)
+                } label: {
+                    Label("Elaborate", systemImage: "wand.and.stars")
+                }
+                .disabled(!Self.canElaborate(status: row.task.status,
+                                             isBlocked: row.task.isBlocked,
+                                             isRunning: runner.isRunning))
+
+                // "Work this task" — hands the plan off to the bundled Agent-SDK
+                // runner in worktree-isolated `plan-execute` mode. Enabled only
+                // for an elaborated/in-progress, non-blocked task, and never
+                // while a run is already in flight.
+                Button {
+                    runner.run(projectPath: row.projectPath,
+                               taskID: row.task.id, mode: .execute)
+                } label: {
+                    Label("Work this task", systemImage: "play.fill")
+                }
+                .disabled(!Self.canWork(status: row.task.status,
+                                        isBlocked: row.task.isBlocked,
+                                        isRunning: runner.isRunning))
             }
-            .disabled(!Self.canWork(status: row.task.status,
-                                    isBlocked: row.task.isBlocked,
-                                    isRunning: runner.isRunning))
             .padding(.top, 4)
         }
     }
@@ -135,6 +152,15 @@ struct PlanDetailView: View {
     static func canWork(status: TaskStatus?, isBlocked: Bool, isRunning: Bool) -> Bool {
         guard !isRunning, !isBlocked else { return false }
         return status == .elaborated || status == .inProgress
+    }
+
+    /// Pure predicate for the "Elaborate" button's enabled state. The button is
+    /// enabled only for a `pending` task that is not blocked, and only while no
+    /// run is already in flight — elaboration is the step that produces the How
+    /// checklist a subsequent "Work this task" run needs.
+    static func canElaborate(status: TaskStatus?, isBlocked: Bool, isRunning: Bool) -> Bool {
+        guard !isRunning, !isBlocked else { return false }
+        return status == .pending
     }
 
     /// Renders one `## ` section: its heading, then its body. The `## How`

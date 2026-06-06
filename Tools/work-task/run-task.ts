@@ -1,10 +1,14 @@
 /**
  * work-task: Agent SDK hand-off.
  *
- * Autonomously executes a single plans-cc task by driving the `plan-execute`
- * skill via the Claude Agent SDK. This process is the SOLE writer of the
- * project's `.plans/` directory and git tree — the Plans.app itself is a
- * strictly read-only viewer.
+ * Autonomously works a single plans-cc task via the Claude Agent SDK. The
+ * `--mode` flag selects which skill drives the run:
+ *   - `execute`  (default): drives `plan-execute` to implement the task,
+ *                always in `worktree` isolation, leaving it in `review`.
+ *   - `elaborate`: drives `plan-elaborate` to research/flesh out a pending
+ *                task autonomously (no interactive prompts).
+ * This process is the SOLE writer of the project's `.plans/` directory and git
+ * tree — the Plans.app itself is a strictly read-only viewer.
  *
  * Auth: relies on the inherited `claude login` credential from ~/.claude/.
  * We deliberately do NOT set ANTHROPIC_API_KEY.
@@ -23,9 +27,13 @@ import { query } from "@anthropic-ai/claude-agent-sdk";
 // is the plan; this ceiling is the safety net for API-key fallback.
 const MAX_BUDGET_USD = 5.0;
 
+/** What the spawned agent should do with the task. */
+type Mode = "execute" | "elaborate";
+
 interface Args {
   projectRoot: string;
   taskId: string;
+  mode: Mode;
 }
 
 /** Emit one NDJSON line on stdout. Never pretty-printed. */
@@ -41,6 +49,7 @@ function emitError(message: string): void {
 function parseArgs(argv: string[]): Args | null {
   let projectRoot: string | undefined;
   let taskId: string | undefined;
+  let mode: Mode = "execute";
 
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
@@ -48,13 +57,19 @@ function parseArgs(argv: string[]): Args | null {
       projectRoot = argv[++i];
     } else if (arg === "--task-id") {
       taskId = argv[++i];
+    } else if (arg === "--mode") {
+      const value = argv[++i];
+      if (value !== "execute" && value !== "elaborate") {
+        return null;
+      }
+      mode = value;
     }
   }
 
   if (!projectRoot || !taskId) {
     return null;
   }
-  return { projectRoot, taskId };
+  return { projectRoot, taskId, mode };
 }
 
 /**
@@ -85,13 +100,21 @@ function toolDetail(input: unknown): string {
   return "";
 }
 
-function buildPrompt(taskId: string): string {
+/**
+ * Build the prompt for an `execute` run. Worktree isolation is mandatory: the
+ * skill is invoked as `/plan-execute <id> worktree` so it can never fall back to
+ * editing the main checkout in place — the Plans app only ever hands tasks off
+ * for isolated execution.
+ */
+function buildExecutePrompt(taskId: string): string {
   return [
     `Use the \`plan-execute\` skill to work the plans-cc task with id ${taskId}.`,
+    `Invoke it in worktree mode: \`/plan-execute ${taskId} worktree\`.`,
     "",
     "Requirements:",
-    `1. Create a dedicated git worktree for task ${taskId} so the work is isolated`,
-    "   from the main checkout (follow the skill's worktree conventions).",
+    `1. The run MUST use a dedicated git worktree for task ${taskId} (the`,
+    "   `worktree` argument above). Never edit the main checkout in place —",
+    "   worktree isolation is mandatory for this hand-off.",
     "2. Implement the task fully, following the plan and the repository's",
     "   conventions (including TDD where a test suite exists).",
     "3. Run the targeted tests relevant to your changes and make them pass.",
@@ -102,11 +125,41 @@ function buildPrompt(taskId: string): string {
   ].join("\n");
 }
 
+/**
+ * Build the prompt for an `elaborate` run. plan-elaborate is normally
+ * interactive (it asks design questions via AskUserQuestion); since this is an
+ * unattended hand-off with no UI to answer prompts, we instruct the agent to
+ * elaborate autonomously, recording reasonable assumptions instead of asking.
+ */
+function buildElaboratePrompt(taskId: string): string {
+  return [
+    `Use the \`plan-elaborate\` skill to research and flesh out the plans-cc`,
+    `task with id ${taskId}.`,
+    "",
+    "Requirements:",
+    "1. Work fully autonomously. Do NOT ask the user any questions — there is",
+    "   no interactive UI to answer them. Where the skill would prompt for a",
+    "   design decision, make the most reasonable choice yourself and record it",
+    "   in the task's Assumptions section (flagged as a discovered assumption).",
+    "2. Research the codebase as needed and produce a complete How checklist,",
+    "   Verification criteria, and Impact Scope per the skill's conventions.",
+    "3. Leave the task in the `elaborated` state when done.",
+    "",
+    "Work autonomously to completion. Do not ask for confirmation.",
+  ].join("\n");
+}
+
+function buildPrompt(taskId: string, mode: Mode): string {
+  return mode === "elaborate"
+    ? buildElaboratePrompt(taskId)
+    : buildExecutePrompt(taskId);
+}
+
 async function main(): Promise<void> {
   const args = parseArgs(process.argv.slice(2));
   if (!args) {
     emitError(
-      "Missing required arguments. Usage: run-task.js --project-root <abs path> --task-id <NNN>",
+      "Missing or invalid arguments. Usage: run-task.js --project-root <abs path> --task-id <NNN> [--mode execute|elaborate]",
     );
     process.exit(1);
     return;
@@ -114,7 +167,7 @@ async function main(): Promise<void> {
 
   try {
     const response = query({
-      prompt: buildPrompt(args.taskId),
+      prompt: buildPrompt(args.taskId, args.mode),
       options: {
         cwd: args.projectRoot,
         permissionMode: "acceptEdits",

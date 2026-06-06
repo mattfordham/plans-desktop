@@ -146,4 +146,24 @@ final class TaskRunnerTests: XCTestCase {
         // A run already in flight → disabled.
         XCTAssertFalse(PlanDetailView.canWork(status: .inProgress, isBlocked: false, isRunning: true))
     }
+
+    /// `PlanDetailView.canElaborate` is the pure predicate behind the
+    /// "Elaborate" button's `.disabled(...)`. It is enabled only for a pending,
+    /// non-blocked task while no run is already in flight.
+    @MainActor
+    func testCanElaborateGating() {
+        // Pending, not blocked, not running → enabled.
+        XCTAssertTrue(PlanDetailView.canElaborate(status: .pending, isBlocked: false, isRunning: false))
+
+        // Non-pending statuses → disabled (elaboration only applies to pending).
+        XCTAssertFalse(PlanDetailView.canElaborate(status: .elaborated, isBlocked: false, isRunning: false))
+        XCTAssertFalse(PlanDetailView.canElaborate(status: .inProgress, isBlocked: false, isRunning: false))
+        XCTAssertFalse(PlanDetailView.canElaborate(status: nil, isBlocked: false, isRunning: false))
+
+        // Blocked → disabled even when pending.
+        XCTAssertFalse(PlanDetailView.canElaborate(status: .pending, isBlocked: true, isRunning: false))
+
+        // A run already in flight → disabled.
+        XCTAssertFalse(PlanDetailView.canElaborate(status: .pending, isBlocked: false, isRunning: true))
+    }
 }
