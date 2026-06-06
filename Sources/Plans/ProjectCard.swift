@@ -33,10 +33,31 @@ struct ProjectCard: View {
     /// the row's composite `TaskRow.ID`.
     @Environment(\.openWindow) private var openWindow
 
+    /// The shared task store, re-read after a run's progress popover closes so the
+    /// task's new status is surfaced by the existing read path. Read-only (§2).
+    @Environment(PlansStore.self) private var store
+
     /// The shared "Work this task" runner, for the per-row Elaborate / Execute
     /// icon buttons and inline running status. Reads only — the run itself is the
     /// sole writer of `.plans/` (§2), driven by the bundled Agent-SDK process.
     @Environment(TaskRunner.self) private var runner
+
+    /// Which row's run-progress popover is currently open, by task id, or `nil`
+    /// when none is. At most one progress popover is open at a time per card; the
+    /// per-task `Binding<Bool>` from `progressPopover(for:)` drives the `.popover`
+    /// on each row's spinner.
+    @State private var progressPopoverTaskID: String? = nil
+
+    /// A per-task `Binding<Bool>` for the run-progress popover: it reads `true`
+    /// only when `progressPopoverTaskID` is this `taskID`, and on set assigns the
+    /// id when raised / clears it when lowered — so opening one row's popover (or
+    /// the popover dismissing itself) drives the single shared state.
+    private func progressPopover(for taskID: String) -> Binding<Bool> {
+        Binding(
+            get: { progressPopoverTaskID == taskID },
+            set: { progressPopoverTaskID = $0 ? taskID : nil }
+        )
+    }
 
     /// The status counts to show in the header, in `glanceOrder`. EVERY status
     /// is included; statuses absent from `counts` or with a `0` count surface as
@@ -225,14 +246,28 @@ struct ProjectCard: View {
     private func rowActions(_ row: TaskRow) -> some View {
         Group {
             if runner.isRunning(taskID: row.task.id) {
-                // Tapping the live spinner opens the plan's detail window, where
-                // the progress sheet pops over with the run's live log.
+                // Tapping the live spinner pops the run's progress dialog in
+                // place, anchored just below the spinner, with the run's live log.
                 ProgressView()
                     .controlSize(.small)
                     .padding(.leading, 8)
                     .contentShape(Rectangle())
-                    .onTapGesture { openWindow(id: "plan-detail", value: row.id) }
+                    .onTapGesture { progressPopoverTaskID = row.task.id }
                     .help("Show progress")
+                    .popover(isPresented: progressPopover(for: row.task.id),
+                             attachmentAnchor: .point(.bottom),
+                             arrowEdge: .top) {
+                        // Same dialog the detail view presents as a sheet; here it
+                        // pops over the spinner. On close, drop the finished run
+                        // and reload so the task's new status surfaces — mirrors
+                        // the detail view's sheet teardown.
+                        RunProgressSheet(run: runner.run(for: row.task.id),
+                                         taskID: row.task.id)
+                            .onDisappear {
+                                runner.dismiss(taskID: row.task.id)
+                                store.reload()
+                            }
+                    }
             } else if PlanDetailView.canElaborate(status: row.task.status,
                                                   isBlocked: row.task.isBlocked) {
                 RowActionGlyph(systemImage: "sparkles", help: "Elaborate this plan") {

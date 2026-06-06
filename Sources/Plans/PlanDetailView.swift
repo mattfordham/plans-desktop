@@ -245,13 +245,14 @@ struct PlanDetailView: View {
     }
 }
 
-/// The modal progress sheet for a single task's run. Renders that run's live
+/// The modal progress dialog for a single task's run. Renders that run's live
 /// NDJSON stream: a scrolling activity/text log, a cost/turns summary once the
 /// run reports `done`, an error banner on a streamed/terminal error, and a Stop
-/// button wired to the run's `stop()`. The sheet is presented via the detail
-/// view's `@State showProgress`, so the Done button can close it; closing does
-/// NOT stop the run (it keeps going in the background).
-private struct RunProgressSheet: View {
+/// button wired to the run's `stop()`. It dismisses via `@Environment(\.dismiss)`,
+/// so it works whether presented as a `.sheet` (the detail view) or a `.popover`
+/// (the card spinner) — the Done/Close button can close it either way; closing
+/// does NOT stop the run (it keeps going in the background).
+struct RunProgressSheet: View {
     /// The specific run to render, or `nil` if there is none (e.g. the run was
     /// dropped). When nil the sheet shows a minimal "no active run" state.
     let run: TaskRun?
