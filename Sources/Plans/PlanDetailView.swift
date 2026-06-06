@@ -279,7 +279,11 @@ struct RunProgressSheet: View {
             footer
         }
         .padding(12)
-        .frame(minWidth: 480, minHeight: 360)
+        // Cap the height so a long run log can't grow the dialog unbounded.
+        // This matters most when presented as a popover from the card spinner,
+        // which has no enclosing window to bound it; the `logList` ScrollView
+        // scrolls any overflow within the cap.
+        .frame(minWidth: 480, minHeight: 360, maxHeight: 520)
     }
 
     /// The verb for this run's mode ("Executing" / "Elaborating" / "Capturing"
