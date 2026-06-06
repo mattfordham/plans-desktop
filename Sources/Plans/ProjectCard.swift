@@ -112,6 +112,30 @@ struct ProjectCard: View {
             Text(project.projectName)
                 .font(.headline)
                 .lineLimit(1)
+                .layoutPriority(1)
+
+            // Git indicator (#024): branch glyph + name, plus an orange dirty dot
+            // only when the working tree is known-dirty. Shown only when the
+            // project is a git repo (`gitBranch != nil`); a `nil`/`false`
+            // `gitIsDirty` shows no dot. The branch text truncates so it never
+            // crowds out the project name (which holds layout priority).
+            if let branch = project.gitBranch {
+                HStack(spacing: 4) {
+                    Image(systemName: "arrow.triangle.branch")
+                        .imageScale(.small)
+                        .foregroundStyle(.secondary)
+                    Text(branch)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                    if project.gitIsDirty == true {
+                        Image(systemName: "circle.fill")
+                            .imageScale(.small)
+                            .foregroundStyle(.orange)
+                    }
+                }
+            }
 
             Spacer(minLength: 8)
 

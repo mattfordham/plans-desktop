@@ -174,6 +174,72 @@ final class PlansStore {
         projects = registryReader.readProjects().map { project in
             taskParser.parseProject(at: project.path, lastSeen: project.lastSeen)
         }
+
+        // Second pass (#024): gather live git state OFF the main thread so the
+        // blocking `git` subprocesses never stall the UI, then merge it back on
+        // the main thread. `GitHelper` methods are `nonisolated`/blocking; we
+        // collect plain Sendable tuples on a background queue and apply them on
+        // the main queue. The first (synchronous) pass above already painted the
+        // cards with `nil` git fields, so this only enriches them.
+        //
+        // GCD (not structured concurrency) is used deliberately: `PlansStore` is
+        // a non-`Sendable`, main-thread-only reference type, and GCD lets us hop
+        // background→main without crossing a Swift-concurrency Sendability
+        // boundary on `self`. The captured `paths` are value-type Strings.
+        //
+        // `self` is captured `nonisolated(unsafe)`: `PlansStore` is not
+        // `Sendable`, but it is only ever touched on the main thread, and the
+        // only `self` access in these closures is `applyGitInfo`, which we
+        // re-dispatch onto the main queue. The unsafe annotation documents that
+        // invariant and keeps the `@Sendable` GCD closures warning-clean. The
+        // capture is strong — the store is app-lifetime (same rationale as the
+        // poll timer above) so there is no meaningful retain cycle to break.
+        let paths = projects.map(\.projectPath)
+        nonisolated(unsafe) let unsafeSelf = self
+        DispatchQueue.global(qos: .utility).async {
+            var results: [GitResult] = []
+            for path in paths {
+                let branch = GitHelper.currentBranch(at: path)
+                let dirty = GitHelper.isDirty(at: path)
+                results.append(GitResult(path: path, branch: branch, dirty: dirty))
+            }
+            DispatchQueue.main.async {
+                unsafeSelf.applyGitInfo(results)
+            }
+        }
+    }
+
+    /// A Sendable carrier for one project's git query results, used to ferry the
+    /// `GitHelper` output from the background queue back to the main queue (#024).
+    private struct GitResult: Sendable {
+        let path: String
+        let branch: String?
+        let dirty: Bool?
+    }
+
+    /// Merges the background-gathered git results into `projects` (#024). MUST be
+    /// called on the main thread (it mutates the observable `projects` that
+    /// SwiftUI reads). For each result, finds the matching project BY PATH and
+    /// rebuilds that element (structs are value types) carrying over all existing
+    /// fields plus the git values. Projects that disappeared between the parse
+    /// pass and this merge are simply skipped.
+    private func applyGitInfo(_ results: [GitResult]) {
+        for result in results {
+            guard let index = projects.firstIndex(where: { $0.projectPath == result.path }) else {
+                continue
+            }
+            let existing = projects[index]
+            projects[index] = ProjectTasks(
+                projectPath: existing.projectPath,
+                projectName: existing.projectName,
+                lastSeen: existing.lastSeen,
+                tasks: existing.tasks,
+                counts: existing.counts,
+                activeTasks: existing.activeTasks,
+                gitBranch: result.branch,
+                gitIsDirty: result.dirty
+            )
+        }
     }
 
     /// Begins live refresh: performs an immediate `reload()` (preserving the

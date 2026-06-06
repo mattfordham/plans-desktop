@@ -157,6 +157,44 @@ struct ProjectTasks {
     /// "Hide Empty" toolbar filter (#021); mirrors the "No outstanding plans"
     /// terminology shown on an empty `ProjectCard`.
     var hasOutstandingWork: Bool { !activeTasks.isEmpty }
+
+    /// The currently checked-out git branch name for the project (#024), or
+    /// `nil` when the project is not a git repo / git is unavailable / the
+    /// command failed. The UI renders the whole git indicator only when this is
+    /// non-`nil`. Populated asynchronously by `PlansStore.reload()` off the main
+    /// actor (parsing leaves it `nil`).
+    let gitBranch: String?
+
+    /// Whether the project's working tree has uncommitted changes (#024).
+    /// `true` = dirty, `false` = known-clean (no dirty dot shown), `nil` =
+    /// unknown (not a repo / git unavailable / command failed — also no dot).
+    /// The dirty dot renders ONLY when this is exactly `true`. Populated
+    /// asynchronously by `PlansStore.reload()` off the main actor.
+    let gitIsDirty: Bool?
+
+    /// Memberwise initializer with `gitBranch` / `gitIsDirty` defaulting to
+    /// `nil`. The explicit init exists so the parser and tests that omit the
+    /// git fields continue to compile unchanged after #024 added them; the
+    /// store reconstructs `ProjectTasks` with the git values supplied.
+    init(
+        projectPath: String,
+        projectName: String,
+        lastSeen: String,
+        tasks: [Task],
+        counts: [TaskStatus: Int],
+        activeTasks: [Task],
+        gitBranch: String? = nil,
+        gitIsDirty: Bool? = nil
+    ) {
+        self.projectPath = projectPath
+        self.projectName = projectName
+        self.lastSeen = lastSeen
+        self.tasks = tasks
+        self.counts = counts
+        self.activeTasks = activeTasks
+        self.gitBranch = gitBranch
+        self.gitIsDirty = gitIsDirty
+    }
 }
 
 /// Parses plans-cc task files (Data Contract 2, §5), mirroring the behavior of
