@@ -116,16 +116,17 @@ struct ProjectCard: View {
             // A `Grid` (not a VStack of HStacks) so every column auto-sizes to
             // the widest cell ACROSS ALL ROWS — that gives the id / [type] /
             // title columns a consistent left edge on every row (a table look).
-            // `.firstTextBaseline` baseline-aligns the leading status icon to the
-            // first line of each row's text, so the icon sits vertically centered
-            // with the text instead of pinned to the cell's top. Multi-line titles
-            // stay first-line-anchored (`.firstTextBaseline` uses the first line).
+            // `.center` vertical alignment centers each GridRow's cells against
+            // one another, so the leading status icon sits vertically centered
+            // with the row text. (A baseline alignment would pin the icon to the
+            // text baseline near the bottom of the glyphs, leaving the circle low;
+            // `.center` is the correct primitive for centering the icon with text.)
             //
             // `horizontalSpacing: 0` (the inter-column gap is recreated via
             // per-cell trailing padding instead): with zero Grid spacing the
             // row's single highlight `.background` is one continuous region with
             // no gaps for it to break across — see `planRow`.
-            Grid(alignment: Alignment(horizontal: .leading, vertical: .firstTextBaseline), horizontalSpacing: 0, verticalSpacing: 2) {
+            Grid(alignment: Alignment(horizontal: .leading, vertical: .center), horizontalSpacing: 0, verticalSpacing: 2) {
                 ForEach(rows) { row in
                     planRow(row)
                 }
@@ -164,12 +165,6 @@ struct ProjectCard: View {
                 .imageScale(.large)
                 .foregroundStyle(indicator.color)
                 .frame(width: 20, alignment: .center)
-                // The `.large` circle is taller than `.body` text, so a bare
-                // `.firstTextBaseline` would pin the glyph's own baseline to the
-                // text baseline and leave the circle sitting high. Map the icon's
-                // vertical CENTER onto the row's first-text-baseline so the circle
-                // is optically centered on the text line.
-                .alignmentGuide(.firstTextBaseline) { d in d[VerticalAlignment.center] }
                 .padding(.trailing, 8)
 
             Text(row.task.id)
