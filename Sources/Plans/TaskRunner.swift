@@ -1,5 +1,11 @@
 import Foundation
 import Observation
+import OSLog
+
+/// Subsystem logger for the task runner. View with:
+///   log stream --predicate 'subsystem == "com.plans.desktop"' --level debug
+/// or in Console.app filtered to subsystem `com.plans.desktop`.
+private let runnerLog = Logger(subsystem: "com.plans.desktop", category: "TaskRunner")
 
 /// A single decoded line of the bundled Node script's NDJSON progress stream.
 ///
@@ -197,7 +203,11 @@ final class TaskRunner {
     /// resolves `node` + the bundled script. On a missing precondition it sets
     /// `error` (and leaves `isRunning` false) instead of spawning.
     func run(projectPath: String, taskID: String, mode: RunMode = .execute) {
-        guard !isRunning else { return }
+        runnerLog.notice("run() called: task=\(taskID, privacy: .public) mode=\(mode.rawValue, privacy: .public) project=\(projectPath, privacy: .public)")
+        guard !isRunning else {
+            runnerLog.notice("run() ignored: a run is already in flight (active task=\(self.activeTaskID ?? "nil", privacy: .public))")
+            return
+        }
 
         // Reset prior run state and record what's being worked + the initial
         // phase, so the UI has immediate feedback before the process spawns.
@@ -212,11 +222,13 @@ final class TaskRunner {
 
         // Resolve the bundled script first — a synchronous, non-blocking lookup.
         guard let scriptURL = Self.resolveScriptURL() else {
+            runnerLog.error("run() aborted: bundled run-task.js not found in app bundle")
             error = "Bundled work-task script (run-task.js) not found."
             phase = nil
             isRunning = false
             return
         }
+        runnerLog.notice("resolved script: \(scriptURL.path, privacy: .public)")
 
         // Resolve `node` off the main actor (it shells out via a login shell),
         // then continue on the main actor to spawn so observable mutation stays
@@ -228,13 +240,18 @@ final class TaskRunner {
             }.value
             guard let self else { return }
             // A late `stop()` could have flipped this off; honor it.
-            guard self.isRunning else { return }
+            guard self.isRunning else {
+                runnerLog.notice("node resolved but run was already stopped; not spawning")
+                return
+            }
             guard let nodePath else {
+                runnerLog.error("run() aborted: could not locate node via login shell")
                 self.error = "Could not locate `node`. Install Node.js (e.g. via Homebrew or nvm) and try again."
                 self.phase = nil
                 self.isRunning = false
                 return
             }
+            runnerLog.notice("resolved node: \(nodePath, privacy: .public)")
             self.spawn(nodePath: nodePath, scriptURL: scriptURL,
                        projectPath: projectPath, taskID: taskID, mode: mode)
         }
@@ -285,11 +302,14 @@ final class TaskRunner {
             }
         }
 
+        runnerLog.notice("spawning: \(nodePath, privacy: .public) \(proc.arguments?.joined(separator: " ") ?? "", privacy: .public)")
         do {
             try proc.run()
             process = proc
             phase = .running
+            runnerLog.notice("process launched (pid=\(proc.processIdentifier))")
         } catch {
+            runnerLog.error("process launch failed: \(error.localizedDescription, privacy: .public)")
             self.error = "Failed to launch work-task process: \(error.localizedDescription)"
             phase = nil
             isRunning = false
@@ -331,6 +351,7 @@ final class TaskRunner {
             handle(event)
         }
 
+        runnerLog.notice("process terminated: status=\(status) lines=\(self.lines.count) hasSummary=\(self.summary != nil) hasError=\(self.error != nil)")
         if status != 0 && summary == nil && error == nil {
             error = "Work-task process exited unexpectedly (code \(status))."
         }
@@ -380,13 +401,20 @@ final class TaskRunner {
             try proc.run()
             let data = pipe.fileHandleForReading.readDataToEndOfFile()
             proc.waitUntilExit()
-            guard proc.terminationStatus == 0 else { return nil }
+            guard proc.terminationStatus == 0 else {
+                runnerLog.error("resolveNodePath: `command -v node` exited \(proc.terminationStatus)")
+                return nil
+            }
             let path = String(decoding: data, as: UTF8.self)
                 .trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !path.isEmpty else { return nil }
+            guard !path.isEmpty else {
+                runnerLog.error("resolveNodePath: `command -v node` returned empty")
+                return nil
+            }
             nodePathCache.set(path)
             return path
         } catch {
+            runnerLog.error("resolveNodePath: failed to run login shell: \(error.localizedDescription, privacy: .public)")
             return nil
         }
     }

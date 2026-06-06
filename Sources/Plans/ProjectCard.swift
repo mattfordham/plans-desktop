@@ -1,4 +1,7 @@
 import SwiftUI
+import OSLog
+
+private let cardLog = Logger(subsystem: "com.plans.desktop", category: "ProjectCard")
 
 /// Surface C: a single project rendered as a discrete dashboard card.
 ///
@@ -171,11 +174,13 @@ struct ProjectCard: View {
                 .foregroundStyle(indicator.color)
                 .frame(width: 20, alignment: .center)
                 .padding(.trailing, 8)
+                .modifier(OpenDetailOnTap(row: row, openWindow: openWindow))
 
             Text(row.task.id)
                 .font(.system(.body, design: .monospaced))
                 .foregroundStyle(.secondary)
                 .padding(.trailing, 8)
+                .modifier(OpenDetailOnTap(row: row, openWindow: openWindow))
 
             // Always-present cell (empty string when no type) so column 3 stays
             // aligned across every row.
@@ -183,68 +188,57 @@ struct ProjectCard: View {
                 .font(.system(.body, design: .monospaced))
                 .foregroundStyle(.tertiary)
                 .padding(.trailing, 8)
+                .modifier(OpenDetailOnTap(row: row, openWindow: openWindow))
 
             Text(row.title ?? "(untitled)")
                 .font(.body)
                 .fixedSize(horizontal: false, vertical: true)
                 .gridColumnAlignment(.leading)
                 .frame(maxWidth: .infinity, alignment: .leading)
+                .modifier(OpenDetailOnTap(row: row, openWindow: openWindow))
 
-            // Trailing per-row actions: Elaborate / Execute icon buttons (gated
-            // by the same predicates as the detail view), or an inline spinner
-            // while THIS row is being worked. The buttons are their own tap
-            // targets (borderless) and call the shared runner; the full live log
-            // is available by opening the row's detail window.
+            // Trailing per-row action: the single status-relevant Elaborate /
+            // Execute icon button, or an inline spinner while THIS row is being
+            // worked. This cell deliberately does NOT carry the open-detail tap
+            // gesture (which lives on the content cells above) so the button's
+            // own tap is never swallowed by a row-level gesture. The full live
+            // log is available by opening the row's detail window.
             rowActions(row)
                 .gridColumnAlignment(.trailing)
         }
-        // Row-level chrome: a single hit-test shape + the tap gesture applied to
-        // the whole row so the entire row is one tap target (no inter-column gaps
-        // since the Grid `horizontalSpacing` is 0). Tapping opens the plan detail
-        // in its own window. No `.frame(maxHeight: .infinity)` so rows stay
+        // `.padding(.vertical, 5)` sets the row's height/tap area. The open-detail
+        // tap gesture is applied per content cell (see `OpenDetailOnTap`) rather
+        // than once to the whole row, so the trailing action button keeps its own
+        // independent hit target. No `.frame(maxHeight: .infinity)` so rows stay
         // content-sized and top-anchored (see the height note above).
         .padding(.vertical, 5)
-        .contentShape(Rectangle())
-        .onTapGesture { openWindow(id: "plan-detail", value: row.id) }
     }
 
     /// The trailing action cell for a plan row. While this row's task is being
-    /// worked, shows an inline spinner instead of the buttons. Otherwise shows
-    /// an Elaborate button (for `pending` tasks) and an Execute button (for
-    /// `elaborated`/`in-progress` tasks); each is disabled when its gating
-    /// predicate fails (blocked, wrong status, or another run in flight).
+    /// worked, shows an inline spinner. Otherwise shows the SINGLE relevant
+    /// action for the row's status: Elaborate for a `pending` task, Execute for
+    /// an `elaborated`/`in-progress` task, and nothing for any other status. The
+    /// full live log is available by opening the row's detail window.
     @ViewBuilder
     private func rowActions(_ row: TaskRow) -> some View {
         if runner.isRunning(taskID: row.task.id) {
             ProgressView()
                 .controlSize(.small)
                 .padding(.leading, 8)
-        } else {
-            HStack(spacing: 4) {
-                rowActionButton(
-                    systemImage: "wand.and.stars",
-                    help: "Elaborate this plan",
-                    enabled: PlanDetailView.canElaborate(
-                        status: row.task.status,
-                        isBlocked: row.task.isBlocked,
-                        isRunning: runner.isRunning),
-                    action: {
-                        runner.run(projectPath: row.projectPath,
-                                   taskID: row.task.id, mode: .elaborate)
-                    })
-                rowActionButton(
-                    systemImage: "play.fill",
-                    help: "Execute this plan",
-                    enabled: PlanDetailView.canWork(
-                        status: row.task.status,
-                        isBlocked: row.task.isBlocked,
-                        isRunning: runner.isRunning),
-                    action: {
-                        runner.run(projectPath: row.projectPath,
-                                   taskID: row.task.id, mode: .execute)
-                    })
+        } else if PlanDetailView.canElaborate(status: row.task.status,
+                                              isBlocked: row.task.isBlocked,
+                                              isRunning: runner.isRunning) {
+            rowActionButton(systemImage: "wand.and.stars", help: "Elaborate this plan") {
+                cardLog.notice("card Elaborate clicked: task=\(row.task.id, privacy: .public)")
+                runner.run(projectPath: row.projectPath, taskID: row.task.id, mode: .elaborate)
             }
-            .padding(.leading, 8)
+        } else if PlanDetailView.canWork(status: row.task.status,
+                                         isBlocked: row.task.isBlocked,
+                                         isRunning: runner.isRunning) {
+            rowActionButton(systemImage: "play.fill", help: "Execute this plan") {
+                cardLog.notice("card Execute clicked: task=\(row.task.id, privacy: .public)")
+                runner.run(projectPath: row.projectPath, taskID: row.task.id, mode: .execute)
+            }
         }
     }
 
@@ -252,14 +246,29 @@ struct ProjectCard: View {
     /// reads as a compact glyph control and is its own tap target (it does not
     /// trigger the row's open-detail tap gesture).
     private func rowActionButton(systemImage: String, help: String,
-                                 enabled: Bool, action: @escaping () -> Void) -> some View {
+                                 action: @escaping () -> Void) -> some View {
         Button(action: action) {
             Image(systemName: systemImage)
                 .imageScale(.medium)
                 .frame(width: 18, height: 18)
         }
         .buttonStyle(.borderless)
-        .disabled(!enabled)
+        .padding(.leading, 8)
         .help(help)
+    }
+}
+
+/// Applies "open this plan's detail window on tap" to a single row content cell.
+/// Used per content cell (id / type / title / status icon) rather than once on
+/// the whole `GridRow`, so the trailing action button keeps an independent hit
+/// target instead of competing with a row-wide tap gesture.
+private struct OpenDetailOnTap: ViewModifier {
+    let row: TaskRow
+    let openWindow: OpenWindowAction
+
+    func body(content: Content) -> some View {
+        content
+            .contentShape(Rectangle())
+            .onTapGesture { openWindow(id: "plan-detail", value: row.id) }
     }
 }
