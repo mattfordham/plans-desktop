@@ -73,13 +73,9 @@ struct BrowserWindow: View {
     }
 
     var body: some View {
-        // A local `@Bindable` over the environment store yields the two-way
-        // binding the "Hide Empty" toggle (#021) needs (`$store.hideEmptyProjects`)
-        // while the view keeps reading the single shared `@Environment` instance.
-        @Bindable var store = store
         // A pure, full-width card dashboard. Tapping a plan row opens that plan's
         // detail in a separate window (§011); this window has no detail pane.
-        return cardGrid
+        cardGrid
             .frame(minWidth: 480, minHeight: 520)
             .toolbar {
                 ToolbarItem {
@@ -98,9 +94,22 @@ struct BrowserWindow: View {
                 // re-derives `sortedProjects` (the filter lives there) so the grid
                 // reflows. Pure store/UserDefaults state — never writes `.plans/`.
                 ToolbarItem {
-                    Toggle(isOn: $store.hideEmptyProjects) {
-                        Label("Hide Empty", systemImage: "eye.slash")
+                    // A plain `Button` (not a button-styled `Toggle`) so this
+                    // control shares the IDENTICAL toolbar chrome as the "+"
+                    // button beside it — same square hover/active footprint and
+                    // no persistent background box (the `.toggleStyle(.button)`
+                    // pill made the two look inconsistent). The on/off state is
+                    // conveyed by the glyph itself: `eye.slash` (accent-tinted)
+                    // while empty projects are hidden, plain `eye` when shown.
+                    Button {
+                        store.hideEmptyProjects.toggle()
+                    } label: {
+                        Label(
+                            "Hide Empty",
+                            systemImage: store.hideEmptyProjects ? "eye.slash" : "eye"
+                        )
                     }
+                    .foregroundStyle(store.hideEmptyProjects ? AnyShapeStyle(.tint) : AnyShapeStyle(.primary))
                     .help("Hide projects with no outstanding plans")
                 }
             }
