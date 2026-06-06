@@ -116,13 +116,16 @@ struct ProjectCard: View {
             // A `Grid` (not a VStack of HStacks) so every column auto-sizes to
             // the widest cell ACROSS ALL ROWS — that gives the id / [type] /
             // title columns a consistent left edge on every row (a table look).
-            // `.topLeading` keeps multi-line titles top-aligned with the icon.
+            // `.firstTextBaseline` baseline-aligns the leading status icon to the
+            // first line of each row's text, so the icon sits vertically centered
+            // with the text instead of pinned to the cell's top. Multi-line titles
+            // stay first-line-anchored (`.firstTextBaseline` uses the first line).
             //
             // `horizontalSpacing: 0` (the inter-column gap is recreated via
             // per-cell trailing padding instead): with zero Grid spacing the
             // row's single highlight `.background` is one continuous region with
             // no gaps for it to break across — see `planRow`.
-            Grid(alignment: .topLeading, horizontalSpacing: 0, verticalSpacing: 2) {
+            Grid(alignment: Alignment(horizontal: .leading, vertical: .firstTextBaseline), horizontalSpacing: 0, verticalSpacing: 2) {
                 ForEach(rows) { row in
                     planRow(row)
                 }
@@ -161,6 +164,12 @@ struct ProjectCard: View {
                 .imageScale(.large)
                 .foregroundStyle(indicator.color)
                 .frame(width: 20, alignment: .center)
+                // The `.large` circle is taller than `.body` text, so a bare
+                // `.firstTextBaseline` would pin the glyph's own baseline to the
+                // text baseline and leave the circle sitting high. Map the icon's
+                // vertical CENTER onto the row's first-text-baseline so the circle
+                // is optically centered on the text line.
+                .alignmentGuide(.firstTextBaseline) { d in d[VerticalAlignment.center] }
                 .padding(.trailing, 8)
 
             Text(row.task.id)
