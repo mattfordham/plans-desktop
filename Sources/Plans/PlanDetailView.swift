@@ -332,6 +332,12 @@ struct RunProgressSheet: View {
                     }
                 }
                 .padding(8)
+                // Stretch the log column to the full scroll width even while it
+                // holds only the short "Starting…/Waiting…" placeholder, so the
+                // inset `.textBackgroundColor` field is full-width from the first
+                // frame instead of hugging the narrow placeholder until log lines
+                // (which already carry `maxWidth: .infinity`) arrive.
+                .frame(maxWidth: .infinity, alignment: .leading)
             }
             .background(Color(nsColor: .textBackgroundColor))
             .clipShape(RoundedRectangle(cornerRadius: 6))

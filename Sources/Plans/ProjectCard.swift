@@ -247,16 +247,18 @@ struct ProjectCard: View {
         Group {
             if runner.isRunning(taskID: row.task.id) {
                 // Tapping the live spinner toggles the run's progress dialog in
-                // place, anchored just below the spinner, with the run's live log.
-                // The `.popover` is attached to the bare spinner glyph (not the
-                // padded hit area) so its `.point(.bottom)` anchor centers the
-                // arrow on the spinner's true center; the leading padding /
-                // content shape / tap gesture wrap that anchored glyph.
+                // place, anchored to the spinner, with the run's live log. The
+                // `.popover` attaches to the bare spinner glyph's BOUNDS (not the
+                // padded hit area, and not a single center point): anchoring to the
+                // bounds lets macOS land the arrow against whichever glyph edge it
+                // flips to (above when space is tight, below otherwise) with the
+                // arrow tip just off the spinner rather than piercing its center.
+                // The leading padding / content shape / tap gesture wrap that
+                // anchored glyph.
                 ProgressView()
                     .controlSize(.small)
                     .popover(isPresented: progressPopover(for: row.task.id),
-                             attachmentAnchor: .point(.bottom),
-                             arrowEdge: .top) {
+                             attachmentAnchor: .rect(.bounds)) {
                         // Same dialog the detail view presents as a sheet; here it
                         // pops over the spinner. The explicit 480pt width (matching
                         // the sheet's own `minWidth`) gives the popover a stable
