@@ -62,6 +62,15 @@ struct PlanDetailView: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }
+        // If this task is ALREADY running when the window opens (e.g. the user
+        // clicked the card spinner to come here), pop the progress sheet right
+        // away — `.onChange` only catches a fresh transition, not the standing
+        // state, so this `.onAppear` covers the already-running case.
+        .onAppear {
+            if let id = row?.task.id, runner.isRunning(taskID: id) {
+                showProgress = true
+            }
+        }
         // Raise the sheet when THIS task's run starts. Scoped to this row's task,
         // so a run launched for a different task never pops a sheet here. The
         // sheet stays up after the run ends so the user can read the summary,
@@ -376,13 +385,20 @@ private struct RunProgressSheet: View {
         HStack {
             Spacer()
             if run?.isRunning == true {
+                // While running: Stop ends the run; Close just backgrounds the
+                // sheet (the run keeps going, reachable again via the card
+                // spinner or the detail's "Show progress").
                 Button(role: .destructive) {
                     run?.stop()
                 } label: {
                     Label("Stop", systemImage: "stop.fill")
                 }
                 .keyboardShortcut(".", modifiers: .command)
+
+                Button("Close") { dismiss() }
+                    .keyboardShortcut(.defaultAction)
             } else {
+                // Finished: Done dismisses (and drops the finished run).
                 Button("Done") { dismiss() }
                     .keyboardShortcut(.defaultAction)
             }

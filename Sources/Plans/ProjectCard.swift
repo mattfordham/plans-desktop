@@ -225,9 +225,14 @@ struct ProjectCard: View {
     private func rowActions(_ row: TaskRow) -> some View {
         Group {
             if runner.isRunning(taskID: row.task.id) {
+                // Tapping the live spinner opens the plan's detail window, where
+                // the progress sheet pops over with the run's live log.
                 ProgressView()
                     .controlSize(.small)
                     .padding(.leading, 8)
+                    .contentShape(Rectangle())
+                    .onTapGesture { openWindow(id: "plan-detail", value: row.id) }
+                    .help("Show progress")
             } else if PlanDetailView.canElaborate(status: row.task.status,
                                                   isBlocked: row.task.isBlocked) {
                 RowActionGlyph(systemImage: "sparkles", help: "Elaborate this plan") {
