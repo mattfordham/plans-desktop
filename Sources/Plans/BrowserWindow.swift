@@ -35,6 +35,13 @@ struct BrowserWindow: View {
     /// responsive column count. `0` until the first layout pass measures it.
     @State private var gridWidth: CGFloat = 0
 
+    /// #017: the project path of the card currently being hovered as a drop
+    /// target during a card drag, or `nil` when nothing is targeted. Driven by
+    /// each card's `.dropDestination(isTargeted:)` callback so the grid can paint
+    /// an insertion indicator on the leading edge of the card the dragged item
+    /// would land before, making the otherwise-invisible drop position visible.
+    @State private var dropTargetPath: String? = nil
+
     /// Pure width → column-count function: fits as many `cardMinWidth` columns
     /// (plus a `gridSpacing` gutter each) into the padded content width as will
     /// fit, with a floor of 1. No side effects and no view-state reads, so it is
@@ -107,44 +114,74 @@ struct BrowserWindow: View {
                             Spacer(minLength: 0)
                         }
                         .id(project.projectPath)
+                        // #017 drop indicator: while a card is dragged over this
+                        // cell, paint a vertical accent bar on its LEADING edge to
+                        // show the dragged card will be inserted BEFORE this one —
+                        // the same semantics `handleDrop`/`reorder` apply. Without
+                        // this the drop position is invisible and dragging is hard
+                        // to aim. The overlay is inside the drag/drop chrome but
+                        // adds no layout (it's an `.overlay`), so the grid math is
+                        // untouched.
+                        .overlay(alignment: .leading) {
+                            if dropTargetPath == project.projectPath {
+                                RoundedRectangle(cornerRadius: 2)
+                                    .fill(Color.accentColor)
+                                    .frame(width: 4)
+                                    .padding(.vertical, 2)
+                                    .transition(.opacity)
+                            }
+                        }
                         // #017: drag a card and drop it onto another card to
                         // override the order. The card carries its project path
                         // as the dragged payload; the drop target re-inserts the
                         // dragged path BEFORE this card via the pure `reorder`
                         // helper over the CURRENTLY displayed order, then persists
                         // through the store. View modifier stays thin — all order
-                        // math lives in `BrowserViewModel`.
+                        // math lives in `BrowserViewModel`. `isTargeted` drives the
+                        // `dropTargetPath` highlight above.
                         .draggable(project.projectPath)
                         .dropDestination(for: String.self) { items, _ in
+                            dropTargetPath = nil
                             guard let sourcePath = items.first else { return false }
                             handleDrop(sourcePath: sourcePath, before: project.projectPath)
                             return true
+                        } isTargeted: { targeted in
+                            // Set on enter; clear only if WE are still the recorded
+                            // target, so a neighbor's enter (which may arrive before
+                            // our exit) isn't clobbered back to nil.
+                            if targeted {
+                                dropTargetPath = project.projectPath
+                            } else if dropTargetPath == project.projectPath {
+                                dropTargetPath = nil
+                            }
                         }
                     }
                 }
                 .padding(Self.gridPadding)
             }
-            // #017 step 4: a subtle revert affordance lives in the window
-            // toolbar so the user can leave the manual card order and return to
-            // the automatic recency sort. It is ONLY shown while the manual
-            // order is active (`store.manualOrderActive`); otherwise the toolbar
-            // item collapses to nothing so the header stays uncluttered. Tapping
-            // it calls `store.clearManualOrder()`, which flips `manualOrderActive`
-            // off — `sortedProjects` already reacts to the flag and the grid
-            // re-sorts by staleness. Pure store call; never writes `.plans/` (§2).
+            // #017 step 4: a revert affordance lives in the window toolbar so the
+            // user can leave the manual card order and return to the automatic
+            // recency sort. The control is ALWAYS present (persistent toolbar) so
+            // its placement doesn't shift as state changes; it is simply DISABLED
+            // when no manual order is active (nothing to revert). Both icon and
+            // title text are shown (`.titleAndIcon`) so the button is
+            // self-explanatory. Tapping it calls `store.clearManualOrder()`, which
+            // flips `manualOrderActive` off — `sortedProjects` already reacts to
+            // the flag and the grid re-sorts by staleness. Pure store call; never
+            // writes `.plans/` (§2).
             .toolbar {
-                if store.manualOrderActive {
-                    ToolbarItem(placement: .automatic) {
-                        Button {
-                            store.clearManualOrder()
-                        } label: {
-                            Label(
-                                BrowserViewModel.manualOrderRevertLabel,
-                                systemImage: "arrow.uturn.backward"
-                            )
-                        }
-                        .help("Discard the manual card order and sort by recency.")
+                ToolbarItem(placement: .automatic) {
+                    Button {
+                        store.clearManualOrder()
+                    } label: {
+                        Label(
+                            BrowserViewModel.manualOrderRevertLabel,
+                            systemImage: "arrow.uturn.backward"
+                        )
+                        .labelStyle(.titleAndIcon)
                     }
+                    .disabled(!store.manualOrderActive)
+                    .help("Discard the manual card order and sort by recency.")
                 }
             }
             // Width-probe approach (low-confidence layout choice, see §009
