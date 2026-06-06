@@ -180,6 +180,11 @@ struct BrowserWindow: View {
                         )
                         .labelStyle(.titleAndIcon)
                     }
+                    // Flat toolbar styling: the default bordered toolbar button
+                    // renders the icon+title as a chunky padded pill. `.borderless`
+                    // gives the standard flat macOS toolbar control (icon + text,
+                    // natural spacing) that matches the window chrome.
+                    .buttonStyle(.borderless)
                     .disabled(!store.manualOrderActive)
                     .help("Discard the manual card order and sort by recency.")
                 }
