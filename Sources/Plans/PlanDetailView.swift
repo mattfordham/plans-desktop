@@ -282,10 +282,11 @@ struct RunProgressSheet: View {
         .frame(minWidth: 480, minHeight: 360)
     }
 
-    /// The verb for this run's mode ("Executing" / "Elaborating").
+    /// The verb for this run's mode ("Executing" / "Elaborating" / "Capturing").
     private var modeVerb: String {
         switch run?.mode {
         case .elaborate: return "Elaborating"
+        case .capture: return "Capturing"
         case .execute, .none: return "Executing"
         }
     }

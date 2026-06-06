@@ -7,6 +7,8 @@
  *                always in `worktree` isolation, leaving it in `review`.
  *   - `elaborate`: drives `plan-elaborate` to research/flesh out a pending
  *                task autonomously (no interactive prompts).
+ *   - `capture`: drives `plan-capture` to record a new task from a free-text
+ *                `--description`, leaving it in `pending` (no chaining).
  * This process is the SOLE writer of the project's `.plans/` directory and git
  * tree — the Plans.app itself is a strictly read-only viewer.
  *
@@ -28,12 +30,15 @@ import { query } from "@anthropic-ai/claude-agent-sdk";
 const MAX_BUDGET_USD = 5.0;
 
 /** What the spawned agent should do with the task. */
-type Mode = "execute" | "elaborate";
+type Mode = "execute" | "elaborate" | "capture";
 
 interface Args {
   projectRoot: string;
-  taskId: string;
+  /** Required for execute/elaborate; undefined for capture (no task exists yet). */
+  taskId?: string;
   mode: Mode;
+  /** Required for capture: the free-text description to capture as a new task. */
+  description?: string;
 }
 
 /** Emit one NDJSON line on stdout. Never pretty-printed. */
@@ -49,6 +54,7 @@ function emitError(message: string): void {
 function parseArgs(argv: string[]): Args | null {
   let projectRoot: string | undefined;
   let taskId: string | undefined;
+  let description: string | undefined;
   let mode: Mode = "execute";
 
   for (let i = 0; i < argv.length; i++) {
@@ -57,16 +63,36 @@ function parseArgs(argv: string[]): Args | null {
       projectRoot = argv[++i];
     } else if (arg === "--task-id") {
       taskId = argv[++i];
+    } else if (arg === "--description") {
+      description = argv[++i];
     } else if (arg === "--mode") {
       const value = argv[++i];
-      if (value !== "execute" && value !== "elaborate") {
+      if (
+        value !== "execute" &&
+        value !== "elaborate" &&
+        value !== "capture"
+      ) {
         return null;
       }
       mode = value;
     }
   }
 
-  if (!projectRoot || !taskId) {
+  if (!projectRoot) {
+    return null;
+  }
+
+  if (mode === "capture") {
+    // Capture creates a brand-new task, so there is no task id yet; a
+    // free-text description is required instead.
+    if (!description) {
+      return null;
+    }
+    return { projectRoot, mode, description };
+  }
+
+  // execute / elaborate operate on an existing task.
+  if (!taskId) {
     return null;
   }
   return { projectRoot, taskId, mode };
@@ -149,17 +175,48 @@ function buildElaboratePrompt(taskId: string): string {
   ].join("\n");
 }
 
-function buildPrompt(taskId: string, mode: Mode): string {
-  return mode === "elaborate"
-    ? buildElaboratePrompt(taskId)
-    : buildExecutePrompt(taskId);
+/**
+ * Build the prompt for a `capture` run. plan-capture is normally interactive
+ * (it asks clarifying questions before recording the task); since this is an
+ * unattended hand-off with no UI to answer prompts, we instruct the agent to
+ * capture autonomously, recording reasonable assumptions instead of asking, and
+ * to capture ONLY — never chaining onward to elaborate or execute.
+ */
+function buildCapturePrompt(description: string): string {
+  return [
+    `Use the \`plan-capture\` skill to record a new plans-cc task from the`,
+    `following description:`,
+    "",
+    `/plan-capture "${description}"`,
+    "",
+    "Requirements:",
+    "1. Capture ONLY. Do NOT chain onward to elaborate or execute the task —",
+    "   your job ends once the task is recorded.",
+    "2. Work fully autonomously. Do NOT ask the user any questions — there is",
+    "   no interactive UI to answer them. Where the skill would prompt for a",
+    "   clarification, make the most reasonable assumption yourself and record",
+    "   it in the task's Assumptions section.",
+    "3. Leave the new task in the `pending` state.",
+    "",
+    "Work autonomously to completion. Do not ask for confirmation.",
+  ].join("\n");
+}
+
+function buildPrompt(args: Args): string {
+  if (args.mode === "capture") {
+    return buildCapturePrompt(args.description ?? "");
+  }
+  if (args.mode === "elaborate") {
+    return buildElaboratePrompt(args.taskId ?? "");
+  }
+  return buildExecutePrompt(args.taskId ?? "");
 }
 
 async function main(): Promise<void> {
   const args = parseArgs(process.argv.slice(2));
   if (!args) {
     emitError(
-      "Missing or invalid arguments. Usage: run-task.js --project-root <abs path> --task-id <NNN> [--mode execute|elaborate]",
+      "Missing or invalid arguments. Usage: run-task.js --project-root <abs path> [--mode execute|elaborate|capture] (--task-id <NNN> for execute/elaborate; --description <text> for capture)",
     );
     process.exit(1);
     return;
@@ -167,7 +224,7 @@ async function main(): Promise<void> {
 
   try {
     const response = query({
-      prompt: buildPrompt(args.taskId, args.mode),
+      prompt: buildPrompt(args),
       options: {
         cwd: args.projectRoot,
         permissionMode: "acceptEdits",

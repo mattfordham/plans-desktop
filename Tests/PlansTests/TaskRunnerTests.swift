@@ -175,4 +175,44 @@ final class TaskRunnerTests: XCTestCase {
         XCTAssertEqual(run.mode, .elaborate)
         XCTAssertFalse(run.isRunning)
     }
+
+    // MARK: - Capture mode (task #023)
+
+    /// `RunMode` is `String`-backed; the raw value is the `--mode` flag passed
+    /// to the Node runner, so `capture` must round-trip exactly.
+    func testCaptureModeRoundTripsRawValue() {
+        XCTAssertEqual(RunMode.capture.rawValue, "capture")
+        XCTAssertEqual(RunMode(rawValue: "capture"), .capture)
+    }
+
+    /// A `.capture` run carries the free-text `description` (threaded to the
+    /// runner's `--description` flag) and the synthetic `"capture:<path>"`
+    /// identity used in place of a not-yet-existing task id. It is not running
+    /// until started.
+    @MainActor
+    func testCaptureRunCarriesDescriptionAndSyntheticIdentity() {
+        let run = TaskRun(taskID: "capture:/some/project", mode: .capture, description: "Add a thing")
+        XCTAssertEqual(run.taskID, "capture:/some/project")
+        XCTAssertEqual(run.mode, .capture)
+        XCTAssertEqual(run.description, "Add a thing")
+        XCTAssertFalse(run.isRunning)
+    }
+
+    /// The `description` init parameter defaults to `nil`, so non-capture runs
+    /// (execute / elaborate, which operate on an existing task id) carry no
+    /// description.
+    @MainActor
+    func testNonCaptureRunHasNilDescriptionByDefault() {
+        let run = TaskRun(taskID: "042", mode: .execute)
+        XCTAssertNil(run.description)
+    }
+
+    // The Node-side `--description` arg shape (capture runs pass
+    // `--description <text>` and omit `--task-id`) is verified by inspection of
+    // `TaskRun.spawn` / `run-task.ts`; it is not exercised here because that
+    // would require spawning a real `node` process. The synthetic-key contract
+    // (`"capture:" + projectPath`) that `TaskRunner.capture(...)` registers a
+    // run under is covered by the `TaskRun` identity test above — calling
+    // `capture(...)` is deliberately avoided so this test surface stays pure
+    // (no `Process` spawn, no flakiness).
 }

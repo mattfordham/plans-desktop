@@ -118,10 +118,13 @@ enum RunEvent: Codable, Equatable {
 ///
 /// Mirrors the Node script's `--mode` flag (`run-task.ts`). `execute` runs
 /// `plan-execute` in mandatory worktree isolation; `elaborate` runs
-/// `plan-elaborate` autonomously to flesh out a pending task.
+/// `plan-elaborate` autonomously to flesh out a pending task; `capture` runs
+/// `plan-capture` autonomously to record a new task from a free-text
+/// description (no existing task id).
 enum RunMode: String {
     case execute
     case elaborate
+    case capture
 }
 
 /// A `RunEvent` paired with a fresh `UUID` so the SwiftUI log list can iterate
@@ -152,9 +155,14 @@ final class TaskRun {
     /// The task id this run is working — also the run's identity.
     let taskID: String
 
-    /// The mode of this run (`.execute` / `.elaborate`), so the UI can label it
-    /// ("Executing #019" vs "Elaborating #019").
+    /// The mode of this run (`.execute` / `.elaborate` / `.capture`), so the UI
+    /// can label it ("Executing #019" vs "Elaborating #019").
     let mode: RunMode
+
+    /// Free-text description for a `.capture` run, threaded to the Node runner's
+    /// `--description` flag. `nil` for `.execute` / `.elaborate` runs (which
+    /// operate on an existing task id instead).
+    let description: String?
 
     /// True from the moment the run is accepted until the process terminates (or
     /// `stop()` is called). Drives the progress sheet and per-row inline status.
@@ -189,9 +197,10 @@ final class TaskRun {
     /// drop it from its active map and trigger a store reload.
     private var onFinish: (() -> Void)?
 
-    init(taskID: String, mode: RunMode) {
+    init(taskID: String, mode: RunMode, description: String? = nil) {
         self.taskID = taskID
         self.mode = mode
+        self.description = description
     }
 
     // MARK: - Lifecycle
@@ -226,6 +235,7 @@ final class TaskRun {
         // suspension point can't race against later main-actor state access.
         let taskID = self.taskID
         let mode = self.mode
+        let description = self.description
         _Concurrency.Task { [weak self] in
             let nodePath = await _Concurrency.Task.detached {
                 TaskRun.resolveNodePath()
@@ -242,7 +252,8 @@ final class TaskRun {
             }
             runnerLog.notice("resolved node: \(nodePath, privacy: .public)")
             self.spawn(nodePath: nodePath, scriptURL: scriptURL,
-                       projectPath: projectPath, taskID: taskID, mode: mode)
+                       projectPath: projectPath, taskID: taskID, mode: mode,
+                       description: description)
         }
     }
 
@@ -258,15 +269,26 @@ final class TaskRun {
     // MARK: - Spawning
 
     private func spawn(nodePath: String, scriptURL: URL,
-                       projectPath: String, taskID: String, mode: RunMode) {
+                       projectPath: String, taskID: String, mode: RunMode,
+                       description: String?) {
         let proc = Process()
         proc.executableURL = URL(fileURLWithPath: nodePath)
-        proc.arguments = [
+        var arguments = [
             scriptURL.path,
             "--project-root", projectPath,
-            "--task-id", taskID,
-            "--mode", mode.rawValue,
         ]
+        // Capture runs have no real task id (the task does not exist yet); they
+        // carry a free-text `--description` instead. execute/elaborate operate
+        // on an existing task and pass `--task-id`.
+        if mode == .capture {
+            if let description, !description.isEmpty {
+                arguments += ["--description", description]
+            }
+        } else {
+            arguments += ["--task-id", taskID]
+        }
+        arguments += ["--mode", mode.rawValue]
+        proc.arguments = arguments
 
         let stdoutPipe = Pipe()
         let stderrPipe = Pipe()
@@ -451,6 +473,26 @@ final class TaskRunner {
         }
         let taskRun = TaskRun(taskID: taskID, mode: mode)
         runs[taskID] = taskRun
+        taskRun.start(projectPath: projectPath) { [weak self] in
+            self?.onAnyRunFinished?()
+        }
+    }
+
+    /// Launches a `capture` run for `projectPath` that records a brand-new task
+    /// from `description`. Because no task id exists yet, the run is tracked
+    /// under a synthetic identity key (`"capture:" + projectPath`), which also
+    /// becomes the `TaskRun`'s `taskID`. Reuses the same start / finish reload
+    /// path as `run(...)`, so the captured task surfaces on the next store
+    /// reload. If a capture for this project is already in flight, this is a
+    /// no-op (mirrors the guard in `run(...)`).
+    func capture(projectPath: String, description: String) {
+        let key = "capture:" + projectPath
+        if let existing = runs[key], existing.isRunning {
+            runnerLog.notice("capture ignored: project \(projectPath, privacy: .public) already capturing")
+            return
+        }
+        let taskRun = TaskRun(taskID: key, mode: .capture, description: description)
+        runs[key] = taskRun
         taskRun.start(projectPath: projectPath) { [weak self] in
             self?.onAnyRunFinished?()
         }

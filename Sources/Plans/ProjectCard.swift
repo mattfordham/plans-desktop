@@ -48,6 +48,18 @@ struct ProjectCard: View {
     /// on each row's spinner.
     @State private var progressPopoverTaskID: String? = nil
 
+    /// Whether the plan-capture popover (the "+" button's `TextField`) is open.
+    /// Transient UI state, reset after a successful submit.
+    @State private var capturePresented = false
+
+    /// The in-flight text of the capture `TextField`. Cleared after submit.
+    @State private var captureText = ""
+
+    /// The synthetic run id `TaskRunner.capture` keys a capture run under for THIS
+    /// project (`"capture:" + projectPath`). Distinct from any real 3-char task id,
+    /// so it can safely share `progressPopoverTaskID` / `progressPopover(for:)`.
+    private var captureKey: String { "capture:" + project.projectPath }
+
     /// A per-task `Binding<Bool>` for the run-progress popover: it reads `true`
     /// only when `progressPopoverTaskID` is this `taskID`, and on set assigns the
     /// id when raised / clears it when lowered — so opening one row's popover (or
@@ -137,6 +149,8 @@ struct ProjectCard: View {
                 }
             }
 
+            captureControl
+
             Spacer(minLength: 8)
 
             ForEach(statusCounts, id: \.status) { entry in
@@ -153,6 +167,79 @@ struct ProjectCard: View {
                 }
             }
         }
+    }
+
+    // MARK: - Capture ("+" new plan)
+
+    /// The per-project plan-capture control, placed immediately after the project
+    /// name in the header. When no capture is in flight it's a "+" `RowActionGlyph`
+    /// that opens the capture popover (a `TextField` to describe the plan); on
+    /// submit it hands the description to `TaskRunner.capture` — the bundled
+    /// Agent-SDK process is the sole writer of `.plans/` (§2). While a capture run
+    /// IS in flight for this project (key `captureKey`), it swaps to a tappable
+    /// spinner whose progress popover reuses the same `RunProgressSheet` machinery
+    /// as `rowActions`, and on close drops the run and reloads the store so the new
+    /// `pending` task surfaces.
+    @ViewBuilder
+    private var captureControl: some View {
+        if runner.isRunning(taskID: captureKey) {
+            // Mirror `rowActions`'s spinner+popover block, keyed on the synthetic
+            // capture id. Anchored to the spinner's bounds; on close drop the run
+            // and reload so the new pending task appears via the read path.
+            ProgressView()
+                .controlSize(.small)
+                .popover(isPresented: progressPopover(for: captureKey),
+                         attachmentAnchor: .rect(.bounds)) {
+                    RunProgressSheet(run: runner.run(for: captureKey),
+                                     taskID: captureKey)
+                        .frame(width: 480)
+                        .onDisappear {
+                            runner.dismiss(taskID: captureKey)
+                            store.reload()
+                        }
+                }
+                .padding(.leading, 0)
+                .contentShape(Rectangle())
+                .onTapGesture {
+                    progressPopoverTaskID = (progressPopoverTaskID == captureKey) ? nil : captureKey
+                }
+                .help("Show capture progress")
+        } else {
+            RowActionGlyph(systemImage: "plus.circle", help: "Capture a new plan") {
+                captureText = ""
+                capturePresented = true
+            }
+            .popover(isPresented: $capturePresented, attachmentAnchor: .rect(.bounds)) {
+                VStack(alignment: .leading, spacing: 10) {
+                    Text("New plan for \(project.projectName)")
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                    TextField("Describe the plan…", text: $captureText)
+                        .textFieldStyle(.roundedBorder)
+                        .onSubmit { submitCapture() }
+                    HStack {
+                        Spacer()
+                        Button("Capture") { submitCapture() }
+                            .keyboardShortcut(.defaultAction)
+                    }
+                }
+                .padding(14)
+                .frame(width: 280)
+            }
+        }
+    }
+
+    /// Hands the trimmed capture text to `TaskRunner.capture` (the sole `.plans/`
+    /// writer is the spawned Agent-SDK process, §2), then clears the field and
+    /// dismisses the popover. An empty/whitespace-only description is ignored:
+    /// nothing spawns and the popover stays open so the user can correct it.
+    private func submitCapture() {
+        let trimmed = captureText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        cardLog.notice("card Capture submitted: project=\(self.project.projectPath, privacy: .public)")
+        runner.capture(projectPath: project.projectPath, description: trimmed)
+        captureText = ""
+        capturePresented = false
     }
 
     // MARK: - Body (the active plan rows, or the empty state)
