@@ -171,12 +171,14 @@ struct PlanDetailView: View {
 
     /// Pure predicate for the "Execute" action's availability, so the gating rule
     /// is unit-testable independent of the view. Available only for an elaborated
-    /// or in-progress task that is not blocked. Whether a run is in flight is a
-    /// separate, per-task concern (the row shows a spinner instead of the button)
-    /// — runs are independent across tasks, so it does NOT gate availability.
+    /// (not in-progress) task that is not blocked: once a task is in-progress it
+    /// already has a run underway (or completed) and must not offer Execute again
+    /// (#027). Whether a run is in flight is a separate, per-task concern (the row
+    /// shows a spinner instead of the button) — runs are independent across tasks,
+    /// so it does NOT gate availability.
     static func canWork(status: TaskStatus?, isBlocked: Bool) -> Bool {
         guard !isBlocked else { return false }
-        return status == .elaborated || status == .inProgress
+        return status == .elaborated
     }
 
     /// Pure predicate for the "Elaborate" action's availability. Available only

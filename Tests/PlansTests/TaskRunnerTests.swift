@@ -128,21 +128,29 @@ final class TaskRunnerTests: XCTestCase {
     // MARK: - "Work this task" button gating (segment 3)
 
     /// `PlanDetailView.canWork` is the pure predicate behind the Execute action's
-    /// availability. Available only for an elaborated / in-progress, non-blocked
-    /// task. Whether a run is in flight is a separate, per-task concern handled by
-    /// the UI (spinner vs button) and does NOT gate availability.
+    /// availability. Available only for an elaborated, non-blocked task — an
+    /// in-progress task already has a run going (or done) and must not offer
+    /// Execute again (#027). Whether a run is in flight is a separate, per-task
+    /// concern handled by the UI (spinner vs button) and does NOT gate
+    /// availability.
     @MainActor
     func testCanWorkGating() {
-        // Workable statuses, not blocked → available.
+        // Elaborated, not blocked → available.
         XCTAssertTrue(PlanDetailView.canWork(status: .elaborated, isBlocked: false))
-        XCTAssertTrue(PlanDetailView.canWork(status: .inProgress, isBlocked: false))
 
-        // Non-workable status → unavailable.
+        // In-progress is NOT workable: Execute must not appear once work started.
+        XCTAssertFalse(PlanDetailView.canWork(status: .inProgress, isBlocked: false))
+
+        // Other non-workable statuses → unavailable.
         XCTAssertFalse(PlanDetailView.canWork(status: .pending, isBlocked: false))
+        XCTAssertFalse(PlanDetailView.canWork(status: .review, isBlocked: false))
+        XCTAssertFalse(PlanDetailView.canWork(status: .inReview, isBlocked: false))
+        XCTAssertFalse(PlanDetailView.canWork(status: .completed, isBlocked: false))
         XCTAssertFalse(PlanDetailView.canWork(status: nil, isBlocked: false))
 
-        // Blocked → unavailable even with a workable status.
+        // Blocked → unavailable even with an otherwise-workable status.
         XCTAssertFalse(PlanDetailView.canWork(status: .elaborated, isBlocked: true))
+        XCTAssertFalse(PlanDetailView.canWork(status: .inProgress, isBlocked: true))
     }
 
     /// `PlanDetailView.canElaborate` is the pure predicate behind the Elaborate
