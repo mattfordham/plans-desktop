@@ -467,4 +467,28 @@ final class BrowserWindowTests: XCTestCase {
     func testManualOrderRevertLabelDescribesRecencySort() {
         XCTAssertEqual(BrowserViewModel.manualOrderRevertLabel, "Sort by Recency")
     }
+
+    // MARK: - ProjectTasks.hasOutstandingWork (#021)
+
+    /// A project with at least one active (outstanding) task reports work.
+    func testHasOutstandingWorkTrueWhenActiveTasksPresent() {
+        let project = makeProject(
+            path: "/p",
+            name: "p",
+            activeTasks: [makeTask(id: "001", status: .inProgress)]
+        )
+        XCTAssertTrue(project.hasOutstandingWork)
+    }
+
+    /// A project with no active tasks reports no outstanding work, even when it
+    /// carries completed tasks in `tasks`.
+    func testHasOutstandingWorkFalseWhenNoActiveTasks() {
+        let project = makeProject(
+            path: "/p",
+            name: "p",
+            tasks: [makeTask(id: "099", status: .completed)],
+            activeTasks: []
+        )
+        XCTAssertFalse(project.hasOutstandingWork)
+    }
 }

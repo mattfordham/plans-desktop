@@ -54,20 +54,32 @@ struct BrowserWindow: View {
     /// order is active and non-empty (#017), the grid honors that override
     /// (`applyManualOrder`, new project paths to the top); otherwise it falls
     /// back to the automatic recency sort (`sortByStaleness`) exactly as before.
+    ///
+    /// After the order is resolved, the "Hide Empty" toolbar toggle (#021) is
+    /// applied: when `store.hideEmptyProjects` is true the result is filtered to
+    /// projects with outstanding work (`hasOutstandingWork`), preserving order.
+    /// `store.projects` is never mutated — only this derived view is filtered.
     private var sortedProjects: [ProjectTasks] {
+        let sorted: [ProjectTasks]
         if store.manualOrderActive && !store.projectOrderOverride.isEmpty {
-            return BrowserViewModel.applyManualOrder(
+            sorted = BrowserViewModel.applyManualOrder(
                 store.projects,
                 order: store.projectOrderOverride
             )
+        } else {
+            sorted = BrowserViewModel.sortByStaleness(store.projects)
         }
-        return BrowserViewModel.sortByStaleness(store.projects)
+        return store.hideEmptyProjects ? sorted.filter(\.hasOutstandingWork) : sorted
     }
 
     var body: some View {
+        // A local `@Bindable` over the environment store yields the two-way
+        // binding the "Hide Empty" toggle (#021) needs (`$store.hideEmptyProjects`)
+        // while the view keeps reading the single shared `@Environment` instance.
+        @Bindable var store = store
         // A pure, full-width card dashboard. Tapping a plan row opens that plan's
         // detail in a separate window (§011); this window has no detail pane.
-        cardGrid
+        return cardGrid
             .frame(minWidth: 480, minHeight: 520)
             .toolbar {
                 ToolbarItem {
@@ -80,6 +92,16 @@ struct BrowserWindow: View {
                         Label("Link Project…", systemImage: "plus")
                     }
                     .help("Link a plans-cc project folder")
+                }
+                // #021: hide projects with no outstanding plans. A persistent
+                // toolbar toggle bound to `store.hideEmptyProjects`; flipping it
+                // re-derives `sortedProjects` (the filter lives there) so the grid
+                // reflows. Pure store/UserDefaults state — never writes `.plans/`.
+                ToolbarItem {
+                    Toggle(isOn: $store.hideEmptyProjects) {
+                        Label("Hide Empty", systemImage: "eye.slash")
+                    }
+                    .help("Hide projects with no outstanding plans")
                 }
             }
     }

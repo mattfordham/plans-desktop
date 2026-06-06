@@ -150,6 +150,13 @@ struct ProjectTasks {
     /// elaborated > pending`, then by id ascending. Completed tasks and tasks
     /// whose status failed to decode are excluded.
     let activeTasks: [Task]
+
+    /// Whether the project has any outstanding work — i.e. at least one active
+    /// (non-completed, non-`nil`-status) task. `false` for a project whose tasks
+    /// are all completed or have unrecognized statuses. Drives the browser's
+    /// "Hide Empty" toolbar filter (#021); mirrors the "No outstanding plans"
+    /// terminology shown on an empty `ProjectCard`.
+    var hasOutstandingWork: Bool { !activeTasks.isEmpty }
 }
 
 /// Parses plans-cc task files (Data Contract 2, §5), mirroring the behavior of

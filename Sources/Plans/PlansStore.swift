@@ -41,11 +41,23 @@ final class PlansStore {
         didSet { defaults.set(manualOrderActive, forKey: Self.activeKey) }
     }
 
+    /// Whether the browser hides projects with no outstanding plans (#021). When
+    /// true, `BrowserWindow.sortedProjects` filters out projects whose
+    /// `hasOutstandingWork` is false; when false every project is shown. Persisted
+    /// on every set so the preference survives app restarts. NEVER written to
+    /// `.plans/` (§2 read-only) — UserDefaults is the only persistence sink.
+    var hideEmptyProjects: Bool = false {
+        didSet { defaults.set(hideEmptyProjects, forKey: Self.hideEmptyKey) }
+    }
+
     /// UserDefaults key for the persisted manual card order (array of paths).
     private static let orderKey = "cardOrderOverride"
 
     /// UserDefaults key for the persisted manual-order-active flag.
     private static let activeKey = "cardOrderManualActive"
+
+    /// UserDefaults key for the persisted hide-empty-projects flag (#021).
+    private static let hideEmptyKey = "hideEmptyProjects"
 
     /// The statuses surfaced in the menu bar icon space, in a fresh order that
     /// leads with actively-running work: in-progress → review → in-review. This
@@ -109,6 +121,7 @@ final class PlansStore {
         // re-persisting (the `didSet` would write the just-read value back).
         _projectOrderOverride = defaults.stringArray(forKey: Self.orderKey) ?? []
         _manualOrderActive = defaults.bool(forKey: Self.activeKey)
+        _hideEmptyProjects = defaults.bool(forKey: Self.hideEmptyKey)
     }
 
     /// Activates the manual card order and replaces it with `paths` (the new
