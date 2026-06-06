@@ -24,6 +24,14 @@ struct PlanDetailView: View {
     /// Drives the "Work this task" button's enabled state and the progress sheet.
     @Environment(TaskRunner.self) private var runner
 
+    /// Whether the progress sheet is presented. Raised when a run starts (see the
+    /// `.onChange(of: runner.isRunning)` below) and lowered by the sheet's Done
+    /// button / auto-dismiss. Kept as real view state (rather than binding the
+    /// sheet directly to `runner.isRunning`) so the user can close the sheet
+    /// after a run finishes WITHOUT the close being swallowed — dismissing the
+    /// sheet is decoupled from the run's lifecycle.
+    @State private var showProgress = false
+
     /// The resolved row for `rowID` across all projects' active rows, or `nil`
     /// when absent. Re-derived from the live store on each render.
     private var row: TaskRow? {
@@ -32,16 +40,7 @@ struct PlanDetailView: View {
     }
 
     var body: some View {
-        // `isRunning` is `private(set)` on the runner, so a custom read-only-ish
-        // binding drives the sheet: it reads `isRunning` (the sheet auto-dismisses
-        // when the run ends and the flag flips false) and ignores set-to-true.
-        // Dismissing the sheet must NOT stop the run, so the setter is a no-op —
-        // the run only ends via the runner itself (completion or the Stop button).
-        let runPresented = Binding(
-            get: { runner.isRunning },
-            set: { _ in }
-        )
-        return Group {
+        Group {
             if let row {
                 ScrollView {
                     VStack(alignment: .leading, spacing: 16) {
@@ -62,11 +61,20 @@ struct PlanDetailView: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }
-        // The modal progress sheet, presented for the lifetime of a run. Bound
-        // to `isRunning` so it auto-dismisses when the run finishes; `onDisappear`
-        // reloads the store so the task's new `review` status is surfaced by the
-        // existing read path.
-        .sheet(isPresented: runPresented) {
+        // Raise the sheet when a run starts here. We compare the runner's active
+        // task to this view's row so a run launched from a DIFFERENT detail
+        // window (the runner is shared) doesn't pop a sheet over an unrelated
+        // plan. The sheet stays up after the run ends so the user can read the
+        // summary, then closes it themselves via Done.
+        .onChange(of: runner.isRunning) { _, isRunning in
+            if isRunning, runner.activeTaskID == row?.task.id {
+                showProgress = true
+            }
+        }
+        // The modal progress sheet. Presented via real view state so the Done
+        // button / auto-dismiss can actually close it; `onDisappear` reloads the
+        // store so the task's new status is surfaced by the existing read path.
+        .sheet(isPresented: $showProgress) {
             RunProgressSheet(taskID: row?.task.id)
                 .onDisappear { store.reload() }
         }
@@ -121,7 +129,7 @@ struct PlanDetailView: View {
                     runner.run(projectPath: row.projectPath,
                                taskID: row.task.id, mode: .elaborate)
                 } label: {
-                    Label("Elaborate", systemImage: "wand.and.stars")
+                    Label("Elaborate", systemImage: "sparkles")
                 }
                 .disabled(!Self.canElaborate(status: row.task.status,
                                              isBlocked: row.task.isBlocked,

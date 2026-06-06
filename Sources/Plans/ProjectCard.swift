@@ -228,34 +228,68 @@ struct ProjectCard: View {
         } else if PlanDetailView.canElaborate(status: row.task.status,
                                               isBlocked: row.task.isBlocked,
                                               isRunning: runner.isRunning) {
-            rowActionGlyph(systemImage: "wand.and.stars", help: "Elaborate this plan") {
+            RowActionGlyph(systemImage: "sparkles", help: "Elaborate this plan") {
                 cardLog.notice("card Elaborate clicked: task=\(row.task.id, privacy: .public)")
                 runner.run(projectPath: row.projectPath, taskID: row.task.id, mode: .elaborate)
             }
         } else if PlanDetailView.canWork(status: row.task.status,
                                          isBlocked: row.task.isBlocked,
                                          isRunning: runner.isRunning) {
-            rowActionGlyph(systemImage: "play.fill", help: "Execute this plan") {
+            RowActionGlyph(systemImage: "play.fill", help: "Execute this plan") {
                 cardLog.notice("card Execute clicked: task=\(row.task.id, privacy: .public)")
                 runner.run(projectPath: row.projectPath, taskID: row.task.id, mode: .execute)
             }
         }
     }
+}
 
-    /// A single small tappable glyph for a row action. Implemented as an Image
-    /// with its own `.onTapGesture` + `.contentShape` (NOT a `Button`): a
-    /// borderless `Button` nested in a `Grid` row alongside other tap gestures
-    /// proved unreliable to hit-test on macOS, whereas the tap-gesture primitive
-    /// is the same one the content cells use to open detail and works reliably.
-    private func rowActionGlyph(systemImage: String, help: String,
-                                action: @escaping () -> Void) -> some View {
+/// A single small tappable glyph for a row action, with hover and press
+/// feedback. Implemented as an Image with its own `.onTapGesture` +
+/// `.contentShape` (NOT a `Button`): a borderless `Button` nested in a `Grid`
+/// row alongside other tap gestures proved unreliable to hit-test on macOS,
+/// whereas the tap-gesture primitive is the same one the content cells use to
+/// open detail and works reliably.
+///
+/// Feedback: on hover the glyph brightens to the primary color over a subtly
+/// tinted rounded background and the cursor switches to a pointing hand; while
+/// pressed it scales down and dims, then runs `action` on release.
+private struct RowActionGlyph: View {
+    let systemImage: String
+    let help: String
+    let action: () -> Void
+
+    @State private var hovering = false
+    @State private var pressed = false
+
+    var body: some View {
         Image(systemName: systemImage)
             .imageScale(.medium)
-            .foregroundStyle(.secondary)
+            .foregroundStyle(hovering ? Color.primary : Color.secondary)
             .frame(width: 22, height: 22)
-            .padding(.leading, 8)
+            .background(
+                RoundedRectangle(cornerRadius: 5)
+                    .fill(Color.primary.opacity(pressed ? 0.18 : (hovering ? 0.10 : 0)))
+            )
+            .scaleEffect(pressed ? 0.88 : 1.0)
+            .animation(.easeOut(duration: 0.12), value: hovering)
+            .animation(.easeOut(duration: 0.08), value: pressed)
             .contentShape(Rectangle())
-            .onTapGesture(perform: action)
+            // A min-distance-0 drag gesture gives us press-down / release-up
+            // feedback that `.onTapGesture` alone can't: press dims+shrinks the
+            // glyph, and releasing within the 22×22 glyph bounds fires the
+            // action. (Attached before the leading padding so the gesture's
+            // coordinate space is exactly the glyph, not the padded cell.)
+            .gesture(
+                DragGesture(minimumDistance: 0)
+                    .onChanged { _ in if !pressed { pressed = true } }
+                    .onEnded { value in
+                        pressed = false
+                        let bounds = CGRect(x: 0, y: 0, width: 22, height: 22)
+                        if bounds.contains(value.location) { action() }
+                    }
+            )
+            .onHover { hovering = $0 }
+            .padding(.leading, 8)
             .help(help)
     }
 }
