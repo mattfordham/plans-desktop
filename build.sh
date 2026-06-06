@@ -21,6 +21,17 @@ cp Resources/Info.plist "$APP/Contents/Info.plist"
 mkdir -p "$APP/Contents/Resources"
 cp Resources/Plans.icns "$APP/Contents/Resources/Plans.icns"
 
+# Build the work-task Agent SDK tool (Node) and bundle it into the .app so the
+# app can hand a task off to it at runtime. Produces Tools/work-task/dist/
+# (run-task.js plus a minimal node_modules), copied into
+# Contents/Resources/work-task/.
+(
+  cd Tools/work-task
+  npm install
+  npm run build
+)
+cp -R Tools/work-task/dist "$APP/Contents/Resources/work-task"
+
 # Symlink the release executable into the bundle (simplest for local dev;
 # `open Plans.app` works fine with a symlinked binary for unsigned apps).
 ln -sf "$(pwd)/.build/release/Plans" "$APP/Contents/MacOS/Plans"

@@ -11,9 +11,16 @@ import SwiftUI
 /// populated before the user first clicks the menu bar item. `startPolling()`
 /// performs that initial synchronous load and then keeps both surfaces fresh
 /// via a repeating timer (task #006).
+@MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
     /// The shared, observable store, created once and injected into both scenes.
     let store = PlansStore()
+
+    /// The shared "Work this task" runner, created once and injected into the
+    /// plan-detail scene. A single instance (rather than one per window) keeps
+    /// the at-most-one-run invariant (`isRunning` guards double-launch) shared
+    /// across every detail window. Created here on the main actor, like `store`.
+    let taskRunner = TaskRunner()
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.regular)
@@ -28,6 +35,10 @@ struct PlansApp: App {
     /// The shared store, owned by the delegate so its initial launch load
     /// (via `startPolling()`) runs before the menu panel is first opened.
     private var store: PlansStore { appDelegate.store }
+
+    /// The shared "Work this task" runner, owned by the delegate so a single
+    /// instance is shared across every plan-detail window.
+    private var taskRunner: TaskRunner { appDelegate.taskRunner }
 
     var body: some Scene {
         // Surface A — menu bar "glance". The `content:label:` overload lets the
@@ -64,6 +75,7 @@ struct PlansApp: App {
         WindowGroup("Plan", id: "plan-detail", for: TaskRow.ID.self) { $rowID in
             PlanDetailView(rowID: rowID)
                 .environment(store)
+                .environment(taskRunner)
         }
         // A roomy default so the detail body (header + markdown sections +
         // read-only How checklist) is comfortably visible without resizing on
