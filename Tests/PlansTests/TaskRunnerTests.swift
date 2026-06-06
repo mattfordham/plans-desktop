@@ -229,14 +229,52 @@ final class TaskRunnerTests: XCTestCase {
         XCTAssertFalse(run.isRunning)
     }
 
-    /// Capture and executeYolo share one synthetic per-project identity key, so
-    /// the header "+" control's in-flight guard and progress popover track either
-    /// run kind under the same id.
+    /// Capture and executeYolo share one synthetic per-project identity PREFIX, so
+    /// the header "+" control's progress rows and popovers track either run kind
+    /// under keys derived from the same prefix.
     func testCaptureKeyIsModeIndependentAndPerProject() {
         XCTAssertEqual(TaskRunner.captureKey(projectPath: "/some/project"),
                        "capture:/some/project")
         XCTAssertNotEqual(TaskRunner.captureKey(projectPath: "/a"),
                           TaskRunner.captureKey(projectPath: "/b"))
+    }
+
+    // MARK: - Multiple back-to-back captures (task #029)
+
+    /// `capture(...)` now keys every submission under a UNIQUE per-run id of the
+    /// form `captureKey(projectPath:) + ":" + UUID().uuidString`, so two captures
+    /// for the SAME project no longer collide on one key (the old single-key
+    /// guard is gone). Asserted against the construction logic directly (the
+    /// `runs` map is `private(set)` and only populable by `capture()`/`run()`,
+    /// which spawn `node` — so we never call them here).
+    func testUniqueCaptureKeysForSameProjectAreDistinctAndSharePrefix() {
+        let prefix = TaskRunner.captureKey(projectPath: "/some/project") + ":"
+        let keyA = prefix + UUID().uuidString
+        let keyB = prefix + UUID().uuidString
+
+        // Distinct submissions get distinct keys (no collision / no guard).
+        XCTAssertNotEqual(keyA, keyB)
+        // Both still resolve back to this project via the shared prefix.
+        XCTAssertTrue(keyA.hasPrefix(prefix))
+        XCTAssertTrue(keyB.hasPrefix(prefix))
+    }
+
+    /// The prefix-boundary logic `runningCaptures(projectPath:)` filters on: a
+    /// per-run key for project `/a` (`captureKey("/a") + ":" + uuid`) has prefix
+    /// `captureKey("/a") + ":"`, but does NOT have prefix `captureKey("/ab") + ":"`
+    /// — the trailing `:` separator prevents a project whose path is a string
+    /// prefix of another (`/a` vs `/ab`) from matching. Asserted purely (no
+    /// `capture()`/`run()` call, which would spawn `node`).
+    func testRunningCapturesPrefixBoundaryRejectsStringPrefixProject() {
+        let prefixA = TaskRunner.captureKey(projectPath: "/a") + ":"
+        let prefixAB = TaskRunner.captureKey(projectPath: "/ab") + ":"
+
+        let keyForA = prefixA + UUID().uuidString
+
+        // The /a key matches /a's prefix...
+        XCTAssertTrue(keyForA.hasPrefix(prefixA))
+        // ...but NOT /ab's prefix — the `:` separator is the boundary guard.
+        XCTAssertFalse(keyForA.hasPrefix(prefixAB))
     }
 
     // The Node-side `--description` arg shape (capture / executeYolo runs pass

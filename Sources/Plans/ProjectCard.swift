@@ -60,11 +60,6 @@ struct ProjectCard: View {
     /// a worktree) instead of a capture-only run. Reset alongside `captureText`.
     @State private var captureExecute = false
 
-    /// The synthetic run id `TaskRunner.capture` keys a capture/execute run under
-    /// for THIS project. Distinct from any real 3-char task id, so it can safely
-    /// share `progressPopoverTaskID` / `progressPopover(for:)`.
-    private var captureKey: String { TaskRunner.captureKey(projectPath: project.projectPath) }
-
     /// A per-task `Binding<Bool>` for the run-progress popover: it reads `true`
     /// only when `progressPopoverTaskID` is this `taskID`, and on set assigns the
     /// id when raised / clears it when lowered — so opening one row's popover (or
@@ -94,6 +89,7 @@ struct ProjectCard: View {
         VStack(alignment: .leading, spacing: 10) {
             header
             Divider()
+            captureRows
             body(for: rows)
             // Top-anchor the header + body and bottom-anchor the footer: LazyVGrid
             // sizes every cell to its ROW's max height, so a short card handed a
@@ -142,9 +138,10 @@ struct ProjectCard: View {
                 .layoutPriority(1)
 
             // Capture / execute control: placed immediately right of the project
-            // name. "+" opens the popover; while a capture/execute run is in
-            // flight it swaps to a tappable spinner. (Git status moved to the
-            // footer in #026, so the header no longer carries the branch block.)
+            // name. "+" opens the popover and stays put so back-to-back captures
+            // can be submitted; running captures surface as stacked rows below the
+            // divider. (Git status moved to the footer in #026, so the header no
+            // longer carries the branch block.)
             captureControl
 
             Spacer(minLength: 8)
@@ -168,55 +165,81 @@ struct ProjectCard: View {
     // MARK: - Capture ("+" new plan)
 
     /// The per-project plan-capture control, placed immediately after the project
-    /// name in the header. When no capture is in flight it's a "+" `RowActionGlyph`
-    /// that opens the capture popover (a `TextField` to describe the plan); on
-    /// submit it hands the description to `TaskRunner.capture` — the bundled
-    /// Agent-SDK process is the sole writer of `.plans/` (§2). While a capture run
-    /// IS in flight for this project (key `captureKey`), it swaps to a tappable
-    /// spinner whose progress popover reuses the same `RunProgressSheet` machinery
-    /// as `rowActions`, and on close drops the run and reloads the store so the new
-    /// `pending` task surfaces.
+    /// name in the header. It's always a "+" `RowActionGlyph` that opens the
+    /// capture popover (a `TextField` to describe the plan); on submit it hands the
+    /// description to `TaskRunner.capture` — the bundled Agent-SDK process is the
+    /// sole writer of `.plans/` (§2). The "+" stays put even while captures are in
+    /// flight, so it's immediately reusable for back-to-back submissions; running
+    /// captures surface as stacked rows below the divider (`captureRows`).
     @ViewBuilder
     private var captureControl: some View {
-        if runner.isRunning(taskID: captureKey) {
-            // Mirror `rowActions`'s spinner+popover block, keyed on the synthetic
-            // capture id. Anchored to the spinner's bounds; on close drop the run
-            // and reload so the new pending task appears via the read path.
-            ProgressView()
-                .controlSize(.small)
-                // Pin to the same 24×24 box as `CaptureGlyph` so swapping the
-                // "+" for the spinner (and back) never shifts the header layout.
-                .frame(width: 24, height: 24)
-                .popover(isPresented: progressPopover(for: captureKey),
-                         attachmentAnchor: .rect(.bounds)) {
-                    RunProgressSheet(run: runner.run(for: captureKey),
-                                     taskID: captureKey)
-                        .frame(width: 480)
-                        .onDisappear {
-                            runner.dismiss(taskID: captureKey)
-                            store.reload()
-                        }
+        // A "+" glyph sized to match the header status badges
+        // (`imageScale(.large)`, 20pt wide) rather than the smaller per-row
+        // action glyphs, so it reads as a peer of the count badges. Same
+        // tap-gesture primitive as `RowActionGlyph` (a nested borderless
+        // Button hit-tests unreliably here — see the file header note).
+        CaptureGlyph {
+            captureText = ""
+            captureExecute = false
+            capturePresented = true
+        }
+        .popover(isPresented: $capturePresented, attachmentAnchor: .rect(.bounds)) {
+            capturePopover
+        }
+    }
+
+    // MARK: - Capture progress rows (in-flight captures)
+
+    /// One compact row per in-flight capture/execute run for this project,
+    /// stacked between the header divider and the plan rows. Each row is a small
+    /// spinner + the run's free-text `description`, tappable to toggle that run's
+    /// progress popover (the same `RunProgressSheet` machinery the per-row spinner
+    /// uses). The "+" stays put in the header, so submitting another capture adds
+    /// another row here rather than displacing the control. Rendered as nothing
+    /// when no captures are running, so an idle card shows no empty gap.
+    @ViewBuilder
+    private var captureRows: some View {
+        let captures = runner.runningCaptures(projectPath: project.projectPath)
+        if !captures.isEmpty {
+            VStack(alignment: .leading, spacing: 4) {
+                ForEach(captures, id: \.taskID) { run in
+                    captureRow(run)
                 }
-                .contentShape(Rectangle())
-                .onTapGesture {
-                    progressPopoverTaskID = (progressPopoverTaskID == captureKey) ? nil : captureKey
-                }
-                .help("Show capture progress")
-        } else {
-            // A "+" glyph sized to match the header status badges
-            // (`imageScale(.large)`, 20pt wide) rather than the smaller per-row
-            // action glyphs, so it reads as a peer of the count badges. Same
-            // tap-gesture primitive as `RowActionGlyph` (a nested borderless
-            // Button hit-tests unreliably here — see the file header note).
-            CaptureGlyph {
-                captureText = ""
-                captureExecute = false
-                capturePresented = true
-            }
-            .popover(isPresented: $capturePresented, attachmentAnchor: .rect(.bounds)) {
-                capturePopover
             }
         }
+    }
+
+    /// A single in-flight capture row: a small spinner plus the run's description,
+    /// tappable (same `contentShape` + `onTapGesture` primitive as the per-row
+    /// spinner) to toggle that run's progress popover, anchored to the row bounds.
+    /// On the popover's close the finished run is dropped and the store reloaded
+    /// so the new task surfaces via the read path.
+    @ViewBuilder
+    private func captureRow(_ run: TaskRun) -> some View {
+        HStack(spacing: 8) {
+            ProgressView()
+                .controlSize(.small)
+            Text(run.description ?? "Capturing…")
+                .font(.body)
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+                .truncationMode(.tail)
+            Spacer(minLength: 0)
+        }
+        .contentShape(Rectangle())
+        .onTapGesture {
+            progressPopoverTaskID = (progressPopoverTaskID == run.taskID) ? nil : run.taskID
+        }
+        .popover(isPresented: progressPopover(for: run.taskID),
+                 attachmentAnchor: .rect(.bounds)) {
+            RunProgressSheet(run: run, taskID: run.taskID)
+                .frame(width: 480)
+                .onDisappear {
+                    runner.dismiss(taskID: run.taskID)
+                    store.reload()
+                }
+        }
+        .help("Show capture progress")
     }
 
     /// The content of the capture popover: a caption, a genuinely multi-line

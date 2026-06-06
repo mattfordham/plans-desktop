@@ -482,30 +482,41 @@ final class TaskRunner {
         }
     }
 
-    /// The synthetic run-identity key for a description-driven run (capture or
+    /// The synthetic run-identity PREFIX for description-driven runs (capture or
     /// executeYolo) in `projectPath`. There is no real task id at this point, so
-    /// the run is keyed per project — at most one such run is in flight per card.
-    /// The key is independent of mode so the "+" control's in-flight guard and
-    /// progress popover track either run kind under one stable id.
+    /// each run is keyed under this prefix plus a unique suffix (see
+    /// `capture(...)`). The prefix is independent of mode so a project's progress
+    /// rows and popovers track either run kind. `runningCaptures(projectPath:)`
+    /// filters on `captureKey(projectPath:) + ":"` to gather a project's runs.
     nonisolated static func captureKey(projectPath: String) -> String { "capture:" + projectPath }
+
+    /// The running description-driven runs (capture / executeYolo) for
+    /// `projectPath`, in a stable order. Matches the per-run keys built by
+    /// `capture(...)` by filtering on the `captureKey(projectPath:) + ":"` prefix
+    /// — the trailing `:` separator ensures a different project whose path is a
+    /// string prefix of this one (e.g. `/a` vs `/ab`) is NOT matched. Sorted by
+    /// `taskID` so the render order is stable across polls.
+    func runningCaptures(projectPath: String) -> [TaskRun] {
+        let prefix = Self.captureKey(projectPath: projectPath) + ":"
+        return runs.values
+            .filter { $0.taskID.hasPrefix(prefix) && $0.isRunning }
+            .sorted { $0.taskID < $1.taskID }
+    }
 
     /// Launches a description-driven run for `projectPath` from a brand-new
     /// task's `description`. When `execute` is false (the default), it `capture`s
     /// the task and leaves it `pending`; when true, it runs
     /// `plan-execute "<description>" yolo` (mode `.executeYolo`) to auto-capture,
     /// auto-elaborate, and execute it autonomously in a worktree, leaving it in
-    /// `review`. Because no task id exists yet, the run is tracked under a
-    /// synthetic identity key (`captureKey(projectPath:)`), which also becomes
-    /// the `TaskRun`'s `taskID`. Reuses the same start / finish reload path as
-    /// `run(...)`, so the new task surfaces on the next store reload. If such a
-    /// run is already in flight for this project, this is a no-op (mirrors the
-    /// guard in `run(...)`).
+    /// `review`. Because no task id exists yet, the run is tracked under a UNIQUE
+    /// per-run identity key (`captureKey(projectPath:) + ":" + UUID()`), which
+    /// also becomes the `TaskRun`'s `taskID`. Every submission therefore starts a
+    /// fresh, independently-tracked run — captures are no longer guarded or
+    /// serialized, so multiple can run back-to-back/concurrently for one project.
+    /// Reuses the same start / finish reload path as `run(...)`, so each new task
+    /// surfaces on the next store reload.
     func capture(projectPath: String, description: String, execute: Bool = false) {
-        let key = Self.captureKey(projectPath: projectPath)
-        if let existing = runs[key], existing.isRunning {
-            runnerLog.notice("capture ignored: project \(projectPath, privacy: .public) already running a capture/execute")
-            return
-        }
+        let key = Self.captureKey(projectPath: projectPath) + ":" + UUID().uuidString
         let mode: RunMode = execute ? .executeYolo : .capture
         let taskRun = TaskRun(taskID: key, mode: mode, description: description)
         runs[key] = taskRun
