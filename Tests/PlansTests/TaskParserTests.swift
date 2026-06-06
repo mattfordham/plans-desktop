@@ -393,8 +393,10 @@ final class TaskParserTests: XCTestCase {
     // MARK: - Project: active-task sort order
 
     func testActiveTasksSortedByStatusPriorityThenId() throws {
-        // Deliberately out of order on disk; ids chosen so id-ascending differs
-        // from status priority where statuses tie.
+        // Active rows sort by status (reverse of the header badge `glanceOrder`:
+        // in-review at top, then review, in-progress, elaborated, pending at
+        // bottom) then by id ascending. Deliberately out of order on disk; ids
+        // chosen so id-ascending differs from status priority where statuses tie.
         try writeTaskFile(filename: "060-pending.md", text: "# p\n\n**Status:** pending", in: "pending")
         try writeTaskFile(filename: "061-elaborated.md", text: "# e\n\n**Status:** elaborated", in: "pending")
         try writeTaskFile(filename: "062-review.md", text: "# r\n\n**Status:** review", in: "pending")
@@ -409,9 +411,11 @@ final class TaskParserTests: XCTestCase {
 
         let project = TaskParser().parseProject(at: tempDir.path)
         let orderedIds = project.activeTasks.map(\.id)
+        // in-review (063) > review (062) > in-progress (064) > elaborated (061)
+        // > pending (060, 065 ascending id tiebreak).
         XCTAssertEqual(
             orderedIds,
-            ["064", "063", "062", "061", "060", "065"]
+            ["063", "062", "064", "061", "060", "065"]
         )
     }
 
