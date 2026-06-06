@@ -233,6 +233,59 @@ final class PlansStoreTests: XCTestCase {
         XCTAssertFalse(store.isPolling)
     }
 
+    // MARK: - linkProject(at:)
+
+    func testLinkProjectWritesRegistryAndReloadsSoProjectAppears() throws {
+        let projectDir = try makeProjectDir(name: "alpha")
+        try writeTaskFile(
+            projectDir: projectDir,
+            filename: "001-first.md",
+            text: "# First\n\n**Status:** pending",
+            in: "pending"
+        )
+
+        // Start with an empty registry; the writer and reader share its URL.
+        let registryURL = tempDir.appendingPathComponent("projects.json")
+        let reader = RegistryReader(registryURL: registryURL)
+        let writer = RegistryWriter(registryURL: registryURL)
+        let store = PlansStore(registryReader: reader, registryWriter: writer)
+        store.reload()
+        XCTAssertEqual(store.projects.count, 0)
+
+        try store.linkProject(at: projectDir.path)
+
+        // The new project appears in the store immediately (reload happened).
+        XCTAssertEqual(store.projects.map(\.projectName), ["alpha"])
+
+        // And it was persisted to the registry on disk.
+        let persisted = reader.loadRegistry()
+        XCTAssertEqual(persisted.map(\.path), [projectDir.path])
+    }
+
+    func testLinkProjectRejectsPathWithoutPlansDirAndWritesNothing() throws {
+        // A directory that exists but has no `.plans/` subdirectory.
+        let projectDir = tempDir.appendingPathComponent("noplans")
+        try FileManager.default.createDirectory(
+            at: projectDir,
+            withIntermediateDirectories: true
+        )
+
+        let registryURL = tempDir.appendingPathComponent("projects.json")
+        let reader = RegistryReader(registryURL: registryURL)
+        let writer = RegistryWriter(registryURL: registryURL)
+        let store = PlansStore(registryReader: reader, registryWriter: writer)
+
+        XCTAssertThrowsError(try store.linkProject(at: projectDir.path)) { error in
+            XCTAssertEqual(error as? PlansStore.LinkError, .missingPlansDirectory)
+        }
+
+        // Nothing was written: no registry file exists.
+        XCTAssertFalse(
+            FileManager.default.fileExists(atPath: registryURL.path)
+        )
+        XCTAssertTrue(store.projects.isEmpty)
+    }
+
     // MARK: - iconSpaceCounts
 
     func testIconSpaceCountsSumsAcrossMultipleProjects() throws {

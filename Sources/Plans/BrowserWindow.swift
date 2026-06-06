@@ -69,6 +69,19 @@ struct BrowserWindow: View {
         // detail in a separate window (§011); this window has no detail pane.
         cardGrid
             .frame(minWidth: 480, minHeight: 520)
+            .toolbar {
+                ToolbarItem {
+                    Button {
+                        // Same shared pick → link → report flow used by the menu
+                        // bar's "Link Project…" button (§018). A folder without a
+                        // `.plans/` directory surfaces the identical modal alert.
+                        linkProjectWithUserPrompt(using: store)
+                    } label: {
+                        Label("Link Project…", systemImage: "plus")
+                    }
+                    .help("Link a plans-cc project folder")
+                }
+            }
     }
 
     // MARK: - Content: the recency-sorted card grid (dashboard)

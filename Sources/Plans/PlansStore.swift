@@ -75,6 +75,10 @@ final class PlansStore {
     /// The registry reader used by `reload()` to discover live projects.
     @ObservationIgnored private let registryReader: RegistryReader
 
+    /// The registry writer used by `linkProject(at:)` to persist a manually
+    /// linked project into `projects.json`.
+    @ObservationIgnored private let registryWriter: RegistryWriter
+
     /// The task parser used by `reload()` to parse each project's `.plans/`.
     @ObservationIgnored private let taskParser: TaskParser
 
@@ -86,16 +90,19 @@ final class PlansStore {
     /// `@ObservationIgnored` because the timer itself is not observable UI state.
     @ObservationIgnored private var pollTimer: Timer?
 
-    /// Defaults to the real readers and `.standard` UserDefaults. Inject
-    /// fixtures-backed readers and an isolated `UserDefaults(suiteName:)` in
-    /// tests. The persisted manual-order state (#017) is loaded eagerly here so
-    /// the override is in effect before the first grid layout.
+    /// Defaults to the real readers/writer and `.standard` UserDefaults. Inject
+    /// fixtures-backed readers/writer (all pointed at the same temp registry URL)
+    /// and an isolated `UserDefaults(suiteName:)` in tests. The persisted
+    /// manual-order state (#017) is loaded eagerly here so the override is in
+    /// effect before the first grid layout.
     init(
         registryReader: RegistryReader = RegistryReader(),
+        registryWriter: RegistryWriter = RegistryWriter(),
         taskParser: TaskParser = TaskParser(),
         defaults: UserDefaults = .standard
     ) {
         self.registryReader = registryReader
+        self.registryWriter = registryWriter
         self.taskParser = taskParser
         self.defaults = defaults
         // Load persisted manual-order state. Assigning the backing fields avoids
@@ -119,6 +126,31 @@ final class PlansStore {
     /// via the `manualOrderActive` setter.
     func clearManualOrder() {
         manualOrderActive = false
+    }
+
+    /// Errors surfaced by `linkProject(at:)` so the UI can present a message.
+    enum LinkError: Error, Equatable {
+        /// The chosen directory has no `.plans/` subdirectory, so it is not a
+        /// plans-cc project and must not be added to the registry.
+        case missingPlansDirectory
+    }
+
+    /// Manually links the project at `path` into the registry: validates that
+    /// `<path>/.plans/` exists (throwing `LinkError.missingPlansDirectory`
+    /// otherwise — and writing nothing in that case), upserts the path via
+    /// `RegistryWriter`, then `reload()`s so the linked project appears
+    /// immediately. `path` is used verbatim, matching `RegistryReader`'s
+    /// no-canonicalization contract.
+    func linkProject(at path: String) throws {
+        let plansPath = URL(fileURLWithPath: path)
+            .appendingPathComponent(".plans")
+            .path
+        guard FileManager.default.fileExists(atPath: plansPath) else {
+            throw LinkError.missingPlansDirectory
+        }
+
+        try registryWriter.upsertProject(path: path)
+        reload()
     }
 
     /// Re-reads the registry and re-parses every live project, replacing

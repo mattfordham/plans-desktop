@@ -35,6 +35,11 @@ struct MenuBarView: View {
 
             Divider()
 
+            Button("Link Project…") {
+                linkProjectWithUserPrompt(using: store)
+            }
+            .buttonStyle(.plain)
+
             Button("Open Browser") {
                 // No pre-focus: explicitly clear any prior drill-down so the
                 // browser opens in its default (cross-project) state.
