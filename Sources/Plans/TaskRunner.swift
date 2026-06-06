@@ -222,7 +222,7 @@ final class TaskRunner {
 
         // Resolve the bundled script first — a synchronous, non-blocking lookup.
         guard let scriptURL = Self.resolveScriptURL() else {
-            runnerLog.error("run() aborted: bundled run-task.js not found in app bundle")
+            runnerLog.error("run() aborted: bundled run-task.js not found in app bundle (bundlePath=\(Bundle.main.bundlePath, privacy: .public))")
             error = "Bundled work-task script (run-task.js) not found."
             phase = nil
             isRunning = false

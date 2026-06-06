@@ -228,33 +228,35 @@ struct ProjectCard: View {
         } else if PlanDetailView.canElaborate(status: row.task.status,
                                               isBlocked: row.task.isBlocked,
                                               isRunning: runner.isRunning) {
-            rowActionButton(systemImage: "wand.and.stars", help: "Elaborate this plan") {
+            rowActionGlyph(systemImage: "wand.and.stars", help: "Elaborate this plan") {
                 cardLog.notice("card Elaborate clicked: task=\(row.task.id, privacy: .public)")
                 runner.run(projectPath: row.projectPath, taskID: row.task.id, mode: .elaborate)
             }
         } else if PlanDetailView.canWork(status: row.task.status,
                                          isBlocked: row.task.isBlocked,
                                          isRunning: runner.isRunning) {
-            rowActionButton(systemImage: "play.fill", help: "Execute this plan") {
+            rowActionGlyph(systemImage: "play.fill", help: "Execute this plan") {
                 cardLog.notice("card Execute clicked: task=\(row.task.id, privacy: .public)")
                 runner.run(projectPath: row.projectPath, taskID: row.task.id, mode: .execute)
             }
         }
     }
 
-    /// A single small, borderless icon button for a row action. Borderless so it
-    /// reads as a compact glyph control and is its own tap target (it does not
-    /// trigger the row's open-detail tap gesture).
-    private func rowActionButton(systemImage: String, help: String,
-                                 action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            Image(systemName: systemImage)
-                .imageScale(.medium)
-                .frame(width: 18, height: 18)
-        }
-        .buttonStyle(.borderless)
-        .padding(.leading, 8)
-        .help(help)
+    /// A single small tappable glyph for a row action. Implemented as an Image
+    /// with its own `.onTapGesture` + `.contentShape` (NOT a `Button`): a
+    /// borderless `Button` nested in a `Grid` row alongside other tap gestures
+    /// proved unreliable to hit-test on macOS, whereas the tap-gesture primitive
+    /// is the same one the content cells use to open detail and works reliably.
+    private func rowActionGlyph(systemImage: String, help: String,
+                                action: @escaping () -> Void) -> some View {
+        Image(systemName: systemImage)
+            .imageScale(.medium)
+            .foregroundStyle(.secondary)
+            .frame(width: 22, height: 22)
+            .padding(.leading, 8)
+            .contentShape(Rectangle())
+            .onTapGesture(perform: action)
+            .help(help)
     }
 }
 

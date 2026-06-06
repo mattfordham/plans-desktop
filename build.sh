@@ -32,9 +32,14 @@ cp Resources/Plans.icns "$APP/Contents/Resources/Plans.icns"
 )
 cp -R Tools/work-task/dist "$APP/Contents/Resources/work-task"
 
-# Symlink the release executable into the bundle (simplest for local dev;
-# `open Plans.app` works fine with a symlinked binary for unsigned apps).
-ln -sf "$(pwd)/.build/release/Plans" "$APP/Contents/MacOS/Plans"
+# COPY (do not symlink) the release executable into the bundle. A symlinked
+# binary still launches, but macOS resolves the symlink target to locate the
+# bundle, so `Bundle.main` points at .build/release/ instead of Plans.app —
+# which breaks `Bundle.main.url(forResource:…)` lookups for the bundled
+# work-task/run-task.js (TaskRunner can't find the script and silently aborts).
+# Copying keeps the executable inside Contents/MacOS so Bundle.main resolves to
+# the .app and the bundled resources are found.
+cp "$(pwd)/.build/release/Plans" "$APP/Contents/MacOS/Plans"
 
 # Launch the app.
 open "$APP"
