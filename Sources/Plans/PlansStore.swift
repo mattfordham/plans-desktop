@@ -171,8 +171,29 @@ final class PlansStore {
     /// throws: the underlying readers are tolerant (missing/corrupt registry or
     /// `.plans/` directories yield empty results rather than crashing).
     func reload() {
+        // Snapshot the previously-known git info per path so the re-parse below
+        // can carry it over. The parser constructs `ProjectTasks` with `nil` git
+        // fields; without this carry-over, every 5s poll would momentarily reset
+        // each card's git row to `nil` (hiding the branch + dirty dot) until the
+        // async second pass repopulates it — a visible flash on every poll (#024).
+        let priorGitInfo = Dictionary(
+            projects.map { ($0.projectPath, ($0.gitBranch, $0.gitIsDirty)) },
+            uniquingKeysWith: { first, _ in first }
+        )
+
         projects = registryReader.readProjects().map { project in
-            taskParser.parseProject(at: project.path, lastSeen: project.lastSeen)
+            let parsed = taskParser.parseProject(at: project.path, lastSeen: project.lastSeen)
+            guard let prior = priorGitInfo[project.path] else { return parsed }
+            return ProjectTasks(
+                projectPath: parsed.projectPath,
+                projectName: parsed.projectName,
+                lastSeen: parsed.lastSeen,
+                tasks: parsed.tasks,
+                counts: parsed.counts,
+                activeTasks: parsed.activeTasks,
+                gitBranch: prior.0,
+                gitIsDirty: prior.1
+            )
         }
 
         // Second pass (#024): gather live git state OFF the main thread so the
@@ -180,7 +201,8 @@ final class PlansStore {
         // the main thread. `GitHelper` methods are `nonisolated`/blocking; we
         // collect plain Sendable tuples on a background queue and apply them on
         // the main queue. The first (synchronous) pass above already painted the
-        // cards with `nil` git fields, so this only enriches them.
+        // cards carrying over the last-known git fields, so this only refreshes
+        // them with live values.
         //
         // GCD (not structured concurrency) is used deliberately: `PlansStore` is
         // a non-`Sendable`, main-thread-only reference type, and GCD lets us hop
