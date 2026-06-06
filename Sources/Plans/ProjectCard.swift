@@ -30,6 +30,11 @@ struct ProjectCard: View {
     /// the row's composite `TaskRow.ID`.
     @Environment(\.openWindow) private var openWindow
 
+    /// The shared "Work this task" runner, for the per-row Elaborate / Execute
+    /// icon buttons and inline running status. Reads only — the run itself is the
+    /// sole writer of `.plans/` (§2), driven by the bundled Agent-SDK process.
+    @Environment(TaskRunner.self) private var runner
+
     /// The status counts to show in the header, in `glanceOrder`. EVERY status
     /// is included; statuses absent from `counts` or with a `0` count surface as
     /// a `0` and are rendered dimmed (50% white) rather than dropped.
@@ -184,6 +189,14 @@ struct ProjectCard: View {
                 .fixedSize(horizontal: false, vertical: true)
                 .gridColumnAlignment(.leading)
                 .frame(maxWidth: .infinity, alignment: .leading)
+
+            // Trailing per-row actions: Elaborate / Execute icon buttons (gated
+            // by the same predicates as the detail view), or an inline spinner
+            // while THIS row is being worked. The buttons are their own tap
+            // targets (borderless) and call the shared runner; the full live log
+            // is available by opening the row's detail window.
+            rowActions(row)
+                .gridColumnAlignment(.trailing)
         }
         // Row-level chrome: a single hit-test shape + the tap gesture applied to
         // the whole row so the entire row is one tap target (no inter-column gaps
@@ -193,5 +206,60 @@ struct ProjectCard: View {
         .padding(.vertical, 5)
         .contentShape(Rectangle())
         .onTapGesture { openWindow(id: "plan-detail", value: row.id) }
+    }
+
+    /// The trailing action cell for a plan row. While this row's task is being
+    /// worked, shows an inline spinner instead of the buttons. Otherwise shows
+    /// an Elaborate button (for `pending` tasks) and an Execute button (for
+    /// `elaborated`/`in-progress` tasks); each is disabled when its gating
+    /// predicate fails (blocked, wrong status, or another run in flight).
+    @ViewBuilder
+    private func rowActions(_ row: TaskRow) -> some View {
+        if runner.isRunning(taskID: row.task.id) {
+            ProgressView()
+                .controlSize(.small)
+                .padding(.leading, 8)
+        } else {
+            HStack(spacing: 4) {
+                rowActionButton(
+                    systemImage: "wand.and.stars",
+                    help: "Elaborate this plan",
+                    enabled: PlanDetailView.canElaborate(
+                        status: row.task.status,
+                        isBlocked: row.task.isBlocked,
+                        isRunning: runner.isRunning),
+                    action: {
+                        runner.run(projectPath: row.projectPath,
+                                   taskID: row.task.id, mode: .elaborate)
+                    })
+                rowActionButton(
+                    systemImage: "play.fill",
+                    help: "Execute this plan",
+                    enabled: PlanDetailView.canWork(
+                        status: row.task.status,
+                        isBlocked: row.task.isBlocked,
+                        isRunning: runner.isRunning),
+                    action: {
+                        runner.run(projectPath: row.projectPath,
+                                   taskID: row.task.id, mode: .execute)
+                    })
+            }
+            .padding(.leading, 8)
+        }
+    }
+
+    /// A single small, borderless icon button for a row action. Borderless so it
+    /// reads as a compact glyph control and is its own tap target (it does not
+    /// trigger the row's open-detail tap gesture).
+    private func rowActionButton(systemImage: String, help: String,
+                                 enabled: Bool, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: systemImage)
+                .imageScale(.medium)
+                .frame(width: 18, height: 18)
+        }
+        .buttonStyle(.borderless)
+        .disabled(!enabled)
+        .help(help)
     }
 }

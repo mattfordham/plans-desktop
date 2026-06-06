@@ -64,6 +64,7 @@ struct PlansApp: App {
         Window("Plans", id: "browser") {
             BrowserWindow()
                 .environment(store)
+                .environment(taskRunner)
         }
         .defaultLaunchBehavior(.presented)
 

@@ -146,6 +146,22 @@ final class TaskRunner {
     /// (or `stop()` is called). Drives the progress sheet and button disabling.
     private(set) var isRunning = false
 
+    /// The task id of the active (or most recently finished) run, so card rows
+    /// can show inline status for the specific row being worked. `nil` until the
+    /// first run is launched.
+    private(set) var activeTaskID: String?
+
+    /// The mode of the active run (`.execute` / `.elaborate`), so the UI can
+    /// label it ("Executing #019" vs "Elaborating #019"). `nil` until first run.
+    private(set) var activeMode: RunMode?
+
+    /// Coarse lifecycle phase for immediate feedback. Flips to `.launching` the
+    /// instant `run` is accepted (before `node` resolves / the process spawns),
+    /// so the UI shows a "Starting…" state with no dead air, then `.running`
+    /// once the child process is live.
+    enum Phase { case launching, running }
+    private(set) var phase: Phase?
+
     /// The decoded progress stream, in arrival order, for the scrolling log.
     /// Each entry wraps a `RunEvent` with a stable `UUID` for SwiftUI iteration.
     private(set) var lines: [LoggedEvent] = []
@@ -166,6 +182,12 @@ final class TaskRunner {
 
     init() {}
 
+    /// True when a run is in flight for this specific task id — lets a card row
+    /// show inline status only for the row actually being worked.
+    func isRunning(taskID: String) -> Bool {
+        isRunning && activeTaskID == taskID
+    }
+
     // MARK: - Public API
 
     /// Launches the bundled Node script for `taskID` in `projectPath`, driving
@@ -177,16 +199,21 @@ final class TaskRunner {
     func run(projectPath: String, taskID: String, mode: RunMode = .execute) {
         guard !isRunning else { return }
 
-        // Reset prior run state.
+        // Reset prior run state and record what's being worked + the initial
+        // phase, so the UI has immediate feedback before the process spawns.
         lines = []
         summary = nil
         error = nil
         buffer = Data()
+        activeTaskID = taskID
+        activeMode = mode
+        phase = .launching
         isRunning = true
 
         // Resolve the bundled script first — a synchronous, non-blocking lookup.
         guard let scriptURL = Self.resolveScriptURL() else {
             error = "Bundled work-task script (run-task.js) not found."
+            phase = nil
             isRunning = false
             return
         }
@@ -204,6 +231,7 @@ final class TaskRunner {
             guard self.isRunning else { return }
             guard let nodePath else {
                 self.error = "Could not locate `node`. Install Node.js (e.g. via Homebrew or nvm) and try again."
+                self.phase = nil
                 self.isRunning = false
                 return
             }
@@ -218,6 +246,7 @@ final class TaskRunner {
         guard isRunning else { return }
         process?.terminate()
         process = nil
+        phase = nil
         isRunning = false
     }
 
@@ -259,8 +288,10 @@ final class TaskRunner {
         do {
             try proc.run()
             process = proc
+            phase = .running
         } catch {
             self.error = "Failed to launch work-task process: \(error.localizedDescription)"
+            phase = nil
             isRunning = false
         }
     }
@@ -304,6 +335,7 @@ final class TaskRunner {
             error = "Work-task process exited unexpectedly (code \(status))."
         }
         process = nil
+        phase = nil
         isRunning = false
     }
 

@@ -127,15 +127,15 @@ struct PlanDetailView: View {
                                              isBlocked: row.task.isBlocked,
                                              isRunning: runner.isRunning))
 
-                // "Work this task" — hands the plan off to the bundled Agent-SDK
-                // runner in worktree-isolated `plan-execute` mode. Enabled only
-                // for an elaborated/in-progress, non-blocked task, and never
-                // while a run is already in flight.
+                // "Execute" — hands the plan off to the bundled Agent-SDK runner
+                // in worktree-isolated `plan-execute` mode. Enabled only for an
+                // elaborated/in-progress, non-blocked task, and never while a run
+                // is already in flight.
                 Button {
                     runner.run(projectPath: row.projectPath,
                                taskID: row.task.id, mode: .execute)
                 } label: {
-                    Label("Work this task", systemImage: "play.fill")
+                    Label("Execute", systemImage: "play.fill")
                 }
                 .disabled(!Self.canWork(status: row.task.status,
                                         isBlocked: row.task.isBlocked,
@@ -255,9 +255,17 @@ private struct RunProgressSheet: View {
         .frame(minWidth: 480, minHeight: 360)
     }
 
+    /// The verb for the active mode, for the header ("Executing" / "Elaborating").
+    private var modeVerb: String {
+        switch runner.activeMode {
+        case .elaborate: return "Elaborating"
+        case .execute, .none: return "Executing"
+        }
+    }
+
     private var header: some View {
         HStack {
-            Text(taskID.map { "Working task #\($0)" } ?? "Working task")
+            Text(taskID.map { "\(modeVerb) task #\($0)" } ?? modeVerb)
                 .font(.headline)
             if runner.isRunning {
                 ProgressView()
@@ -275,6 +283,20 @@ private struct RunProgressSheet: View {
         ScrollViewReader { proxy in
             ScrollView {
                 VStack(alignment: .leading, spacing: 4) {
+                    // Immediate-feedback placeholder: until the first NDJSON line
+                    // arrives, show a "Starting…" / "Waiting…" row so the sheet is
+                    // never blank dead air while node resolves and the agent spins
+                    // up (the first assistant message can take several seconds).
+                    if runner.lines.isEmpty, let phase = runner.phase {
+                        HStack(spacing: 6) {
+                            ProgressView().controlSize(.small)
+                            Text(phase == .launching
+                                 ? "Starting…"
+                                 : "Waiting for the agent…")
+                                .font(.callout)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
                     ForEach(runner.lines) { logged in
                         lineView(logged.event)
                             .id(logged.id)
