@@ -95,6 +95,14 @@ struct ProjectCard: View {
             header
             Divider()
             body(for: rows)
+            // Git status footer (#026): mirrors the header's treatment — the
+            // header is FOLLOWED by a `Divider()` (bottom separator); the footer
+            // is PRECEDED by one (its top border). Only emitted for git repos so
+            // a non-git project never shows a dangling divider.
+            if project.gitBranch != nil {
+                Divider()
+                gitFooter
+            }
             // Top-anchor: LazyVGrid sizes every cell to its ROW's max height, so
             // a short card handed a taller cell would let this VStack distribute
             // the slack and drift its content toward vertical center. A trailing
@@ -132,32 +140,10 @@ struct ProjectCard: View {
                 .layoutPriority(1)
 
             // Capture / execute control: placed immediately right of the project
-            // name (and left of the git status). "+" opens the popover; while a
-            // capture/execute run is in flight it swaps to a tappable spinner.
+            // name. "+" opens the popover; while a capture/execute run is in
+            // flight it swaps to a tappable spinner. (Git status moved to the
+            // footer in #026, so the header no longer carries the branch block.)
             captureControl
-
-            // Git indicator (#024): branch glyph + name, plus an orange dirty dot
-            // only when the working tree is known-dirty. Shown only when the
-            // project is a git repo (`gitBranch != nil`); a `nil`/`false`
-            // `gitIsDirty` shows no dot. The branch text truncates so it never
-            // crowds out the project name (which holds layout priority).
-            if let branch = project.gitBranch {
-                HStack(spacing: 4) {
-                    Image(systemName: "arrow.triangle.branch")
-                        .imageScale(.small)
-                        .foregroundStyle(.secondary)
-                    Text(branch)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                        .truncationMode(.middle)
-                    if project.gitIsDirty == true {
-                        Image(systemName: "circle.fill")
-                            .imageScale(.small)
-                            .foregroundStyle(.orange)
-                    }
-                }
-            }
 
             Spacer(minLength: 8)
 
@@ -307,6 +293,34 @@ struct ProjectCard: View {
         captureText = ""
         captureExecute = false
         capturePresented = false
+    }
+
+    // MARK: - Footer (git status)
+
+    /// The card footer: the project's git status — the branch glyph + name plus
+    /// an orange dirty dot when the working tree is known-dirty (#026 moved this
+    /// out of the header). Rendered only when the project is a git repo
+    /// (`gitBranch != nil`); a `nil`/`false` `gitIsDirty` shows no dot. The
+    /// branch text truncates so it never crowds the card.
+    @ViewBuilder
+    private var gitFooter: some View {
+        if let branch = project.gitBranch {
+            HStack(spacing: 4) {
+                Image(systemName: "arrow.triangle.branch")
+                    .imageScale(.small)
+                    .foregroundStyle(.secondary)
+                Text(branch)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                if project.gitIsDirty == true {
+                    Image(systemName: "circle.fill")
+                        .imageScale(.small)
+                        .foregroundStyle(.orange)
+                }
+            }
+        }
     }
 
     // MARK: - Body (the active plan rows, or the empty state)
