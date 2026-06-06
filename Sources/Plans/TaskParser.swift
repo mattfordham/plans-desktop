@@ -25,15 +25,17 @@ enum TaskStatus: String, Codable, CaseIterable {
         self = value
     }
 
-    /// Sort priority for the §5.5 step-8 active-task ordering: higher sorts
-    /// first (`in-progress > in-review > review > elaborated > pending`).
+    /// Sort priority for active-task ordering: higher sorts first. The order is
+    /// the reverse of the header badge `glanceOrder`, so rows read
+    /// `in-review > review > in-progress > elaborated > pending` (in-review at
+    /// the top of the card, pending at the bottom).
     /// `completed` is not an active status and is given the lowest priority so
     /// it never floats above an active task should it ever be sorted.
     var activePriority: Int {
         switch self {
-        case .inProgress: return 5
-        case .inReview: return 4
-        case .review: return 3
+        case .inReview: return 5
+        case .review: return 4
+        case .inProgress: return 3
         case .elaborated: return 2
         case .pending: return 1
         case .completed: return 0
