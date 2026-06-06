@@ -20,16 +20,17 @@ struct PlanDetailView: View {
 
     @Environment(PlansStore.self) private var store
 
-    /// The shared "Work this task" runner, injected by the plan-detail scene.
-    /// Drives the "Work this task" button's enabled state and the progress sheet.
+    /// The shared task-run coordinator, injected by the scene. Resolves the
+    /// `TaskRun` for this view's task — driving the Elaborate/Execute actions,
+    /// the inline running state, and the progress sheet.
     @Environment(TaskRunner.self) private var runner
 
-    /// Whether the progress sheet is presented. Raised when a run starts (see the
-    /// `.onChange(of: runner.isRunning)` below) and lowered by the sheet's Done
-    /// button / auto-dismiss. Kept as real view state (rather than binding the
-    /// sheet directly to `runner.isRunning`) so the user can close the sheet
-    /// after a run finishes WITHOUT the close being swallowed — dismissing the
-    /// sheet is decoupled from the run's lifecycle.
+    /// Whether the progress sheet is presented. Raised when THIS task's run
+    /// starts (see the `.onChange(of: runner.isRunning(taskID:))` below) and
+    /// lowered by the sheet's Done button. Kept as real view state (rather than
+    /// binding the sheet to the run's `isRunning`) so the user can close the
+    /// sheet WITHOUT the close being swallowed and without stopping the run —
+    /// dismissing the sheet is decoupled from the run's lifecycle.
     @State private var showProgress = false
 
     /// The resolved row for `rowID` across all projects' active rows, or `nil`
@@ -61,29 +62,30 @@ struct PlanDetailView: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }
-        // Raise the sheet when a run starts here. We compare the runner's active
-        // task to this view's row so a run launched from a DIFFERENT detail
-        // window (the runner is shared) doesn't pop a sheet over an unrelated
-        // plan. The sheet stays up after the run ends so the user can read the
-        // summary, then closes it themselves via Done.
-        .onChange(of: runner.isRunning) { _, isRunning in
-            if isRunning, runner.activeTaskID == row?.task.id {
-                showProgress = true
-            }
+        // Raise the sheet when THIS task's run starts. Scoped to this row's task,
+        // so a run launched for a different task never pops a sheet here. The
+        // sheet stays up after the run ends so the user can read the summary,
+        // then closes it themselves via Done.
+        .onChange(of: runner.isRunning(taskID: row?.task.id ?? "")) { _, isRunning in
+            if isRunning { showProgress = true }
         }
         // The modal progress sheet. Presented via real view state so the Done
         // button / auto-dismiss can actually close it; `onDisappear` reloads the
         // store so the task's new status is surfaced by the existing read path.
+        // Closing the sheet does NOT stop the run — it keeps going in the
+        // background (and stays visible on the card row's inline status).
         .sheet(isPresented: $showProgress) {
-            RunProgressSheet(taskID: row?.task.id)
-                .onDisappear { store.reload() }
+            RunProgressSheet(run: row.map { runner.run(for: $0.task.id) } ?? nil,
+                             taskID: row?.task.id)
+                .onDisappear {
+                    if let id = row?.task.id { runner.dismiss(taskID: id) }
+                    store.reload()
+                }
         }
-        // Window-close cleanup: if this detail window closes while a run is in
-        // flight, terminate the child process cleanly rather than orphaning it.
-        // See the assumption note re: the shared-runner limitation.
-        .onDisappear {
-            if runner.isRunning { runner.stop() }
-        }
+        // NOTE: closing the detail window deliberately does NOT stop the run.
+        // Runs are independent of any window now (they can be launched straight
+        // from a card), so a run survives closing the detail; stop it explicitly
+        // via the sheet's Stop button or the card.
     }
 
     /// The detail header: the title as a prominent heading, the owning project's
@@ -122,52 +124,57 @@ struct PlanDetailView: View {
             .foregroundStyle(.secondary)
 
             HStack(spacing: 8) {
-                // "Elaborate" — hands a pending plan off to the bundled runner
-                // in autonomous `plan-elaborate` mode. Enabled only for a
-                // pending, non-blocked task, and never while a run is in flight.
-                Button {
-                    runner.run(projectPath: row.projectPath,
-                               taskID: row.task.id, mode: .elaborate)
-                } label: {
-                    Label("Elaborate", systemImage: "sparkles")
-                }
-                .disabled(!Self.canElaborate(status: row.task.status,
-                                             isBlocked: row.task.isBlocked,
-                                             isRunning: runner.isRunning))
+                if runner.isRunning(taskID: row.task.id) {
+                    // This task is being worked: show live status + a way back
+                    // into the progress sheet (the run is independent of this
+                    // window now). No action buttons while it runs.
+                    ProgressView().controlSize(.small)
+                    Button("Show progress") { showProgress = true }
+                } else {
+                    // "Elaborate" — hands a pending plan off to the bundled
+                    // runner in autonomous `plan-elaborate` mode. Available only
+                    // for a pending, non-blocked task.
+                    if Self.canElaborate(status: row.task.status, isBlocked: row.task.isBlocked) {
+                        Button {
+                            runner.run(projectPath: row.projectPath,
+                                       taskID: row.task.id, mode: .elaborate)
+                        } label: {
+                            Label("Elaborate", systemImage: "sparkles")
+                        }
+                    }
 
-                // "Execute" — hands the plan off to the bundled Agent-SDK runner
-                // in worktree-isolated `plan-execute` mode. Enabled only for an
-                // elaborated/in-progress, non-blocked task, and never while a run
-                // is already in flight.
-                Button {
-                    runner.run(projectPath: row.projectPath,
-                               taskID: row.task.id, mode: .execute)
-                } label: {
-                    Label("Execute", systemImage: "play.fill")
+                    // "Execute" — hands the plan off to the bundled Agent-SDK
+                    // runner in worktree-isolated `plan-execute` mode. Available
+                    // only for an elaborated/in-progress, non-blocked task.
+                    if Self.canWork(status: row.task.status, isBlocked: row.task.isBlocked) {
+                        Button {
+                            runner.run(projectPath: row.projectPath,
+                                       taskID: row.task.id, mode: .execute)
+                        } label: {
+                            Label("Execute", systemImage: "play.fill")
+                        }
+                    }
                 }
-                .disabled(!Self.canWork(status: row.task.status,
-                                        isBlocked: row.task.isBlocked,
-                                        isRunning: runner.isRunning))
             }
             .padding(.top, 4)
         }
     }
 
-    /// Pure predicate for the "Work this task" button's enabled state, so the
-    /// gating rule is unit-testable independent of the view. The button is
-    /// enabled only for an elaborated or in-progress task that is not blocked,
-    /// and only while no run is already in flight.
-    static func canWork(status: TaskStatus?, isBlocked: Bool, isRunning: Bool) -> Bool {
-        guard !isRunning, !isBlocked else { return false }
+    /// Pure predicate for the "Execute" action's availability, so the gating rule
+    /// is unit-testable independent of the view. Available only for an elaborated
+    /// or in-progress task that is not blocked. Whether a run is in flight is a
+    /// separate, per-task concern (the row shows a spinner instead of the button)
+    /// — runs are independent across tasks, so it does NOT gate availability.
+    static func canWork(status: TaskStatus?, isBlocked: Bool) -> Bool {
+        guard !isBlocked else { return false }
         return status == .elaborated || status == .inProgress
     }
 
-    /// Pure predicate for the "Elaborate" button's enabled state. The button is
-    /// enabled only for a `pending` task that is not blocked, and only while no
-    /// run is already in flight — elaboration is the step that produces the How
-    /// checklist a subsequent "Work this task" run needs.
-    static func canElaborate(status: TaskStatus?, isBlocked: Bool, isRunning: Bool) -> Bool {
-        guard !isRunning, !isBlocked else { return false }
+    /// Pure predicate for the "Elaborate" action's availability. Available only
+    /// for a `pending` task that is not blocked — elaboration is the step that
+    /// produces the How checklist a subsequent Execute run needs.
+    static func canElaborate(status: TaskStatus?, isBlocked: Bool) -> Bool {
+        guard !isBlocked else { return false }
         return status == .pending
     }
 
@@ -229,31 +236,33 @@ struct PlanDetailView: View {
     }
 }
 
-/// The modal progress sheet shown for the lifetime of a "Work this task" run.
-/// Renders the bundled runner's live NDJSON stream: a scrolling activity/text
-/// log, a cost/turns summary once the run reports `done`, an error banner on a
-/// streamed/terminal error, and a Stop button wired to `runner.stop()`. The
-/// sheet itself is presented via `.sheet(isPresented: $runner.isRunning)`, so
-/// it auto-dismisses when the run ends; a Done button is offered once it is no
-/// longer running so the user can dismiss a finished run explicitly.
+/// The modal progress sheet for a single task's run. Renders that run's live
+/// NDJSON stream: a scrolling activity/text log, a cost/turns summary once the
+/// run reports `done`, an error banner on a streamed/terminal error, and a Stop
+/// button wired to the run's `stop()`. The sheet is presented via the detail
+/// view's `@State showProgress`, so the Done button can close it; closing does
+/// NOT stop the run (it keeps going in the background).
 private struct RunProgressSheet: View {
+    /// The specific run to render, or `nil` if there is none (e.g. the run was
+    /// dropped). When nil the sheet shows a minimal "no active run" state.
+    let run: TaskRun?
+
     /// The task id being worked, for the header (e.g. "Working task #019").
     let taskID: String?
 
-    @Environment(TaskRunner.self) private var runner
     @Environment(\.dismiss) private var dismiss
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             header
 
-            if let error = runner.error {
+            if let error = run?.error {
                 errorBanner(error)
             }
 
             logList
 
-            if let summary = runner.summary {
+            if let summary = run?.summary {
                 summaryRow(summary)
             }
 
@@ -263,9 +272,9 @@ private struct RunProgressSheet: View {
         .frame(minWidth: 480, minHeight: 360)
     }
 
-    /// The verb for the active mode, for the header ("Executing" / "Elaborating").
+    /// The verb for this run's mode ("Executing" / "Elaborating").
     private var modeVerb: String {
-        switch runner.activeMode {
+        switch run?.mode {
         case .elaborate: return "Elaborating"
         case .execute, .none: return "Executing"
         }
@@ -275,7 +284,7 @@ private struct RunProgressSheet: View {
         HStack {
             Text(taskID.map { "\(modeVerb) task #\($0)" } ?? modeVerb)
                 .font(.headline)
-            if runner.isRunning {
+            if run?.isRunning == true {
                 ProgressView()
                     .controlSize(.small)
             }
@@ -288,14 +297,15 @@ private struct RunProgressSheet: View {
     /// events are rendered out-of-band (summary row / error banner), so the list
     /// body shows only `.activity` and `.text`.
     private var logList: some View {
-        ScrollViewReader { proxy in
+        let lines = run?.lines ?? []
+        return ScrollViewReader { proxy in
             ScrollView {
                 VStack(alignment: .leading, spacing: 4) {
                     // Immediate-feedback placeholder: until the first NDJSON line
                     // arrives, show a "Starting…" / "Waiting…" row so the sheet is
                     // never blank dead air while node resolves and the agent spins
                     // up (the first assistant message can take several seconds).
-                    if runner.lines.isEmpty, let phase = runner.phase {
+                    if lines.isEmpty, let phase = run?.phase {
                         HStack(spacing: 6) {
                             ProgressView().controlSize(.small)
                             Text(phase == .launching
@@ -305,7 +315,7 @@ private struct RunProgressSheet: View {
                                 .foregroundStyle(.secondary)
                         }
                     }
-                    ForEach(runner.lines) { logged in
+                    ForEach(lines) { logged in
                         lineView(logged.event)
                             .id(logged.id)
                             .frame(maxWidth: .infinity, alignment: .leading)
@@ -315,8 +325,8 @@ private struct RunProgressSheet: View {
             }
             .background(Color(nsColor: .textBackgroundColor))
             .clipShape(RoundedRectangle(cornerRadius: 6))
-            .onChange(of: runner.lines.count) {
-                if let last = runner.lines.last {
+            .onChange(of: lines.count) {
+                if let last = lines.last {
                     withAnimation { proxy.scrollTo(last.id, anchor: .bottom) }
                 }
             }
@@ -365,9 +375,9 @@ private struct RunProgressSheet: View {
     private var footer: some View {
         HStack {
             Spacer()
-            if runner.isRunning {
+            if run?.isRunning == true {
                 Button(role: .destructive) {
-                    runner.stop()
+                    run?.stop()
                 } label: {
                     Label("Stop", systemImage: "stop.fill")
                 }

@@ -133,12 +133,13 @@ struct LoggedEvent: Identifiable, Equatable {
 }
 
 /// Spawns and supervises the bundled Node Agent-SDK process (`run-task.js`) for
-/// a single "Work this task" run, decoding its NDJSON progress stream into
-/// observable state the detail-view sheet renders.
+/// a SINGLE task run, decoding its NDJSON progress stream into observable state
+/// the detail-view sheet and card rows render.
 ///
-/// One shared instance is created in `AppDelegate` and injected via
-/// `.environment(...)` (segment 3) so it is shared across detail windows — only
-/// one run is supported at a time (`isRunning` guards double-launch).
+/// One `TaskRun` exists per active task (created and tracked by `TaskRunner`),
+/// so multiple tasks can run concurrently — each owns its own `Process`, its own
+/// decoded `lines`, and its own `isRunning`/`phase`. The UI observes the run for
+/// a specific task, so launching one task's run never disturbs another row.
 ///
 /// Concurrency: the class is `@MainActor`, so all observable mutation is
 /// main-actor isolated. The `Process` stdout `readabilityHandler` runs on a
@@ -147,24 +148,22 @@ struct LoggedEvent: Identifiable, Equatable {
 /// blocking the UI, then hops back to spawn.
 @MainActor
 @Observable
-final class TaskRunner {
-    /// True from the moment `run` accepts a launch until the process terminates
-    /// (or `stop()` is called). Drives the progress sheet and button disabling.
+final class TaskRun {
+    /// The task id this run is working — also the run's identity.
+    let taskID: String
+
+    /// The mode of this run (`.execute` / `.elaborate`), so the UI can label it
+    /// ("Executing #019" vs "Elaborating #019").
+    let mode: RunMode
+
+    /// True from the moment the run is accepted until the process terminates (or
+    /// `stop()` is called). Drives the progress sheet and per-row inline status.
     private(set) var isRunning = false
 
-    /// The task id of the active (or most recently finished) run, so card rows
-    /// can show inline status for the specific row being worked. `nil` until the
-    /// first run is launched.
-    private(set) var activeTaskID: String?
-
-    /// The mode of the active run (`.execute` / `.elaborate`), so the UI can
-    /// label it ("Executing #019" vs "Elaborating #019"). `nil` until first run.
-    private(set) var activeMode: RunMode?
-
-    /// Coarse lifecycle phase for immediate feedback. Flips to `.launching` the
-    /// instant `run` is accepted (before `node` resolves / the process spawns),
-    /// so the UI shows a "Starting…" state with no dead air, then `.running`
-    /// once the child process is live.
+    /// Coarse lifecycle phase for immediate feedback. `.launching` the instant
+    /// the run is accepted (before `node` resolves / the process spawns), so the
+    /// UI shows a "Starting…" state with no dead air, then `.running` once the
+    /// child process is live, then `nil` when finished.
     enum Phase { case launching, running }
     private(set) var phase: Phase?
 
@@ -186,46 +185,37 @@ final class TaskRunner {
     /// `\n` so only complete NDJSON lines are decoded.
     private var buffer = Data()
 
-    init() {}
+    /// Called once when the run terminates (any path), so the coordinator can
+    /// drop it from its active map and trigger a store reload.
+    private var onFinish: (() -> Void)?
 
-    /// True when a run is in flight for this specific task id — lets a card row
-    /// show inline status only for the row actually being worked.
-    func isRunning(taskID: String) -> Bool {
-        isRunning && activeTaskID == taskID
+    init(taskID: String, mode: RunMode) {
+        self.taskID = taskID
+        self.mode = mode
     }
 
-    // MARK: - Public API
+    // MARK: - Lifecycle
 
-    /// Launches the bundled Node script for `taskID` in `projectPath`, driving
-    /// the skill selected by `mode` (`.execute` → `plan-execute` in worktree
-    /// isolation; `.elaborate` → autonomous `plan-elaborate`). Guards against
-    /// double-launch while a run is in flight, resets prior run state, then
-    /// resolves `node` + the bundled script. On a missing precondition it sets
-    /// `error` (and leaves `isRunning` false) instead of spawning.
-    func run(projectPath: String, taskID: String, mode: RunMode = .execute) {
-        runnerLog.notice("run() called: task=\(taskID, privacy: .public) mode=\(mode.rawValue, privacy: .public) project=\(projectPath, privacy: .public)")
-        guard !isRunning else {
-            runnerLog.notice("run() ignored: a run is already in flight (active task=\(self.activeTaskID ?? "nil", privacy: .public))")
-            return
-        }
+    /// Launches the bundled Node script for this run's task in `projectPath`.
+    /// Resolves the bundled script + `node`, then spawns the process. On a
+    /// missing precondition it sets `error` (and leaves `isRunning` false)
+    /// instead of spawning. `onFinish` fires exactly once when the run ends.
+    func start(projectPath: String, onFinish: @escaping () -> Void) {
+        guard !isRunning else { return }
+        self.onFinish = onFinish
+        runnerLog.notice("start: task=\(self.taskID, privacy: .public) mode=\(self.mode.rawValue, privacy: .public) project=\(projectPath, privacy: .public)")
 
-        // Reset prior run state and record what's being worked + the initial
-        // phase, so the UI has immediate feedback before the process spawns.
         lines = []
         summary = nil
         error = nil
         buffer = Data()
-        activeTaskID = taskID
-        activeMode = mode
         phase = .launching
         isRunning = true
 
         // Resolve the bundled script first — a synchronous, non-blocking lookup.
         guard let scriptURL = Self.resolveScriptURL() else {
-            runnerLog.error("run() aborted: bundled run-task.js not found in app bundle (bundlePath=\(Bundle.main.bundlePath, privacy: .public))")
-            error = "Bundled work-task script (run-task.js) not found."
-            phase = nil
-            isRunning = false
+            runnerLog.error("start aborted: bundled run-task.js not found (bundlePath=\(Bundle.main.bundlePath, privacy: .public))")
+            finish(error: "Bundled work-task script (run-task.js) not found.")
             return
         }
         runnerLog.notice("resolved script: \(scriptURL.path, privacy: .public)")
@@ -234,21 +224,20 @@ final class TaskRunner {
         // then continue on the main actor to spawn so observable mutation stays
         // main-actor bound. The detached resolution captures no `self`, so the
         // suspension point can't race against later main-actor state access.
+        let taskID = self.taskID
+        let mode = self.mode
         _Concurrency.Task { [weak self] in
             let nodePath = await _Concurrency.Task.detached {
-                Self.resolveNodePath()
+                TaskRun.resolveNodePath()
             }.value
             guard let self else { return }
-            // A late `stop()` could have flipped this off; honor it.
             guard self.isRunning else {
                 runnerLog.notice("node resolved but run was already stopped; not spawning")
                 return
             }
             guard let nodePath else {
-                runnerLog.error("run() aborted: could not locate node via login shell")
-                self.error = "Could not locate `node`. Install Node.js (e.g. via Homebrew or nvm) and try again."
-                self.phase = nil
-                self.isRunning = false
+                runnerLog.error("start aborted: could not locate node via login shell")
+                self.finish(error: "Could not locate `node`. Install Node.js (e.g. via Homebrew or nvm) and try again.")
                 return
             }
             runnerLog.notice("resolved node: \(nodePath, privacy: .public)")
@@ -257,14 +246,13 @@ final class TaskRunner {
         }
     }
 
-    /// Terminates the live process (if any) and clears the running flag. No-op
-    /// when nothing is running.
+    /// Terminates the live process (if any) and finalizes the run. No-op when
+    /// nothing is running.
     func stop() {
         guard isRunning else { return }
         process?.terminate()
         process = nil
-        phase = nil
-        isRunning = false
+        finish(error: nil)
     }
 
     // MARK: - Spawning
@@ -310,9 +298,7 @@ final class TaskRunner {
             runnerLog.notice("process launched (pid=\(proc.processIdentifier))")
         } catch {
             runnerLog.error("process launch failed: \(error.localizedDescription, privacy: .public)")
-            self.error = "Failed to launch work-task process: \(error.localizedDescription)"
-            phase = nil
-            isRunning = false
+            finish(error: "Failed to launch work-task process: \(error.localizedDescription)")
         }
     }
 
@@ -351,13 +337,24 @@ final class TaskRunner {
             handle(event)
         }
 
-        runnerLog.notice("process terminated: status=\(status) lines=\(self.lines.count) hasSummary=\(self.summary != nil) hasError=\(self.error != nil)")
+        runnerLog.notice("process terminated: task=\(self.taskID, privacy: .public) status=\(status) lines=\(self.lines.count) hasSummary=\(self.summary != nil) hasError=\(self.error != nil)")
+        var generic: String?
         if status != 0 && summary == nil && error == nil {
-            error = "Work-task process exited unexpectedly (code \(status))."
+            generic = "Work-task process exited unexpectedly (code \(status))."
         }
         process = nil
+        finish(error: generic)
+    }
+
+    /// Single termination point: optionally records a final error, clears the
+    /// running flags, and notifies the coordinator exactly once.
+    private func finish(error: String?) {
+        if let error, self.error == nil { self.error = error }
         phase = nil
         isRunning = false
+        let cb = onFinish
+        onFinish = nil
+        cb?()
     }
 
     // MARK: - Resolution helpers
@@ -416,6 +413,59 @@ final class TaskRunner {
         } catch {
             runnerLog.error("resolveNodePath: failed to run login shell: \(error.localizedDescription, privacy: .public)")
             return nil
+        }
+    }
+}
+
+/// Coordinates concurrent task runs. One shared instance is created in
+/// `AppDelegate` and injected via `.environment(...)`, so card rows and detail
+/// windows resolve the `TaskRun` for a specific task id. Multiple tasks can run
+/// at once — each gets its own `TaskRun`.
+@MainActor
+@Observable
+final class TaskRunner {
+    /// Active and recently-finished runs, keyed by task id. A run stays in the
+    /// map after finishing so the UI can still show its summary/error until the
+    /// user dismisses it; launching the same task again replaces the entry.
+    private(set) var runs: [String: TaskRun] = [:]
+
+    /// A callback invoked whenever any run finishes, so the app can reload the
+    /// store and surface the task's new status. Set by the app at injection.
+    var onAnyRunFinished: (() -> Void)?
+
+    init() {}
+
+    /// The run for `taskID`, if one exists (active or finished-but-not-dismissed).
+    func run(for taskID: String) -> TaskRun? { runs[taskID] }
+
+    /// True when a run is currently in flight for `taskID`.
+    func isRunning(taskID: String) -> Bool { runs[taskID]?.isRunning ?? false }
+
+    /// Launches a run for `taskID` in `projectPath` with `mode`. If a run for
+    /// this task is already in flight, this is a no-op; otherwise it replaces any
+    /// prior finished run for the task and starts a fresh one.
+    func run(projectPath: String, taskID: String, mode: RunMode = .execute) {
+        if let existing = runs[taskID], existing.isRunning {
+            runnerLog.notice("run ignored: task \(taskID, privacy: .public) is already running")
+            return
+        }
+        let taskRun = TaskRun(taskID: taskID, mode: mode)
+        runs[taskID] = taskRun
+        taskRun.start(projectPath: projectPath) { [weak self] in
+            self?.onAnyRunFinished?()
+        }
+    }
+
+    /// Stops the run for `taskID`, if any.
+    func stop(taskID: String) {
+        runs[taskID]?.stop()
+    }
+
+    /// Drops a finished run for `taskID` from the map (e.g. when the user closes
+    /// its progress sheet). No-op if the run is still in flight.
+    func dismiss(taskID: String) {
+        if let run = runs[taskID], !run.isRunning {
+            runs[taskID] = nil
         }
     }
 }

@@ -127,43 +127,52 @@ final class TaskRunnerTests: XCTestCase {
 
     // MARK: - "Work this task" button gating (segment 3)
 
-    /// `PlanDetailView.canWork` is the pure predicate behind the button's
-    /// `.disabled(...)`. It is enabled only for an elaborated / in-progress,
-    /// non-blocked task while no run is already in flight.
+    /// `PlanDetailView.canWork` is the pure predicate behind the Execute action's
+    /// availability. Available only for an elaborated / in-progress, non-blocked
+    /// task. Whether a run is in flight is a separate, per-task concern handled by
+    /// the UI (spinner vs button) and does NOT gate availability.
     @MainActor
     func testCanWorkGating() {
-        // Workable statuses, not blocked, not running → enabled.
-        XCTAssertTrue(PlanDetailView.canWork(status: .elaborated, isBlocked: false, isRunning: false))
-        XCTAssertTrue(PlanDetailView.canWork(status: .inProgress, isBlocked: false, isRunning: false))
+        // Workable statuses, not blocked → available.
+        XCTAssertTrue(PlanDetailView.canWork(status: .elaborated, isBlocked: false))
+        XCTAssertTrue(PlanDetailView.canWork(status: .inProgress, isBlocked: false))
 
-        // Non-workable status → disabled.
-        XCTAssertFalse(PlanDetailView.canWork(status: .pending, isBlocked: false, isRunning: false))
-        XCTAssertFalse(PlanDetailView.canWork(status: nil, isBlocked: false, isRunning: false))
+        // Non-workable status → unavailable.
+        XCTAssertFalse(PlanDetailView.canWork(status: .pending, isBlocked: false))
+        XCTAssertFalse(PlanDetailView.canWork(status: nil, isBlocked: false))
 
-        // Blocked → disabled even with a workable status.
-        XCTAssertFalse(PlanDetailView.canWork(status: .elaborated, isBlocked: true, isRunning: false))
-
-        // A run already in flight → disabled.
-        XCTAssertFalse(PlanDetailView.canWork(status: .inProgress, isBlocked: false, isRunning: true))
+        // Blocked → unavailable even with a workable status.
+        XCTAssertFalse(PlanDetailView.canWork(status: .elaborated, isBlocked: true))
     }
 
-    /// `PlanDetailView.canElaborate` is the pure predicate behind the
-    /// "Elaborate" button's `.disabled(...)`. It is enabled only for a pending,
-    /// non-blocked task while no run is already in flight.
+    /// `PlanDetailView.canElaborate` is the pure predicate behind the Elaborate
+    /// action's availability. Available only for a pending, non-blocked task.
     @MainActor
     func testCanElaborateGating() {
-        // Pending, not blocked, not running → enabled.
-        XCTAssertTrue(PlanDetailView.canElaborate(status: .pending, isBlocked: false, isRunning: false))
+        // Pending, not blocked → available.
+        XCTAssertTrue(PlanDetailView.canElaborate(status: .pending, isBlocked: false))
 
-        // Non-pending statuses → disabled (elaboration only applies to pending).
-        XCTAssertFalse(PlanDetailView.canElaborate(status: .elaborated, isBlocked: false, isRunning: false))
-        XCTAssertFalse(PlanDetailView.canElaborate(status: .inProgress, isBlocked: false, isRunning: false))
-        XCTAssertFalse(PlanDetailView.canElaborate(status: nil, isBlocked: false, isRunning: false))
+        // Non-pending statuses → unavailable (elaboration only applies to pending).
+        XCTAssertFalse(PlanDetailView.canElaborate(status: .elaborated, isBlocked: false))
+        XCTAssertFalse(PlanDetailView.canElaborate(status: .inProgress, isBlocked: false))
+        XCTAssertFalse(PlanDetailView.canElaborate(status: nil, isBlocked: false))
 
-        // Blocked → disabled even when pending.
-        XCTAssertFalse(PlanDetailView.canElaborate(status: .pending, isBlocked: true, isRunning: false))
+        // Blocked → unavailable even when pending.
+        XCTAssertFalse(PlanDetailView.canElaborate(status: .pending, isBlocked: true))
+    }
 
-        // A run already in flight → disabled.
-        XCTAssertFalse(PlanDetailView.canElaborate(status: .pending, isBlocked: false, isRunning: true))
+    /// The coordinator tracks runs per task id: `isRunning(taskID:)` is false for
+    /// an unknown task, and a freshly created `TaskRun` carries the right
+    /// identity + mode before it is started.
+    @MainActor
+    func testCoordinatorTracksRunsPerTask() {
+        let coordinator = TaskRunner()
+        XCTAssertFalse(coordinator.isRunning(taskID: "001"))
+        XCTAssertNil(coordinator.run(for: "001"))
+
+        let run = TaskRun(taskID: "042", mode: .elaborate)
+        XCTAssertEqual(run.taskID, "042")
+        XCTAssertEqual(run.mode, .elaborate)
+        XCTAssertFalse(run.isRunning)
     }
 }

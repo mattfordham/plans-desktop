@@ -16,12 +16,6 @@ import SwiftUI
 struct BrowserWindow: View {
     @Environment(PlansStore.self) private var store
 
-    /// The shared task runner, observed so the grid can refresh the moment a
-    /// card-launched run finishes (the inline-spinner path has no detail sheet to
-    /// `reload()` on dismiss). The 5s poll would catch it eventually; this makes
-    /// the status flip immediate.
-    @Environment(TaskRunner.self) private var runner
-
     // MARK: - Layout constants (single source of truth for the grid math)
 
     /// The responsive minimum card width. The column count is derived by fitting
@@ -87,12 +81,6 @@ struct BrowserWindow: View {
                     }
                     .help("Link a plans-cc project folder")
                 }
-            }
-            // When a card-launched run finishes (isRunning flips false), reload
-            // so the worked task's new status surfaces immediately rather than
-            // waiting for the next 5s poll tick.
-            .onChange(of: runner.isRunning) { _, isRunning in
-                if !isRunning { store.reload() }
             }
     }
 

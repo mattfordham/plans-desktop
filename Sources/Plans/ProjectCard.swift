@@ -217,29 +217,38 @@ struct ProjectCard: View {
     /// The trailing action cell for a plan row. While this row's task is being
     /// worked, shows an inline spinner. Otherwise shows the SINGLE relevant
     /// action for the row's status: Elaborate for a `pending` task, Execute for
-    /// an `elaborated`/`in-progress` task, and nothing for any other status. The
-    /// full live log is available by opening the row's detail window.
+    /// an `elaborated`/`in-progress` task, and an empty spacer for any other
+    /// status. Every state is pinned to the same fixed height so the row's line
+    /// height never shifts when the spinner/glyph appears or disappears. The full
+    /// live log is available by opening the row's detail window.
     @ViewBuilder
     private func rowActions(_ row: TaskRow) -> some View {
-        if runner.isRunning(taskID: row.task.id) {
-            ProgressView()
-                .controlSize(.small)
-                .padding(.leading, 8)
-        } else if PlanDetailView.canElaborate(status: row.task.status,
-                                              isBlocked: row.task.isBlocked,
-                                              isRunning: runner.isRunning) {
-            RowActionGlyph(systemImage: "sparkles", help: "Elaborate this plan") {
-                cardLog.notice("card Elaborate clicked: task=\(row.task.id, privacy: .public)")
-                runner.run(projectPath: row.projectPath, taskID: row.task.id, mode: .elaborate)
-            }
-        } else if PlanDetailView.canWork(status: row.task.status,
-                                         isBlocked: row.task.isBlocked,
-                                         isRunning: runner.isRunning) {
-            RowActionGlyph(systemImage: "play.fill", help: "Execute this plan") {
-                cardLog.notice("card Execute clicked: task=\(row.task.id, privacy: .public)")
-                runner.run(projectPath: row.projectPath, taskID: row.task.id, mode: .execute)
+        Group {
+            if runner.isRunning(taskID: row.task.id) {
+                ProgressView()
+                    .controlSize(.small)
+                    .padding(.leading, 8)
+            } else if PlanDetailView.canElaborate(status: row.task.status,
+                                                  isBlocked: row.task.isBlocked) {
+                RowActionGlyph(systemImage: "sparkles", help: "Elaborate this plan") {
+                    cardLog.notice("card Elaborate clicked: task=\(row.task.id, privacy: .public)")
+                    runner.run(projectPath: row.projectPath, taskID: row.task.id, mode: .elaborate)
+                }
+            } else if PlanDetailView.canWork(status: row.task.status,
+                                             isBlocked: row.task.isBlocked) {
+                RowActionGlyph(systemImage: "play.fill", help: "Execute this plan") {
+                    cardLog.notice("card Execute clicked: task=\(row.task.id, privacy: .public)")
+                    runner.run(projectPath: row.projectPath, taskID: row.task.id, mode: .execute)
+                }
+            } else {
+                // No action for this status: an empty spacer of the same height
+                // so the row's vertical metrics match action-bearing rows.
+                Color.clear.frame(width: 0)
             }
         }
+        // Pin the cell to the glyph's height in every state so swapping between
+        // spinner / glyph / empty never changes the row's line height.
+        .frame(height: 22)
     }
 }
 

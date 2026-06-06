@@ -16,15 +16,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// The shared, observable store, created once and injected into both scenes.
     let store = PlansStore()
 
-    /// The shared "Work this task" runner, created once and injected into the
-    /// plan-detail scene. A single instance (rather than one per window) keeps
-    /// the at-most-one-run invariant (`isRunning` guards double-launch) shared
-    /// across every detail window. Created here on the main actor, like `store`.
+    /// The shared task-run coordinator, created once and injected into the
+    /// browser + plan-detail scenes. It tracks one `TaskRun` per active task, so
+    /// multiple tasks can run concurrently while card rows / detail windows each
+    /// observe the run for their own task. Created here on the main actor.
     let taskRunner = TaskRunner()
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.regular)
         store.startPolling()
+        // Whenever any run finishes, reload so the worked task's new status
+        // surfaces immediately rather than waiting for the next 5s poll tick.
+        taskRunner.onAnyRunFinished = { [weak store] in store?.reload() }
     }
 }
 
