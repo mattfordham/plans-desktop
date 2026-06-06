@@ -9,6 +9,10 @@
  *                task autonomously (no interactive prompts).
  *   - `capture`: drives `plan-capture` to record a new task from a free-text
  *                `--description`, leaving it in `pending` (no chaining).
+ *   - `executeYolo`: drives `plan-execute "<description>" yolo` to auto-capture,
+ *                auto-elaborate, and autonomously execute a new task from a
+ *                free-text `--description` in an isolated worktree, leaving it in
+ *                `review`.
  * This process is the SOLE writer of the project's `.plans/` directory and git
  * tree — the Plans.app itself is a strictly read-only viewer.
  *
@@ -30,14 +34,14 @@ import { query } from "@anthropic-ai/claude-agent-sdk";
 const MAX_BUDGET_USD = 5.0;
 
 /** What the spawned agent should do with the task. */
-type Mode = "execute" | "elaborate" | "capture";
+type Mode = "execute" | "elaborate" | "capture" | "executeYolo";
 
 interface Args {
   projectRoot: string;
-  /** Required for execute/elaborate; undefined for capture (no task exists yet). */
+  /** Required for execute/elaborate; undefined for capture/executeYolo (no task exists yet). */
   taskId?: string;
   mode: Mode;
-  /** Required for capture: the free-text description to capture as a new task. */
+  /** Required for capture/executeYolo: the free-text description to act on. */
   description?: string;
 }
 
@@ -70,7 +74,8 @@ function parseArgs(argv: string[]): Args | null {
       if (
         value !== "execute" &&
         value !== "elaborate" &&
-        value !== "capture"
+        value !== "capture" &&
+        value !== "executeYolo"
       ) {
         return null;
       }
@@ -82,9 +87,9 @@ function parseArgs(argv: string[]): Args | null {
     return null;
   }
 
-  if (mode === "capture") {
-    // Capture creates a brand-new task, so there is no task id yet; a
-    // free-text description is required instead.
+  if (mode === "capture" || mode === "executeYolo") {
+    // Capture / executeYolo create a brand-new task, so there is no task id
+    // yet; a free-text description is required instead.
     if (!description) {
       return null;
     }
@@ -202,9 +207,44 @@ function buildCapturePrompt(description: string): string {
   ].join("\n");
 }
 
+/**
+ * Build the prompt for an `executeYolo` run. plan-execute accepts a free-text
+ * description directly and, in `yolo` mode, auto-captures + auto-elaborates +
+ * executes the new task fully autonomously in an isolated worktree (yolo implies
+ * worktree + branch). The task is left in `review` for human verification — yolo
+ * never marks it `completed`.
+ */
+function buildExecuteYoloPrompt(description: string): string {
+  return [
+    `Use the \`plan-execute\` skill to autonomously work a brand-new plans-cc`,
+    `task captured from the following description, in yolo mode:`,
+    "",
+    `/plan-execute "${description}" yolo`,
+    "",
+    "Requirements:",
+    "1. Run the FULL autonomous pipeline: auto-capture the description into a new",
+    "   task, auto-elaborate it, then implement it. yolo mode is mandatory — it",
+    "   runs in an isolated git worktree on its own branch. Never edit the main",
+    "   checkout in place.",
+    "2. Work fully autonomously. Do NOT ask the user any questions — there is no",
+    "   interactive UI to answer them. Where the pipeline would prompt for a",
+    "   decision, make the most reasonable choice and record it as an assumption.",
+    "3. Implement the task fully, following the plan and the repository's",
+    "   conventions (including TDD where a test suite exists), and make the",
+    "   targeted tests relevant to your changes pass.",
+    "4. When the work is complete and tests pass, leave the task in the `review`",
+    "   state. Do NOT mark it done — leave it in review for human verification.",
+    "",
+    "Work autonomously to completion. Do not ask for confirmation.",
+  ].join("\n");
+}
+
 function buildPrompt(args: Args): string {
   if (args.mode === "capture") {
     return buildCapturePrompt(args.description ?? "");
+  }
+  if (args.mode === "executeYolo") {
+    return buildExecuteYoloPrompt(args.description ?? "");
   }
   if (args.mode === "elaborate") {
     return buildElaboratePrompt(args.taskId ?? "");
@@ -216,7 +256,7 @@ async function main(): Promise<void> {
   const args = parseArgs(process.argv.slice(2));
   if (!args) {
     emitError(
-      "Missing or invalid arguments. Usage: run-task.js --project-root <abs path> [--mode execute|elaborate|capture] (--task-id <NNN> for execute/elaborate; --description <text> for capture)",
+      "Missing or invalid arguments. Usage: run-task.js --project-root <abs path> [--mode execute|elaborate|capture|executeYolo] (--task-id <NNN> for execute/elaborate; --description <text> for capture/executeYolo)",
     );
     process.exit(1);
     return;
@@ -229,10 +269,12 @@ async function main(): Promise<void> {
         cwd: args.projectRoot,
         permissionMode: "acceptEdits",
         maxBudgetUsd: MAX_BUDGET_USD,
-        // Include the Agent (subagent) tool plus the tools the plan-execute
-        // skill needs to do real work. Skills are enabled automatically by the
-        // SDK; we do not need to list "Skill" here.
+        // Include the Skill tool (so the agent can invoke the plan-* skills this
+        // hand-off drives — without it on the allowlist, the Skill invocation is
+        // denied and the agent flails), the Agent (subagent) tool, plus the
+        // tools the skills need to do real work.
         allowedTools: [
+          "Skill",
           "Agent",
           "Task",
           "Read",

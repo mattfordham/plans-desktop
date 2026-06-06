@@ -55,10 +55,15 @@ struct ProjectCard: View {
     /// The in-flight text of the capture `TextField`. Cleared after submit.
     @State private var captureText = ""
 
-    /// The synthetic run id `TaskRunner.capture` keys a capture run under for THIS
-    /// project (`"capture:" + projectPath`). Distinct from any real 3-char task id,
-    /// so it can safely share `progressPopoverTaskID` / `progressPopover(for:)`.
-    private var captureKey: String { "capture:" + project.projectPath }
+    /// Whether the popover's "Execute" toggle is on. When set, submitting runs
+    /// `plan-execute "<description>" yolo` (auto-capture + elaborate + execute in
+    /// a worktree) instead of a capture-only run. Reset alongside `captureText`.
+    @State private var captureExecute = false
+
+    /// The synthetic run id `TaskRunner.capture` keys a capture/execute run under
+    /// for THIS project. Distinct from any real 3-char task id, so it can safely
+    /// share `progressPopoverTaskID` / `progressPopover(for:)`.
+    private var captureKey: String { TaskRunner.captureKey(projectPath: project.projectPath) }
 
     /// A per-task `Binding<Bool>` for the run-progress popover: it reads `true`
     /// only when `progressPopoverTaskID` is this `taskID`, and on set assigns the
@@ -126,6 +131,11 @@ struct ProjectCard: View {
                 .lineLimit(1)
                 .layoutPriority(1)
 
+            // Capture / execute control: placed immediately right of the project
+            // name (and left of the git status). "+" opens the popover; while a
+            // capture/execute run is in flight it swaps to a tappable spinner.
+            captureControl
+
             // Git indicator (#024): branch glyph + name, plus an orange dirty dot
             // only when the working tree is known-dirty. Shown only when the
             // project is a git repo (`gitBranch != nil`); a `nil`/`false`
@@ -148,8 +158,6 @@ struct ProjectCard: View {
                     }
                 }
             }
-
-            captureControl
 
             Spacer(minLength: 8)
 
@@ -188,6 +196,9 @@ struct ProjectCard: View {
             // and reload so the new pending task appears via the read path.
             ProgressView()
                 .controlSize(.small)
+                // Pin to the same 24×24 box as `CaptureGlyph` so swapping the
+                // "+" for the spinner (and back) never shifts the header layout.
+                .frame(width: 24, height: 24)
                 .popover(isPresented: progressPopover(for: captureKey),
                          attachmentAnchor: .rect(.bounds)) {
                     RunProgressSheet(run: runner.run(for: captureKey),
@@ -198,47 +209,103 @@ struct ProjectCard: View {
                             store.reload()
                         }
                 }
-                .padding(.leading, 0)
                 .contentShape(Rectangle())
                 .onTapGesture {
                     progressPopoverTaskID = (progressPopoverTaskID == captureKey) ? nil : captureKey
                 }
                 .help("Show capture progress")
         } else {
-            RowActionGlyph(systemImage: "plus.circle", help: "Capture a new plan") {
+            // A "+" glyph sized to match the header status badges
+            // (`imageScale(.large)`, 20pt wide) rather than the smaller per-row
+            // action glyphs, so it reads as a peer of the count badges. Same
+            // tap-gesture primitive as `RowActionGlyph` (a nested borderless
+            // Button hit-tests unreliably here — see the file header note).
+            CaptureGlyph {
                 captureText = ""
+                captureExecute = false
                 capturePresented = true
             }
             .popover(isPresented: $capturePresented, attachmentAnchor: .rect(.bounds)) {
-                VStack(alignment: .leading, spacing: 10) {
-                    Text("New plan for \(project.projectName)")
-                        .font(.subheadline)
-                        .foregroundStyle(.secondary)
-                    TextField("Describe the plan…", text: $captureText)
-                        .textFieldStyle(.roundedBorder)
-                        .onSubmit { submitCapture() }
-                    HStack {
-                        Spacer()
-                        Button("Capture") { submitCapture() }
-                            .keyboardShortcut(.defaultAction)
-                    }
-                }
-                .padding(14)
-                .frame(width: 280)
+                capturePopover
             }
         }
     }
 
+    /// The content of the capture popover: a caption, a genuinely multi-line
+    /// description box, and a single bottom row holding the "Execute" toggle
+    /// (left) and the submit button (right) on the same baseline.
+    ///
+    /// A `TextEditor` (not a `.roundedBorder` `TextField`) is used so the box is
+    /// truly multi-line from the first paint — the rounded-border field collapses
+    /// to one line on macOS regardless of `lineLimit`. A placeholder is overlaid
+    /// while empty. Return inserts a newline (the natural `TextEditor` behavior);
+    /// submission is via the button, so ⌘↩ is free to add a newline too.
+    private var capturePopover: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("New plan for \(project.projectName)")
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+
+            ZStack(alignment: .topLeading) {
+                TextEditor(text: $captureText)
+                    .font(.body)
+                    .scrollContentBackground(.hidden)
+                    .padding(4)
+                    .frame(height: 96)
+                    .background(
+                        RoundedRectangle(cornerRadius: 6)
+                            .fill(Color(nsColor: .textBackgroundColor))
+                    )
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 6)
+                            .stroke(Color.secondary.opacity(0.4), lineWidth: 1)
+                    )
+                if captureText.isEmpty {
+                    // Aligned to the cursor (the TextEditor's text origin): the
+                    // editor's 4pt outer padding is the only horizontal offset
+                    // that matters; NSTextView adds a tiny extra, so 5pt sits the
+                    // placeholder right at the caret. Vertically the editor's 4pt
+                    // padding alone matches the first text line's top.
+                    Text("Describe the plan…")
+                        .font(.body)
+                        .foregroundStyle(.secondary)
+                        .padding(.leading, 9)
+                        .padding(.top, 4)
+                        .allowsHitTesting(false)
+                }
+            }
+
+            // Execute (left) and the submit button (right) share one row so they
+            // sit on the same baseline, evenly aligned to the box's two edges.
+            HStack {
+                Toggle("Execute", isOn: $captureExecute)
+                    .toggleStyle(.checkbox)
+                    .help("Capture, elaborate, and run the new plan autonomously in a worktree")
+                Spacer()
+                // ⌘↩ submits from within the editor (a bare Return inserts a
+                // newline in the multi-line `TextEditor`, so the submit shortcut
+                // is the Command-modified Return rather than the default action).
+                Button(captureExecute ? "Execute" : "Capture") { submitCapture() }
+                    .keyboardShortcut(.return, modifiers: .command)
+            }
+        }
+        .padding(12)
+        .frame(width: 340)
+    }
+
     /// Hands the trimmed capture text to `TaskRunner.capture` (the sole `.plans/`
-    /// writer is the spawned Agent-SDK process, §2), then clears the field and
-    /// dismisses the popover. An empty/whitespace-only description is ignored:
-    /// nothing spawns and the popover stays open so the user can correct it.
+    /// writer is the spawned Agent-SDK process, §2) — capture-only, or, when the
+    /// "Execute" toggle is on, a `plan-execute "<text>" yolo` run — then clears
+    /// the field/toggle and dismisses the popover. An empty/whitespace-only
+    /// description is ignored: nothing spawns and the popover stays open so the
+    /// user can correct it.
     private func submitCapture() {
         let trimmed = captureText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
-        cardLog.notice("card Capture submitted: project=\(self.project.projectPath, privacy: .public)")
-        runner.capture(projectPath: project.projectPath, description: trimmed)
+        cardLog.notice("card Capture submitted: project=\(self.project.projectPath, privacy: .public) execute=\(self.captureExecute)")
+        runner.capture(projectPath: project.projectPath, description: trimmed, execute: captureExecute)
         captureText = ""
+        captureExecute = false
         capturePresented = false
     }
 
@@ -465,6 +532,44 @@ private struct RowActionGlyph: View {
             .onHover { hovering = $0 }
             .padding(.leading, 8)
             .help(help)
+    }
+}
+
+/// The header "+" capture glyph. Like `RowActionGlyph` (same hover/press
+/// feedback and tap-gesture primitive — a nested borderless `Button` hit-tests
+/// unreliably in this layout), but sized to match the header status badges
+/// (`imageScale(.large)`) rather than the smaller per-row action glyphs, so it
+/// reads as a peer of the count badges sitting in the same header row.
+private struct CaptureGlyph: View {
+    let action: () -> Void
+
+    @State private var hovering = false
+    @State private var pressed = false
+
+    var body: some View {
+        Image(systemName: "plus.circle")
+            .imageScale(.large)
+            .foregroundStyle(hovering ? Color.primary : Color.secondary)
+            .frame(width: 24, height: 24)
+            .background(
+                RoundedRectangle(cornerRadius: 5)
+                    .fill(Color.primary.opacity(pressed ? 0.18 : (hovering ? 0.10 : 0)))
+            )
+            .scaleEffect(pressed ? 0.88 : 1.0)
+            .animation(.easeOut(duration: 0.12), value: hovering)
+            .animation(.easeOut(duration: 0.08), value: pressed)
+            .contentShape(Rectangle())
+            .gesture(
+                DragGesture(minimumDistance: 0)
+                    .onChanged { _ in if !pressed { pressed = true } }
+                    .onEnded { value in
+                        pressed = false
+                        let bounds = CGRect(x: 0, y: 0, width: 24, height: 24)
+                        if bounds.contains(value.location) { action() }
+                    }
+            )
+            .onHover { hovering = $0 }
+            .help("Capture a new plan")
     }
 }
 

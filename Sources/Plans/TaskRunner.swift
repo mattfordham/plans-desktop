@@ -120,11 +120,15 @@ enum RunEvent: Codable, Equatable {
 /// `plan-execute` in mandatory worktree isolation; `elaborate` runs
 /// `plan-elaborate` autonomously to flesh out a pending task; `capture` runs
 /// `plan-capture` autonomously to record a new task from a free-text
-/// description (no existing task id).
+/// description (no existing task id); `executeYolo` runs
+/// `plan-execute "<description>" yolo` to auto-capture, auto-elaborate, and
+/// autonomously execute a new task from a free-text description (no existing
+/// task id), leaving it in `review`.
 enum RunMode: String {
     case execute
     case elaborate
     case capture
+    case executeYolo
 }
 
 /// A `RunEvent` paired with a fresh `UUID` so the SwiftUI log list can iterate
@@ -277,10 +281,10 @@ final class TaskRun {
             scriptURL.path,
             "--project-root", projectPath,
         ]
-        // Capture runs have no real task id (the task does not exist yet); they
-        // carry a free-text `--description` instead. execute/elaborate operate
-        // on an existing task and pass `--task-id`.
-        if mode == .capture {
+        // Capture / executeYolo runs have no real task id (the task does not
+        // exist yet); they carry a free-text `--description` instead.
+        // execute/elaborate operate on an existing task and pass `--task-id`.
+        if mode == .capture || mode == .executeYolo {
             if let description, !description.isEmpty {
                 arguments += ["--description", description]
             }
@@ -478,20 +482,32 @@ final class TaskRunner {
         }
     }
 
-    /// Launches a `capture` run for `projectPath` that records a brand-new task
-    /// from `description`. Because no task id exists yet, the run is tracked
-    /// under a synthetic identity key (`"capture:" + projectPath`), which also
-    /// becomes the `TaskRun`'s `taskID`. Reuses the same start / finish reload
-    /// path as `run(...)`, so the captured task surfaces on the next store
-    /// reload. If a capture for this project is already in flight, this is a
-    /// no-op (mirrors the guard in `run(...)`).
-    func capture(projectPath: String, description: String) {
-        let key = "capture:" + projectPath
+    /// The synthetic run-identity key for a description-driven run (capture or
+    /// executeYolo) in `projectPath`. There is no real task id at this point, so
+    /// the run is keyed per project — at most one such run is in flight per card.
+    /// The key is independent of mode so the "+" control's in-flight guard and
+    /// progress popover track either run kind under one stable id.
+    nonisolated static func captureKey(projectPath: String) -> String { "capture:" + projectPath }
+
+    /// Launches a description-driven run for `projectPath` from a brand-new
+    /// task's `description`. When `execute` is false (the default), it `capture`s
+    /// the task and leaves it `pending`; when true, it runs
+    /// `plan-execute "<description>" yolo` (mode `.executeYolo`) to auto-capture,
+    /// auto-elaborate, and execute it autonomously in a worktree, leaving it in
+    /// `review`. Because no task id exists yet, the run is tracked under a
+    /// synthetic identity key (`captureKey(projectPath:)`), which also becomes
+    /// the `TaskRun`'s `taskID`. Reuses the same start / finish reload path as
+    /// `run(...)`, so the new task surfaces on the next store reload. If such a
+    /// run is already in flight for this project, this is a no-op (mirrors the
+    /// guard in `run(...)`).
+    func capture(projectPath: String, description: String, execute: Bool = false) {
+        let key = Self.captureKey(projectPath: projectPath)
         if let existing = runs[key], existing.isRunning {
-            runnerLog.notice("capture ignored: project \(projectPath, privacy: .public) already capturing")
+            runnerLog.notice("capture ignored: project \(projectPath, privacy: .public) already running a capture/execute")
             return
         }
-        let taskRun = TaskRun(taskID: key, mode: .capture, description: description)
+        let mode: RunMode = execute ? .executeYolo : .capture
+        let taskRun = TaskRun(taskID: key, mode: mode, description: description)
         runs[key] = taskRun
         taskRun.start(projectPath: projectPath) { [weak self] in
             self?.onAnyRunFinished?()

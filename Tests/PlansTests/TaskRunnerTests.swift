@@ -207,7 +207,31 @@ final class TaskRunnerTests: XCTestCase {
         XCTAssertNil(run.description)
     }
 
-    // The Node-side `--description` arg shape (capture runs pass
+    /// `executeYolo` is the "Execute" checkbox's mode: it round-trips its raw
+    /// value (the `--mode` flag) and, like capture, carries a free-text
+    /// description in place of a not-yet-existing task id.
+    @MainActor
+    func testExecuteYoloModeRoundTripsAndCarriesDescription() {
+        XCTAssertEqual(RunMode.executeYolo.rawValue, "executeYolo")
+        XCTAssertEqual(RunMode(rawValue: "executeYolo"), .executeYolo)
+
+        let run = TaskRun(taskID: "capture:/some/project", mode: .executeYolo, description: "Build a thing")
+        XCTAssertEqual(run.mode, .executeYolo)
+        XCTAssertEqual(run.description, "Build a thing")
+        XCTAssertFalse(run.isRunning)
+    }
+
+    /// Capture and executeYolo share one synthetic per-project identity key, so
+    /// the header "+" control's in-flight guard and progress popover track either
+    /// run kind under the same id.
+    func testCaptureKeyIsModeIndependentAndPerProject() {
+        XCTAssertEqual(TaskRunner.captureKey(projectPath: "/some/project"),
+                       "capture:/some/project")
+        XCTAssertNotEqual(TaskRunner.captureKey(projectPath: "/a"),
+                          TaskRunner.captureKey(projectPath: "/b"))
+    }
+
+    // The Node-side `--description` arg shape (capture / executeYolo runs pass
     // `--description <text>` and omit `--task-id`) is verified by inspection of
     // `TaskRun.spawn` / `run-task.ts`; it is not exercised here because that
     // would require spawning a real `node` process. The synthetic-key contract

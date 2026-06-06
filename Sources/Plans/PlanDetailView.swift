@@ -278,22 +278,37 @@ struct RunProgressSheet: View {
 
             footer
         }
-        .padding(20)
+        .padding(12)
         .frame(minWidth: 480, minHeight: 360)
     }
 
-    /// The verb for this run's mode ("Executing" / "Elaborating" / "Capturing").
+    /// The verb for this run's mode ("Executing" / "Elaborating" / "Capturing"
+    /// / "Capturing & executing").
     private var modeVerb: String {
         switch run?.mode {
         case .elaborate: return "Elaborating"
         case .capture: return "Capturing"
+        case .executeYolo: return "Capturing & executing"
         case .execute, .none: return "Executing"
+        }
+    }
+
+    /// The dialog title. Capture / executeYolo runs have no real task id yet —
+    /// they're keyed by a synthetic `"capture:<path>"` identity — so they show
+    /// only the verb ("Capturing", "Capturing & executing") rather than
+    /// "Capturing task #capture:/…". Real runs keep the "verb task #NNN" form.
+    private var title: String {
+        switch run?.mode {
+        case .capture, .executeYolo:
+            return modeVerb
+        default:
+            return taskID.map { "\(modeVerb) task #\($0)" } ?? modeVerb
         }
     }
 
     private var header: some View {
         HStack {
-            Text(taskID.map { "\(modeVerb) task #\($0)" } ?? modeVerb)
+            Text(title)
                 .font(.headline)
             if run?.isRunning == true {
                 ProgressView()
