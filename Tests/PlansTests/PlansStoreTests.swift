@@ -350,4 +350,76 @@ final class PlansStoreTests: XCTestCase {
 
         XCTAssertTrue(store.iconSpaceCounts.isEmpty)
     }
+
+    // MARK: - Manual order override (persisted to injected UserDefaults)
+
+    /// Builds an isolated, empty `UserDefaults` suite so persistence assertions
+    /// never touch the real `.standard` defaults.
+    private func makeDefaults() -> UserDefaults {
+        let suite = UUID().uuidString
+        let defaults = UserDefaults(suiteName: suite)!
+        defaults.removePersistentDomain(forName: suite)
+        return defaults
+    }
+
+    func testManualOrderDefaultsToInactiveAndEmpty() throws {
+        let reader = try makeReader(projectPaths: [])
+        let store = PlansStore(registryReader: reader, defaults: makeDefaults())
+
+        XCTAssertFalse(store.manualOrderActive)
+        XCTAssertTrue(store.projectOrderOverride.isEmpty)
+    }
+
+    func testSettingManualOrderPersistsAcrossStoreInstances() throws {
+        let reader = try makeReader(projectPaths: [])
+        let defaults = makeDefaults()
+
+        let store = PlansStore(registryReader: reader, defaults: defaults)
+        store.setManualOrder(["/c", "/a", "/b"])
+
+        XCTAssertTrue(store.manualOrderActive)
+        XCTAssertEqual(store.projectOrderOverride, ["/c", "/a", "/b"])
+
+        // A fresh store over the SAME defaults reads the saved order back.
+        let reloaded = PlansStore(registryReader: reader, defaults: defaults)
+        XCTAssertTrue(reloaded.manualOrderActive)
+        XCTAssertEqual(reloaded.projectOrderOverride, ["/c", "/a", "/b"])
+    }
+
+    func testAssigningProjectOrderOverrideDirectlyPersists() throws {
+        let reader = try makeReader(projectPaths: [])
+        let defaults = makeDefaults()
+
+        let store = PlansStore(registryReader: reader, defaults: defaults)
+        store.projectOrderOverride = ["/x", "/y"]
+
+        let reloaded = PlansStore(registryReader: reader, defaults: defaults)
+        XCTAssertEqual(reloaded.projectOrderOverride, ["/x", "/y"])
+    }
+
+    func testAssigningManualOrderActiveDirectlyPersists() throws {
+        let reader = try makeReader(projectPaths: [])
+        let defaults = makeDefaults()
+
+        let store = PlansStore(registryReader: reader, defaults: defaults)
+        store.manualOrderActive = true
+
+        let reloaded = PlansStore(registryReader: reader, defaults: defaults)
+        XCTAssertTrue(reloaded.manualOrderActive)
+    }
+
+    func testClearManualOrderRevertsFlagButKeepsOverride() throws {
+        let reader = try makeReader(projectPaths: [])
+        let defaults = makeDefaults()
+
+        let store = PlansStore(registryReader: reader, defaults: defaults)
+        store.setManualOrder(["/a", "/b"])
+        store.clearManualOrder()
+
+        XCTAssertFalse(store.manualOrderActive)
+
+        // The flag-off state persists too.
+        let reloaded = PlansStore(registryReader: reader, defaults: defaults)
+        XCTAssertFalse(reloaded.manualOrderActive)
+    }
 }

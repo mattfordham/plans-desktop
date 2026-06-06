@@ -351,4 +351,120 @@ final class BrowserWindowTests: XCTestCase {
     func testColumnCountWideWidthYieldsFourColumns() {
         XCTAssertEqual(BrowserWindow.columnCount(forWidth: 2000), 4)
     }
+
+    // MARK: - applyManualOrder (manual override ordering)
+
+    /// Projects are ordered exactly as the `order` array dictates when every
+    /// project path appears in it.
+    func testApplyManualOrderOrdersByOverride() {
+        let a = makeProject(path: "/a", name: "alpha")
+        let b = makeProject(path: "/b", name: "bravo")
+        let c = makeProject(path: "/c", name: "charlie")
+
+        let ordered = BrowserViewModel.applyManualOrder([a, b, c], order: ["/c", "/a", "/b"])
+
+        XCTAssertEqual(ordered.map(\.projectName), ["charlie", "alpha", "bravo"])
+    }
+
+    /// New project paths absent from the saved order sort to the TOP, preserving
+    /// their original relative order, ahead of the override-listed projects.
+    func testApplyManualOrderPutsNewPathsAtTop() {
+        let known = makeProject(path: "/known", name: "known")
+        let new1 = makeProject(path: "/new1", name: "new1")
+        let new2 = makeProject(path: "/new2", name: "new2")
+
+        // Input order: known, new1, new2. Override only lists "/known".
+        let ordered = BrowserViewModel.applyManualOrder(
+            [known, new1, new2],
+            order: ["/known"]
+        )
+
+        // New paths lead (stable in original order), known follows.
+        XCTAssertEqual(ordered.map(\.projectName), ["new1", "new2", "known"])
+    }
+
+    /// Order entries referencing projects that no longer exist are ignored.
+    func testApplyManualOrderIgnoresStalePathsInOrder() {
+        let a = makeProject(path: "/a", name: "alpha")
+        let b = makeProject(path: "/b", name: "bravo")
+
+        let ordered = BrowserViewModel.applyManualOrder(
+            [a, b],
+            order: ["/gone", "/b", "/also-gone", "/a"]
+        )
+
+        XCTAssertEqual(ordered.map(\.projectName), ["bravo", "alpha"])
+    }
+
+    /// An empty order returns the projects in their original order (all "new").
+    func testApplyManualOrderEmptyOrderPreservesInput() {
+        let a = makeProject(path: "/a", name: "alpha")
+        let b = makeProject(path: "/b", name: "bravo")
+
+        let ordered = BrowserViewModel.applyManualOrder([a, b], order: [])
+
+        XCTAssertEqual(ordered.map(\.projectName), ["alpha", "bravo"])
+    }
+
+    // MARK: - reorder (compute new order after a drag-drop)
+
+    /// Moving a later item BEFORE an earlier target shifts it up.
+    func testReorderMovesItemUpBeforeTarget() {
+        let result = BrowserViewModel.reorder(
+            ["/a", "/b", "/c", "/d"],
+            moving: "/d",
+            before: "/b"
+        )
+        XCTAssertEqual(result, ["/a", "/d", "/b", "/c"])
+    }
+
+    /// Moving an earlier item BEFORE a later target shifts it down to just ahead
+    /// of the target.
+    func testReorderMovesItemDownBeforeTarget() {
+        let result = BrowserViewModel.reorder(
+            ["/a", "/b", "/c", "/d"],
+            moving: "/a",
+            before: "/d"
+        )
+        XCTAssertEqual(result, ["/b", "/c", "/a", "/d"])
+    }
+
+    /// Dropping an item onto itself leaves the order unchanged.
+    func testReorderOntoSelfIsNoOp() {
+        let result = BrowserViewModel.reorder(
+            ["/a", "/b", "/c"],
+            moving: "/b",
+            before: "/b"
+        )
+        XCTAssertEqual(result, ["/a", "/b", "/c"])
+    }
+
+    /// A source path not present in the current order leaves it unchanged.
+    func testReorderUnknownSourceIsNoOp() {
+        let result = BrowserViewModel.reorder(
+            ["/a", "/b"],
+            moving: "/zzz",
+            before: "/a"
+        )
+        XCTAssertEqual(result, ["/a", "/b"])
+    }
+
+    /// A `nil` target (dropped past the last card, no specific target) appends the
+    /// moved item to the END of the order.
+    func testReorderNilTargetMovesToEnd() {
+        let result = BrowserViewModel.reorder(
+            ["/a", "/b", "/c"],
+            moving: "/a",
+            before: nil
+        )
+        XCTAssertEqual(result, ["/b", "/c", "/a"])
+    }
+
+    // MARK: - manual-order revert control (#017 step 4)
+
+    /// The toolbar revert control's label reads as a recency-sort affordance so
+    /// the user understands tapping it leaves the manual order.
+    func testManualOrderRevertLabelDescribesRecencySort() {
+        XCTAssertEqual(BrowserViewModel.manualOrderRevertLabel, "Sort by Recency")
+    }
 }

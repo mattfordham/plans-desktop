@@ -24,6 +24,29 @@ final class PlansStore {
     /// This is the Surface A → Surface B handoff seam read by task #005.
     var selectedProjectPath: String?
 
+    /// The user's manual card order as an ordered list of project paths (#017).
+    /// Drives the browser grid order when `manualOrderActive` is true; project
+    /// paths absent from this list are treated as new and sort to the TOP (see
+    /// `BrowserViewModel.applyManualOrder`). Persisted to `defaults` on every set
+    /// so the override survives app restarts. NEVER written to `.plans/` (§2
+    /// read-only) — UserDefaults is the only persistence sink.
+    var projectOrderOverride: [String] = [] {
+        didSet { defaults.set(projectOrderOverride, forKey: Self.orderKey) }
+    }
+
+    /// Whether the manual card order (`projectOrderOverride`) is active. When
+    /// false the browser falls back to the automatic recency sort. Persisted on
+    /// every set; the revert toggle (#017 step 4) flips this off.
+    var manualOrderActive: Bool = false {
+        didSet { defaults.set(manualOrderActive, forKey: Self.activeKey) }
+    }
+
+    /// UserDefaults key for the persisted manual card order (array of paths).
+    private static let orderKey = "cardOrderOverride"
+
+    /// UserDefaults key for the persisted manual-order-active flag.
+    private static let activeKey = "cardOrderManualActive"
+
     /// The statuses surfaced in the menu bar icon space, in a fresh order that
     /// leads with actively-running work: in-progress → review → in-review. This
     /// is INTENTIONALLY distinct from `TaskStatus.glanceOrder` (the TUI
@@ -55,17 +78,47 @@ final class PlansStore {
     /// The task parser used by `reload()` to parse each project's `.plans/`.
     @ObservationIgnored private let taskParser: TaskParser
 
+    /// The UserDefaults instance backing the persisted manual-order state (#017).
+    /// Injected (defaulting to `.standard`) so tests can pass an isolated suite.
+    @ObservationIgnored private let defaults: UserDefaults
+
     /// The repeating timer that drives live refresh, or `nil` when not polling.
     /// `@ObservationIgnored` because the timer itself is not observable UI state.
     @ObservationIgnored private var pollTimer: Timer?
 
-    /// Defaults to the real readers. Inject fixtures-backed readers in tests.
+    /// Defaults to the real readers and `.standard` UserDefaults. Inject
+    /// fixtures-backed readers and an isolated `UserDefaults(suiteName:)` in
+    /// tests. The persisted manual-order state (#017) is loaded eagerly here so
+    /// the override is in effect before the first grid layout.
     init(
         registryReader: RegistryReader = RegistryReader(),
-        taskParser: TaskParser = TaskParser()
+        taskParser: TaskParser = TaskParser(),
+        defaults: UserDefaults = .standard
     ) {
         self.registryReader = registryReader
         self.taskParser = taskParser
+        self.defaults = defaults
+        // Load persisted manual-order state. Assigning the backing fields avoids
+        // re-persisting (the `didSet` would write the just-read value back).
+        _projectOrderOverride = defaults.stringArray(forKey: Self.orderKey) ?? []
+        _manualOrderActive = defaults.bool(forKey: Self.activeKey)
+    }
+
+    /// Activates the manual card order and replaces it with `paths` (the new
+    /// ordered list of project paths), persisting both in one shot. Called by the
+    /// browser after a drag-drop resolves a new ordering. Pure mutate+persist —
+    /// never touches `.plans/` (§2 read-only).
+    func setManualOrder(_ paths: [String]) {
+        manualOrderActive = true
+        projectOrderOverride = paths
+    }
+
+    /// Reverts to the automatic recency sort by turning the manual order OFF. The
+    /// saved `projectOrderOverride` is intentionally retained so re-enabling
+    /// (a future feature) could restore it; only the active flag flips. Persisted
+    /// via the `manualOrderActive` setter.
+    func clearManualOrder() {
+        manualOrderActive = false
     }
 
     /// Re-reads the registry and re-parses every live project, replacing

@@ -43,9 +43,18 @@ struct BrowserWindow: View {
         max(1, Int((width - 2 * gridPadding) / (cardMinWidth + gridSpacing)))
     }
 
-    /// The projects sorted by staleness (recency) for the card grid.
+    /// The projects in display order for the card grid. When the user's manual
+    /// order is active and non-empty (#017), the grid honors that override
+    /// (`applyManualOrder`, new project paths to the top); otherwise it falls
+    /// back to the automatic recency sort (`sortByStaleness`) exactly as before.
     private var sortedProjects: [ProjectTasks] {
-        BrowserViewModel.sortByStaleness(store.projects)
+        if store.manualOrderActive && !store.projectOrderOverride.isEmpty {
+            return BrowserViewModel.applyManualOrder(
+                store.projects,
+                order: store.projectOrderOverride
+            )
+        }
+        return BrowserViewModel.sortByStaleness(store.projects)
     }
 
     var body: some View {
@@ -98,9 +107,45 @@ struct BrowserWindow: View {
                             Spacer(minLength: 0)
                         }
                         .id(project.projectPath)
+                        // #017: drag a card and drop it onto another card to
+                        // override the order. The card carries its project path
+                        // as the dragged payload; the drop target re-inserts the
+                        // dragged path BEFORE this card via the pure `reorder`
+                        // helper over the CURRENTLY displayed order, then persists
+                        // through the store. View modifier stays thin — all order
+                        // math lives in `BrowserViewModel`.
+                        .draggable(project.projectPath)
+                        .dropDestination(for: String.self) { items, _ in
+                            guard let sourcePath = items.first else { return false }
+                            handleDrop(sourcePath: sourcePath, before: project.projectPath)
+                            return true
+                        }
                     }
                 }
                 .padding(Self.gridPadding)
+            }
+            // #017 step 4: a subtle revert affordance lives in the window
+            // toolbar so the user can leave the manual card order and return to
+            // the automatic recency sort. It is ONLY shown while the manual
+            // order is active (`store.manualOrderActive`); otherwise the toolbar
+            // item collapses to nothing so the header stays uncluttered. Tapping
+            // it calls `store.clearManualOrder()`, which flips `manualOrderActive`
+            // off — `sortedProjects` already reacts to the flag and the grid
+            // re-sorts by staleness. Pure store call; never writes `.plans/` (§2).
+            .toolbar {
+                if store.manualOrderActive {
+                    ToolbarItem(placement: .automatic) {
+                        Button {
+                            store.clearManualOrder()
+                        } label: {
+                            Label(
+                                BrowserViewModel.manualOrderRevertLabel,
+                                systemImage: "arrow.uturn.backward"
+                            )
+                        }
+                        .help("Discard the manual card order and sort by recency.")
+                    }
+                }
             }
             // Width-probe approach (low-confidence layout choice, see §009
             // Assumptions): a zero-impact `GeometryReader` lives in the
@@ -130,6 +175,22 @@ struct BrowserWindow: View {
                 scrollToSelectedProject(proxy)
             }
         }
+    }
+
+    /// Resolves a drag-drop into a new persisted manual order (#017). Computes
+    /// the new ordering by moving `sourcePath` immediately before `targetPath`
+    /// over the CURRENTLY displayed order (`sortedProjects`' paths) via the pure
+    /// `BrowserViewModel.reorder` helper, then activates + persists it through the
+    /// store. The view modifier stays thin; all order math is in the helper. This
+    /// only writes UserDefaults via the store — never `.plans/` (§2 read-only).
+    private func handleDrop(sourcePath: String, before targetPath: String) {
+        let current = sortedProjects.map(\.projectPath)
+        let newOrder = BrowserViewModel.reorder(
+            current,
+            moving: sourcePath,
+            before: targetPath
+        )
+        store.setManualOrder(newOrder)
     }
 
     /// Scrolls the card grid to `store.selectedProjectPath`'s card if it matches a
@@ -192,6 +253,12 @@ struct TaskRow: Identifiable {
 /// logic is unit-testable as plain values (segment 2 tests these directly).
 /// This namespace performs NO I/O and never mutates `.plans/` data.
 enum BrowserViewModel {
+    /// The label shown on the toolbar revert control while the manual card order
+    /// is active (#017 step 4). Pure constant — kept here (rather than inline in
+    /// the view) so the copy is unit-testable and lives alongside the other
+    /// ordering vocabulary. Tapping the control reverts to the recency sort.
+    static let manualOrderRevertLabel = "Sort by Recency"
+
     /// The clickable plan rows for ONE project's card (Surface C dashboard).
     ///
     /// Maps the project's `activeTasks` (already non-completed, non-nil-status,
@@ -306,6 +373,65 @@ enum BrowserViewModel {
             }
         }
         .map(\.element)
+    }
+
+    /// Orders projects by the user's manual override (#017): an array of project
+    /// paths giving the desired display order. Projects whose path is NOT listed
+    /// in `order` are treated as new and sort to the TOP, preserving their
+    /// original relative order; listed projects follow in `order`'s sequence.
+    /// Stale entries in `order` (paths with no matching project) are ignored.
+    /// Pure value work — no I/O, no SwiftUI, never mutates `.plans/`.
+    static func applyManualOrder(
+        _ projects: [ProjectTasks],
+        order: [String]
+    ) -> [ProjectTasks] {
+        // Rank each path by its index in `order`; unlisted paths get no rank.
+        let rank = Dictionary(
+            order.enumerated().map { ($0.element, $0.offset) },
+            uniquingKeysWith: { first, _ in first }
+        )
+        // New (unranked) projects lead; ranked projects follow by their rank.
+        // Enumerate for a stable secondary key preserving original order within
+        // each group.
+        return projects.enumerated().sorted { lhs, rhs in
+            let lRank = rank[lhs.element.projectPath]
+            let rRank = rank[rhs.element.projectPath]
+            switch (lRank, rRank) {
+            case let (l?, r?):
+                if l != r { return l < r }
+                return lhs.offset < rhs.offset
+            case (.none, .some):
+                return true   // new (unranked) sorts to the top
+            case (.some, .none):
+                return false
+            case (.none, .none):
+                return lhs.offset < rhs.offset
+            }
+        }
+        .map(\.element)
+    }
+
+    /// Computes the new manual order after a drag-drop: removes `sourcePath` from
+    /// `current` and re-inserts it immediately BEFORE `targetPath`. A `nil`
+    /// `targetPath` (dropped past the last card) appends the source to the END.
+    /// No-ops when the source is absent or equals the target. Pure value work —
+    /// no I/O, no SwiftUI.
+    static func reorder(
+        _ current: [String],
+        moving sourcePath: String,
+        before targetPath: String?
+    ) -> [String] {
+        guard sourcePath != targetPath,
+              current.contains(sourcePath) else { return current }
+
+        var result = current.filter { $0 != sourcePath }
+        if let target = targetPath,
+           let targetIndex = result.firstIndex(of: target) {
+            result.insert(sourcePath, at: targetIndex)
+        } else {
+            result.append(sourcePath)
+        }
+        return result
     }
 
     /// Parses a raw registry `lastSeen` string into a `Date`, tolerating both
