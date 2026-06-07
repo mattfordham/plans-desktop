@@ -50,6 +50,47 @@ final class PlansStore {
         didSet { defaults.set(hideEmptyProjects, forKey: Self.hideEmptyKey) }
     }
 
+    /// A persisted, unsubmitted plan-capture draft for one project (#031). Holds
+    /// the in-flight description text plus the two run toggles so the "New Plan"
+    /// sheet can restore exactly what the user was typing if it is dismissed and
+    /// reopened (or the app is relaunched) before submitting. Pure value state —
+    /// NEVER written to `.plans/` (§2 read-only); UserDefaults is the only sink.
+    struct CaptureDraft: Codable, Equatable {
+        /// The in-flight plan description text.
+        var text: String
+        /// Whether the "Execute" toggle is on (run autonomously in a worktree).
+        var execute: Bool
+        /// Whether the "Elaborate" toggle is on (flesh the plan out after capture).
+        var elaborate: Bool
+
+        /// Memberwise init (explicit so the type can be constructed across the
+        /// module without relying on the synthesized internal initializer).
+        init(text: String, execute: Bool, elaborate: Bool) {
+            self.text = text
+            self.execute = execute
+            self.elaborate = elaborate
+        }
+    }
+
+    /// Per-project unsubmitted capture drafts, keyed by project path (#031). The
+    /// "New Plan" sheet reads/writes these so an in-progress description and its
+    /// toggles survive dismissal and app relaunch. Persisted on every set by
+    /// JSON-encoding the whole dictionary to `captureDraftsKey` in `defaults`
+    /// (the encoded `Data`). NEVER written to `.plans/` (§2 read-only) —
+    /// UserDefaults is the only persistence sink. Mutate via `setDraft`/
+    /// `clearDraft`; read via `draft(for:)`.
+    var captureDrafts: [String: CaptureDraft] = [:] {
+        didSet {
+            if let data = try? JSONEncoder().encode(captureDrafts) {
+                defaults.set(data, forKey: Self.captureDraftsKey)
+            }
+        }
+    }
+
+    /// UserDefaults key for the persisted per-project capture drafts (#031). The
+    /// stored value is the JSON-encoded `[String: CaptureDraft]` as `Data`.
+    private static let captureDraftsKey = "captureDrafts"
+
     /// UserDefaults key for the persisted manual card order (array of paths).
     private static let orderKey = "cardOrderOverride"
 
@@ -122,6 +163,35 @@ final class PlansStore {
         _projectOrderOverride = defaults.stringArray(forKey: Self.orderKey) ?? []
         _manualOrderActive = defaults.bool(forKey: Self.activeKey)
         _hideEmptyProjects = defaults.bool(forKey: Self.hideEmptyKey)
+        // Load persisted capture drafts (#031): decode the stored JSON `Data`,
+        // defaulting to an empty map on missing/corrupt data. Assigning the
+        // backing field avoids the `didSet` re-persisting the just-read value.
+        if let data = defaults.data(forKey: Self.captureDraftsKey),
+           let decoded = try? JSONDecoder().decode([String: CaptureDraft].self, from: data) {
+            _captureDrafts = decoded
+        } else {
+            _captureDrafts = [:]
+        }
+    }
+
+    /// Returns the saved capture draft for `projectPath`, or `nil` when none has
+    /// been persisted (#031). Pure read of the in-memory `captureDrafts` map.
+    func draft(for projectPath: String) -> CaptureDraft? {
+        captureDrafts[projectPath]
+    }
+
+    /// Stores `draft` as the capture draft for `projectPath` (#031), replacing
+    /// any prior draft. Triggers persistence via the `captureDrafts` setter.
+    /// Never writes `.plans/` (§2) — UserDefaults is the only sink.
+    func setDraft(_ draft: CaptureDraft, for projectPath: String) {
+        captureDrafts[projectPath] = draft
+    }
+
+    /// Removes the saved capture draft for `projectPath` (#031), if any. Called
+    /// after a successful submit or an explicit "Clear". Triggers persistence
+    /// via the `captureDrafts` setter; never writes `.plans/` (§2).
+    func clearDraft(for projectPath: String) {
+        captureDrafts.removeValue(forKey: projectPath)
     }
 
     /// Activates the manual card order and replaces it with `paths` (the new

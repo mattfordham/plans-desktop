@@ -120,7 +120,10 @@ enum RunEvent: Codable, Equatable {
 /// `plan-execute` in mandatory worktree isolation; `elaborate` runs
 /// `plan-elaborate` autonomously to flesh out a pending task; `capture` runs
 /// `plan-capture` autonomously to record a new task from a free-text
-/// description (no existing task id); `executeYolo` runs
+/// description (no existing task id); `captureElaborate` runs `plan-capture`
+/// then chains into `plan-elaborate` autonomously to record AND flesh out a new
+/// task from a free-text description (no existing task id), leaving it
+/// `elaborated` (it does NOT execute); `executeYolo` runs
 /// `plan-execute "<description>" yolo` to auto-capture, auto-elaborate, and
 /// autonomously execute a new task from a free-text description (no existing
 /// task id), leaving it in `review`.
@@ -128,7 +131,22 @@ enum RunMode: String {
     case execute
     case elaborate
     case capture
+    case captureElaborate
     case executeYolo
+
+    /// Whether this mode is description-driven: the run has no existing task id,
+    /// so `TaskRun.spawn` passes `--description <text>` and omits `--task-id`.
+    /// True for `.capture` / `.captureElaborate` / `.executeYolo`; false for the
+    /// existing-task modes `.execute` / `.elaborate`. Pure flag (no I/O) so the
+    /// arg-shape contract is unit-testable without spawning a `node` process.
+    var usesDescription: Bool {
+        switch self {
+        case .capture, .captureElaborate, .executeYolo:
+            return true
+        case .execute, .elaborate:
+            return false
+        }
+    }
 }
 
 /// A `RunEvent` paired with a fresh `UUID` so the SwiftUI log list can iterate
@@ -281,10 +299,12 @@ final class TaskRun {
             scriptURL.path,
             "--project-root", projectPath,
         ]
-        // Capture / executeYolo runs have no real task id (the task does not
-        // exist yet); they carry a free-text `--description` instead.
-        // execute/elaborate operate on an existing task and pass `--task-id`.
-        if mode == .capture || mode == .executeYolo {
+        // Capture / captureElaborate / executeYolo runs have no real task id
+        // (the task does not exist yet); they carry a free-text `--description`
+        // instead. execute/elaborate operate on an existing task and pass
+        // `--task-id`. The set is centralized in `RunMode.usesDescription` so the
+        // arg-shape contract is unit-testable without spawning a process.
+        if mode.usesDescription {
             if let description, !description.isEmpty {
                 arguments += ["--description", description]
             }
@@ -504,25 +524,38 @@ final class TaskRunner {
     }
 
     /// Launches a description-driven run for `projectPath` from a brand-new
-    /// task's `description`. When `execute` is false (the default), it `capture`s
-    /// the task and leaves it `pending`; when true, it runs
-    /// `plan-execute "<description>" yolo` (mode `.executeYolo`) to auto-capture,
-    /// auto-elaborate, and execute it autonomously in a worktree, leaving it in
-    /// `review`. Because no task id exists yet, the run is tracked under a UNIQUE
-    /// per-run identity key (`captureKey(projectPath:) + ":" + UUID()`), which
-    /// also becomes the `TaskRun`'s `taskID`. Every submission therefore starts a
-    /// fresh, independently-tracked run — captures are no longer guarded or
-    /// serialized, so multiple can run back-to-back/concurrently for one project.
-    /// Reuses the same start / finish reload path as `run(...)`, so each new task
-    /// surfaces on the next store reload.
-    func capture(projectPath: String, description: String, execute: Bool = false) {
+    /// task's `description`. The mode is selected from the flags: when `execute`
+    /// is true it runs `plan-execute "<description>" yolo` (mode `.executeYolo`)
+    /// to auto-capture, auto-elaborate, and execute it autonomously in a
+    /// worktree, leaving it in `review`; otherwise when `elaborate` is true it
+    /// runs `plan-capture` then chains into `plan-elaborate` (mode
+    /// `.captureElaborate`) to capture AND flesh out the task, leaving it
+    /// `elaborated` (it does NOT execute); otherwise (the default) it `capture`s
+    /// the task and leaves it `pending`. `execute` takes precedence over
+    /// `elaborate`. Because no task id exists yet, the run is tracked under a
+    /// UNIQUE per-run identity key (`captureKey(projectPath:) + ":" + UUID()`),
+    /// which also becomes the `TaskRun`'s `taskID`. Every submission therefore
+    /// starts a fresh, independently-tracked run — captures are no longer guarded
+    /// or serialized, so multiple can run back-to-back/concurrently for one
+    /// project. Reuses the same start / finish reload path as `run(...)`, so each
+    /// new task surfaces on the next store reload.
+    func capture(projectPath: String, description: String, execute: Bool = false, elaborate: Bool = false) {
         let key = Self.captureKey(projectPath: projectPath) + ":" + UUID().uuidString
-        let mode: RunMode = execute ? .executeYolo : .capture
+        let mode = Self.captureMode(execute: execute, elaborate: elaborate)
         let taskRun = TaskRun(taskID: key, mode: mode, description: description)
         runs[key] = taskRun
         taskRun.start(projectPath: projectPath) { [weak self] in
             self?.onAnyRunFinished?()
         }
+    }
+
+    /// The pure mode-selection behind `capture(...)`: Execute wins
+    /// (`.executeYolo`), else Elaborate (`.captureElaborate`), else a plain
+    /// `.capture`. Extracted as a `static func` so the precedence is unit-testable
+    /// without starting a real run (which would spawn `node`). `capture(...)`
+    /// calls this so the live behavior and the test share one source of truth.
+    nonisolated static func captureMode(execute: Bool, elaborate: Bool) -> RunMode {
+        execute ? .executeYolo : (elaborate ? .captureElaborate : .capture)
     }
 
     /// Stops the run for `taskID`, if any.

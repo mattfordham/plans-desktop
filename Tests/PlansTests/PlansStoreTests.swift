@@ -461,6 +461,34 @@ final class PlansStoreTests: XCTestCase {
         XCTAssertTrue(reloaded.manualOrderActive)
     }
 
+    // MARK: - Capture drafts (persisted to injected UserDefaults, #031)
+
+    func testCaptureDraftRoundTripsAcrossStoreInstances() throws {
+        let reader = try makeReader(projectPaths: [])
+        let defaults = makeDefaults()
+
+        let store = PlansStore(registryReader: reader, defaults: defaults)
+        let draft = PlansStore.CaptureDraft(text: "hi", execute: true, elaborate: false)
+        store.setDraft(draft, for: "/proj")
+
+        // Visible immediately on the same store.
+        XCTAssertEqual(store.draft(for: "/proj"), draft)
+
+        // A fresh store over the SAME defaults restores the draft.
+        let reloaded = PlansStore(registryReader: reader, defaults: defaults)
+        let restored = try XCTUnwrap(reloaded.draft(for: "/proj"))
+        XCTAssertEqual(restored.text, "hi")
+        XCTAssertTrue(restored.execute)
+        XCTAssertFalse(restored.elaborate)
+
+        // Clearing drops it on this store AND on a fresh store over the same defaults.
+        store.clearDraft(for: "/proj")
+        XCTAssertNil(store.draft(for: "/proj"))
+
+        let afterClear = PlansStore(registryReader: reader, defaults: defaults)
+        XCTAssertNil(afterClear.draft(for: "/proj"))
+    }
+
     func testClearManualOrderRevertsFlagButKeepsOverride() throws {
         let reader = try makeReader(projectPaths: [])
         let defaults = makeDefaults()

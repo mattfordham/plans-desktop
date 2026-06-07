@@ -42,6 +42,14 @@ struct BrowserWindow: View {
     /// would land before, making the otherwise-invisible drop position visible.
     @State private var dropTargetPath: String? = nil
 
+    /// #031: the in-flight request to open the shared "New Plan" modal,
+    /// pre-selected to a project. `nil` keeps the sheet closed; setting it (from
+    /// the global toolbar button or a card's "+" glyph) presents the sheet.
+    /// Wrapped in an `Identifiable` request (a bare `String?` isn't
+    /// `Identifiable`) so `.sheet(item:)` drives presentation and a fresh `id`
+    /// re-presents even for the same project path.
+    @State private var newPlanRequest: NewPlanRequest? = nil
+
     /// Pure width → column-count function: fits as many `cardMinWidth` columns
     /// (plus a `gridSpacing` gutter each) into the padded content width as will
     /// fit, with a floor of 1. No side effects and no view-state reads, so it is
@@ -77,7 +85,31 @@ struct BrowserWindow: View {
         // detail in a separate window (§011); this window has no detail pane.
         cardGrid
             .frame(minWidth: 480, minHeight: 520)
+            // #031: the shared "New Plan" modal, presented over the whole window.
+            // Driven by `newPlanRequest` (set by the global toolbar button below
+            // or a card's "+" glyph via the `onNewPlan` closure passed into each
+            // `ProjectCard`). `.sheet(item:)` so a fresh request id re-presents
+            // even for the same project path.
+            .sheet(item: $newPlanRequest) { request in
+                NewPlanModal(initialProjectPath: request.projectPath)
+            }
             .toolbar {
+                // #031: open the shared "New Plan" modal pre-selected to the
+                // top-of-grid project (the first in the staleness sort, matching
+                // the grid order). Disabled when there are no projects to capture
+                // against. Per-card "+" glyphs open the same modal pre-selected to
+                // their own project.
+                ToolbarItem {
+                    Button {
+                        if let first = BrowserViewModel.sortByStaleness(store.projects).first {
+                            newPlanRequest = NewPlanRequest(projectPath: first.projectPath)
+                        }
+                    } label: {
+                        Label("New Plan", systemImage: "square.and.pencil")
+                    }
+                    .help("Capture a new plan")
+                    .disabled(store.projects.isEmpty)
+                }
                 ToolbarItem {
                     Button {
                         // Same shared pick → link → report flow used by the menu
@@ -154,7 +186,12 @@ struct BrowserWindow: View {
                         // re-introduce the stretch. The `.id` stays on this wrapper
                         // so the ScrollViewReader drill-down still targets the cell.
                         VStack(spacing: 0) {
-                            ProjectCard(project: project)
+                            // #031: the card's "+" glyph opens the shared modal
+                            // pre-selected to THIS card's project via this closure
+                            // (a fresh `NewPlanRequest` id so `.sheet(item:)` fires).
+                            ProjectCard(project: project) { path in
+                                newPlanRequest = NewPlanRequest(projectPath: path)
+                            }
                             Spacer(minLength: 0)
                         }
                         .id(project.projectPath)
@@ -291,6 +328,15 @@ struct BrowserWindow: View {
             proxy.scrollTo(path, anchor: .top)
         }
     }
+}
+
+/// #031: an `Identifiable` wrapper around a target project path so the "New
+/// Plan" modal can be driven by `.sheet(item:)` (a bare `String?` isn't
+/// `Identifiable`). A fresh `id` per request means re-tapping the same project's
+/// "+" re-presents the sheet rather than being deduplicated.
+private struct NewPlanRequest: Identifiable {
+    let id = UUID()
+    let projectPath: String
 }
 
 /// Carries the card grid's measured viewport width up from a `GeometryReader`

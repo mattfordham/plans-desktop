@@ -277,6 +277,40 @@ final class TaskRunnerTests: XCTestCase {
         XCTAssertFalse(keyForA.hasPrefix(prefixAB))
     }
 
+    // MARK: - Capture mode selection (task #031)
+
+    /// `TaskRunner.captureMode(execute:elaborate:)` is the pure helper behind the
+    /// `capture(...)` mode precedence: Execute wins (`.executeYolo`), else
+    /// Elaborate (`.captureElaborate`), else a plain `.capture`. Extracted so the
+    /// precedence is unit-testable without spawning `node` (`capture(...)` starts
+    /// a real run).
+    func testCaptureModeSelectionPrecedence() {
+        // Execute wins regardless of elaborate.
+        XCTAssertEqual(TaskRunner.captureMode(execute: true, elaborate: false), .executeYolo)
+        XCTAssertEqual(TaskRunner.captureMode(execute: true, elaborate: true), .executeYolo)
+
+        // Then elaborate (when execute is off).
+        XCTAssertEqual(TaskRunner.captureMode(execute: false, elaborate: true), .captureElaborate)
+
+        // Else a plain capture.
+        XCTAssertEqual(TaskRunner.captureMode(execute: false, elaborate: false), .capture)
+    }
+
+    /// `RunMode.usesDescription` is the pure flag `TaskRun.spawn` consults to pass
+    /// `--description <text>` (and omit `--task-id`): true for the three
+    /// description-driven modes (`.capture`, `.captureElaborate`, `.executeYolo`),
+    /// false for the existing-task modes (`.execute`, `.elaborate`). Asserting it
+    /// directly verifies the `.captureElaborate` description wiring without
+    /// spawning a real `node` process.
+    func testRunModeUsesDescriptionFlag() {
+        XCTAssertTrue(RunMode.capture.usesDescription)
+        XCTAssertTrue(RunMode.captureElaborate.usesDescription)
+        XCTAssertTrue(RunMode.executeYolo.usesDescription)
+
+        XCTAssertFalse(RunMode.execute.usesDescription)
+        XCTAssertFalse(RunMode.elaborate.usesDescription)
+    }
+
     // The Node-side `--description` arg shape (capture / executeYolo runs pass
     // `--description <text>` and omit `--task-id`) is verified by inspection of
     // `TaskRun.spawn` / `run-task.ts`; it is not exercised here because that

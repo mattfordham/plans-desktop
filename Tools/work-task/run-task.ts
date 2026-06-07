@@ -9,6 +9,10 @@
  *                task autonomously (no interactive prompts).
  *   - `capture`: drives `plan-capture` to record a new task from a free-text
  *                `--description`, leaving it in `pending` (no chaining).
+ *   - `captureElaborate`: drives `plan-capture` then chains into
+ *                `plan-elaborate` to record AND flesh out a new task from a
+ *                free-text `--description`, leaving it in `elaborated` (it does
+ *                NOT execute).
  *   - `executeYolo`: drives `plan-execute "<description>" yolo` to auto-capture,
  *                auto-elaborate, and autonomously execute a new task from a
  *                free-text `--description` in an isolated worktree, leaving it in
@@ -34,14 +38,19 @@ import { query } from "@anthropic-ai/claude-agent-sdk";
 const MAX_BUDGET_USD = 5.0;
 
 /** What the spawned agent should do with the task. */
-type Mode = "execute" | "elaborate" | "capture" | "executeYolo";
+type Mode =
+  | "execute"
+  | "elaborate"
+  | "capture"
+  | "captureElaborate"
+  | "executeYolo";
 
 interface Args {
   projectRoot: string;
-  /** Required for execute/elaborate; undefined for capture/executeYolo (no task exists yet). */
+  /** Required for execute/elaborate; undefined for capture/captureElaborate/executeYolo (no task exists yet). */
   taskId?: string;
   mode: Mode;
-  /** Required for capture/executeYolo: the free-text description to act on. */
+  /** Required for capture/captureElaborate/executeYolo: the free-text description to act on. */
   description?: string;
 }
 
@@ -75,6 +84,7 @@ function parseArgs(argv: string[]): Args | null {
         value !== "execute" &&
         value !== "elaborate" &&
         value !== "capture" &&
+        value !== "captureElaborate" &&
         value !== "executeYolo"
       ) {
         return null;
@@ -87,9 +97,13 @@ function parseArgs(argv: string[]): Args | null {
     return null;
   }
 
-  if (mode === "capture" || mode === "executeYolo") {
-    // Capture / executeYolo create a brand-new task, so there is no task id
-    // yet; a free-text description is required instead.
+  if (
+    mode === "capture" ||
+    mode === "captureElaborate" ||
+    mode === "executeYolo"
+  ) {
+    // Capture / captureElaborate / executeYolo create a brand-new task, so
+    // there is no task id yet; a free-text description is required instead.
     if (!description) {
       return null;
     }
@@ -208,6 +222,46 @@ function buildCapturePrompt(description: string): string {
 }
 
 /**
+ * Build the prompt for a `captureElaborate` run. This records a brand-new task
+ * from the free-text description with `plan-capture`, then chains directly into
+ * `plan-elaborate <new-id>` to research and flesh it out — leaving the task in
+ * the `elaborated` state. It does NOT execute the task. Both skills are normally
+ * interactive; since this is an unattended hand-off with no UI to answer
+ * prompts, we instruct the agent to work autonomously, recording reasonable
+ * assumptions instead of asking.
+ */
+function buildCaptureElaboratePrompt(description: string): string {
+  return [
+    `Record a new plans-cc task from the following description, then flesh it`,
+    `out — capture, then elaborate:`,
+    "",
+    `1. First, use the \`plan-capture\` skill to record the task:`,
+    "",
+    `   /plan-capture "${description}"`,
+    "",
+    `2. Then immediately use the \`plan-elaborate\` skill on the task you just`,
+    `   captured, passing its new id:`,
+    "",
+    `   /plan-elaborate <new-id>`,
+    "",
+    "Requirements:",
+    "1. Run BOTH steps in sequence: capture the task, then elaborate it. Do NOT",
+    "   chain onward to execute the task — your job ends once the task is",
+    "   elaborated.",
+    "2. Work fully autonomously. Do NOT ask the user any questions — there is",
+    "   no interactive UI to answer them. Where either skill would prompt for a",
+    "   clarification or design decision, make the most reasonable assumption",
+    "   yourself and record it in the task's Assumptions section.",
+    "3. Research the codebase as needed and produce a complete How checklist,",
+    "   Verification criteria, and Impact Scope per the skill's conventions.",
+    "4. Leave the new task in the `elaborated` state when done. Do NOT execute",
+    "   it.",
+    "",
+    "Work autonomously to completion. Do not ask for confirmation.",
+  ].join("\n");
+}
+
+/**
  * Build the prompt for an `executeYolo` run. plan-execute accepts a free-text
  * description directly and, in `yolo` mode, auto-captures + auto-elaborates +
  * executes the new task fully autonomously in an isolated worktree (yolo implies
@@ -243,6 +297,9 @@ function buildPrompt(args: Args): string {
   if (args.mode === "capture") {
     return buildCapturePrompt(args.description ?? "");
   }
+  if (args.mode === "captureElaborate") {
+    return buildCaptureElaboratePrompt(args.description ?? "");
+  }
   if (args.mode === "executeYolo") {
     return buildExecuteYoloPrompt(args.description ?? "");
   }
@@ -256,7 +313,7 @@ async function main(): Promise<void> {
   const args = parseArgs(process.argv.slice(2));
   if (!args) {
     emitError(
-      "Missing or invalid arguments. Usage: run-task.js --project-root <abs path> [--mode execute|elaborate|capture|executeYolo] (--task-id <NNN> for execute/elaborate; --description <text> for capture/executeYolo)",
+      "Missing or invalid arguments. Usage: run-task.js --project-root <abs path> [--mode execute|elaborate|capture|captureElaborate|executeYolo] (--task-id <NNN> for execute/elaborate; --description <text> for capture/captureElaborate/executeYolo)",
     );
     process.exit(1);
     return;

@@ -29,6 +29,12 @@ struct ProjectCard: View {
     /// The project this card renders. Read-only; never mutated.
     let project: ProjectTasks
 
+    /// Opens the shared "New Plan" modal pre-selected to this card's project
+    /// (#031). Invoked by the header "+" glyph with `project.projectPath`; the
+    /// presenting `BrowserWindow` owns the sheet state. Replaces the former
+    /// inline capture popover this card used to host itself.
+    let onNewPlan: (String) -> Void
+
     /// Opens the standalone plan-detail window (§011) for a tapped row, keyed on
     /// the row's composite `TaskRow.ID`.
     @Environment(\.openWindow) private var openWindow
@@ -47,18 +53,6 @@ struct ProjectCard: View {
     /// per-task `Binding<Bool>` from `progressPopover(for:)` drives the `.popover`
     /// on each row's spinner.
     @State private var progressPopoverTaskID: String? = nil
-
-    /// Whether the plan-capture popover (the "+" button's `TextField`) is open.
-    /// Transient UI state, reset after a successful submit.
-    @State private var capturePresented = false
-
-    /// The in-flight text of the capture `TextField`. Cleared after submit.
-    @State private var captureText = ""
-
-    /// Whether the popover's "Execute" toggle is on. When set, submitting runs
-    /// `plan-execute "<description>" yolo` (auto-capture + elaborate + execute in
-    /// a worktree) instead of a capture-only run. Reset alongside `captureText`.
-    @State private var captureExecute = false
 
     /// A per-task `Binding<Bool>` for the run-progress popover: it reads `true`
     /// only when `progressPopoverTaskID` is this `taskID`, and on set assigns the
@@ -165,12 +159,12 @@ struct ProjectCard: View {
     // MARK: - Capture ("+" new plan)
 
     /// The per-project plan-capture control, placed immediately after the project
-    /// name in the header. It's always a "+" `RowActionGlyph` that opens the
-    /// capture popover (a `TextField` to describe the plan); on submit it hands the
-    /// description to `TaskRunner.capture` — the bundled Agent-SDK process is the
-    /// sole writer of `.plans/` (§2). The "+" stays put even while captures are in
-    /// flight, so it's immediately reusable for back-to-back submissions; running
-    /// captures surface as stacked rows below the divider (`captureRows`).
+    /// name in the header. A "+" `CaptureGlyph` that opens the shared "New Plan"
+    /// modal pre-selected to this project (#031, via `onNewPlan`) — the modal,
+    /// not this card, now owns the description form and hands the result to
+    /// `TaskRunner.capture` (the bundled Agent-SDK process is the sole writer of
+    /// `.plans/`, §2). Running captures still surface as stacked rows below the
+    /// divider (`captureRows`).
     @ViewBuilder
     private var captureControl: some View {
         // A "+" glyph sized to match the header status badges
@@ -179,12 +173,7 @@ struct ProjectCard: View {
         // tap-gesture primitive as `RowActionGlyph` (a nested borderless
         // Button hit-tests unreliably here — see the file header note).
         CaptureGlyph {
-            captureText = ""
-            captureExecute = false
-            capturePresented = true
-        }
-        .popover(isPresented: $capturePresented, attachmentAnchor: .rect(.bounds)) {
-            capturePopover
+            onNewPlan(project.projectPath)
         }
     }
 
@@ -240,84 +229,6 @@ struct ProjectCard: View {
                 }
         }
         .help("Show capture progress")
-    }
-
-    /// The content of the capture popover: a caption, a genuinely multi-line
-    /// description box, and a single bottom row holding the "Execute" toggle
-    /// (left) and the submit button (right) on the same baseline.
-    ///
-    /// A `TextEditor` (not a `.roundedBorder` `TextField`) is used so the box is
-    /// truly multi-line from the first paint — the rounded-border field collapses
-    /// to one line on macOS regardless of `lineLimit`. A placeholder is overlaid
-    /// while empty. Return inserts a newline (the natural `TextEditor` behavior);
-    /// submission is via the button, so ⌘↩ is free to add a newline too.
-    private var capturePopover: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Text("New plan for \(project.projectName)")
-                .font(.subheadline)
-                .foregroundStyle(.secondary)
-
-            ZStack(alignment: .topLeading) {
-                TextEditor(text: $captureText)
-                    .font(.body)
-                    .scrollContentBackground(.hidden)
-                    .padding(4)
-                    .frame(height: 96)
-                    .background(
-                        RoundedRectangle(cornerRadius: 6)
-                            .fill(Color(nsColor: .textBackgroundColor))
-                    )
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 6)
-                            .stroke(Color.secondary.opacity(0.4), lineWidth: 1)
-                    )
-                if captureText.isEmpty {
-                    // Aligned to the cursor (the TextEditor's text origin): the
-                    // editor's 4pt outer padding is the only horizontal offset
-                    // that matters; NSTextView adds a tiny extra, so 5pt sits the
-                    // placeholder right at the caret. Vertically the editor's 4pt
-                    // padding alone matches the first text line's top.
-                    Text("Describe the plan…")
-                        .font(.body)
-                        .foregroundStyle(.secondary)
-                        .padding(.leading, 9)
-                        .padding(.top, 4)
-                        .allowsHitTesting(false)
-                }
-            }
-
-            // Execute (left) and the submit button (right) share one row so they
-            // sit on the same baseline, evenly aligned to the box's two edges.
-            HStack {
-                Toggle("Execute", isOn: $captureExecute)
-                    .toggleStyle(.checkbox)
-                    .help("Capture, elaborate, and run the new plan autonomously in a worktree")
-                Spacer()
-                // ⌘↩ submits from within the editor (a bare Return inserts a
-                // newline in the multi-line `TextEditor`, so the submit shortcut
-                // is the Command-modified Return rather than the default action).
-                Button(captureExecute ? "Execute" : "Capture") { submitCapture() }
-                    .keyboardShortcut(.return, modifiers: .command)
-            }
-        }
-        .padding(12)
-        .frame(width: 340)
-    }
-
-    /// Hands the trimmed capture text to `TaskRunner.capture` (the sole `.plans/`
-    /// writer is the spawned Agent-SDK process, §2) — capture-only, or, when the
-    /// "Execute" toggle is on, a `plan-execute "<text>" yolo` run — then clears
-    /// the field/toggle and dismisses the popover. An empty/whitespace-only
-    /// description is ignored: nothing spawns and the popover stays open so the
-    /// user can correct it.
-    private func submitCapture() {
-        let trimmed = captureText.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return }
-        cardLog.notice("card Capture submitted: project=\(self.project.projectPath, privacy: .public) execute=\(self.captureExecute)")
-        runner.capture(projectPath: project.projectPath, description: trimmed, execute: captureExecute)
-        captureText = ""
-        captureExecute = false
-        capturePresented = false
     }
 
     // MARK: - Footer (git status)
