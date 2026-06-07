@@ -215,6 +215,7 @@ struct ProjectCard: View {
                 .truncationMode(.tail)
             Spacer(minLength: 0)
         }
+        .padding(.vertical, 5)
         .contentShape(Rectangle())
         .onTapGesture {
             progressPopoverTaskID = (progressPopoverTaskID == run.taskID) ? nil : run.taskID
