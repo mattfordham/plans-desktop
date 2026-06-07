@@ -144,17 +144,17 @@ struct BrowserWindow: View {
             // window's `@State`, so it bumps `store.newPlanTrigger` and we open
             // the modal here — opening it IDENTICALLY to the toolbar button.
             .onChange(of: store.newPlanTrigger) { _, _ in
-                openNewPlanForTopProject()
+                openNewPlanForRecentProject()
             }
             .toolbar {
                 // #031: open the shared "New Plan" modal pre-selected to the
-                // top-of-grid project (the first in the staleness sort, matching
-                // the grid order). Disabled when there are no projects to capture
-                // against. Per-card "+" glyphs open the same modal pre-selected to
-                // their own project.
+                // most-recently-touched project (newest `lastSeen`, ignoring any
+                // manual grid reorder). Disabled when there are no projects to
+                // capture against. Per-card "+" glyphs open the same modal
+                // pre-selected to their own project.
                 ToolbarItem {
                     Button {
-                        openNewPlanForTopProject()
+                        openNewPlanForRecentProject()
                     } label: {
                         Label("New Plan", systemImage: "square.and.pencil")
                     }
@@ -221,12 +221,15 @@ struct BrowserWindow: View {
     /// `ProjectCard`s over the recency-sorted projects. Wrapped in a
     /// `ScrollViewReader` and each card item tagged with `.id(projectPath)` so a
     /// menu-bar drill-down (segment 4) can scroll the grid to a target project.
-    /// Opens the shared "New Plan" modal pre-selected to the top-of-grid project
-    /// (the first in the staleness sort, matching the grid order), or does
-    /// nothing when there are no projects (#031). Shared by the toolbar "New
-    /// Plan" button and the app-wide ⌘N command (#034, via `newPlanTrigger`) so
-    /// both open the modal identically.
-    private func openNewPlanForTopProject() {
+    /// Opens the shared "New Plan" modal pre-selected to the most-recently-touched
+    /// project (the newest `lastSeen` via the staleness sort), or does nothing when
+    /// there are no projects (#031). This deliberately keys off recency and ignores
+    /// any active manual grid reorder (#017) — the general "New Plan" entry point
+    /// always defaults to the project the user most recently worked in, not whatever
+    /// card happens to sit at the top of a manually reordered grid. Shared by the
+    /// toolbar "New Plan" button and the app-wide ⌘N command (#034, via
+    /// `newPlanTrigger`) so both open the modal identically.
+    private func openNewPlanForRecentProject() {
         if let first = BrowserViewModel.sortByStaleness(store.projects).first {
             newPlanRequest = NewPlanRequest(projectPath: first.projectPath)
         }
