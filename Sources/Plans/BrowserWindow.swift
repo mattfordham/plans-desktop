@@ -35,6 +35,13 @@ struct BrowserWindow: View {
     /// responsive column count. `0` until the first layout pass measures it.
     @State private var gridWidth: CGFloat = 0
 
+    /// The measured available content height of the card grid's scroll viewport
+    /// (#033), fed by the same `GeometryReader` probe that measures the width.
+    /// Drives the per-row card height in fit-to-screen mode so every row fits on
+    /// screen. `0` until the first layout pass measures it (fit mode then falls
+    /// back to natural card heights via `fitRowHeight` returning `nil`).
+    @State private var gridHeight: CGFloat = 0
+
     /// #017: the project path of the card currently being hovered as a drop
     /// target during a card drag, or `nil` when nothing is targeted. Driven by
     /// each card's `.dropDestination(isTargeted:)` callback so the grid can paint
@@ -58,13 +65,44 @@ struct BrowserWindow: View {
         max(1, Int((width - 2 * gridPadding) / (cardMinWidth + gridSpacing)))
     }
 
-    /// Pure count → column-count function for the "Fit to Screen" layout (#033):
-    /// arranges `count` cards into a near-square grid by taking the ceiling of the
-    /// square root of the count, with a floor of 1 (so `count == 0` yields a
-    /// single column rather than zero). No side effects and no view-state reads,
-    /// so it is directly unit-testable without instantiating the view.
-    static func fitColumnCount(forCount count: Int) -> Int {
-        max(1, Int(ceil(sqrt(Double(count)))))
+    /// Resolves the EFFECTIVE card layout for a given column count (#033). Fit-to-
+    /// screen only makes sense with two or more columns: at a single column (a
+    /// narrow window) cards are already full-width and stacking them with stretched
+    /// heights would just produce one tall card per screen, so we fall back to
+    /// `.scroll` and let the content scroll normally. With 2+ columns the requested
+    /// `mode` is honored verbatim. Pure (no view-state reads) so it is directly
+    /// unit-testable without instantiating the view.
+    static func effectiveLayoutMode(_ mode: CardLayoutMode, columnCount: Int) -> CardLayoutMode {
+        columnCount <= 1 ? .scroll : mode
+    }
+
+    /// The per-row card height for fit-to-screen mode (#033): divides the measured
+    /// viewport height (minus the grid's outer padding and the inter-row gutters)
+    /// evenly across `rowCount` rows so every row fits on screen without scrolling.
+    /// Returns `nil` when there is nothing to size (`rowCount <= 0`) or the
+    /// viewport hasn't been measured yet (`viewportHeight <= 0`), letting the grid
+    /// fall back to natural card heights. A `fitRowMinHeight` floor keeps cards
+    /// legible when there are too many rows to fit — beyond that the ScrollView
+    /// (kept in place) absorbs the overflow. Pure, so it is unit-testable.
+    static func fitRowHeight(viewportHeight: CGFloat, rowCount: Int) -> CGFloat? {
+        guard rowCount > 0, viewportHeight > 0 else { return nil }
+        let gutters = CGFloat(rowCount - 1) * gridSpacing
+        let usable = viewportHeight - 2 * gridPadding - gutters
+        return max(fitRowMinHeight, usable / CGFloat(rowCount))
+    }
+
+    /// The minimum per-row height in fit-to-screen mode (#033). Below this a card
+    /// can't show its header + a plan row legibly, so once the rows would be
+    /// shorter than this the grid stops shrinking them and the ScrollView takes
+    /// over for the overflow.
+    static let fitRowMinHeight: CGFloat = 160
+
+    /// The number of grid rows for `count` cards laid out across `columns`
+    /// columns (#033): the ceiling of the division, floored at 0 for an empty
+    /// grid. Pure helper feeding `fitRowHeight`'s per-row division.
+    static func rowCount(forCount count: Int, columns: Int) -> Int {
+        guard count > 0, columns > 0 else { return 0 }
+        return Int(ceil(Double(count) / Double(columns)))
     }
 
     /// The projects in display order for the card grid. When the user's manual
@@ -180,7 +218,26 @@ struct BrowserWindow: View {
     /// `ScrollViewReader` and each card item tagged with `.id(projectPath)` so a
     /// menu-bar drill-down (segment 4) can scroll the grid to a target project.
     private var cardGrid: some View {
-        ScrollViewReader { proxy in
+        // #033: fit-to-screen reuses the SAME width-driven column breakpoints as
+        // scroll (1→2→3→4…) — the two modes only differ in vertical sizing. The
+        // column count is computed once here so the grid, the effective-mode
+        // decision, and the per-row height all agree on it.
+        let columns = BrowserWindow.columnCount(forWidth: gridWidth)
+        // At a single column fit-to-screen collapses to scroll (see
+        // `effectiveLayoutMode`); otherwise the user's choice stands.
+        let effectiveMode = BrowserWindow.effectiveLayoutMode(
+            store.cardLayoutMode, columnCount: columns
+        )
+        // In fit mode, divide the viewport height across the grid's rows so every
+        // card row fits on screen; `nil` (scroll mode, or height not yet measured)
+        // leaves cards at their natural, content-hugging height.
+        let fitHeight: CGFloat? = effectiveMode == .fit
+            ? BrowserWindow.fitRowHeight(
+                viewportHeight: gridHeight,
+                rowCount: BrowserWindow.rowCount(forCount: sortedProjects.count, columns: columns)
+            )
+            : nil
+        return ScrollViewReader { proxy in
             ScrollView {
                 LazyVGrid(
                     // Responsive equal-flexible columns: the count is derived from
@@ -194,16 +251,16 @@ struct BrowserWindow: View {
                     // (`alignment:` here is HORIZONTAL only and stays at the
                     // default `.center`; cards fill their column via maxWidth so it
                     // has no visible effect.)
-                    // #033: the column count is mode-aware. `.scroll` (default)
-                    // keeps the responsive, width-derived count; `.fit` packs the
-                    // cards into a near-square grid sized to the card COUNT so they
-                    // all fit on screen at once. The surrounding ScrollView is kept
-                    // as-is so fit mode still scrolls (never clips) on small windows.
+                    // #033: BOTH modes use the same width-driven column count
+                    // (`columns`, computed above), so cards reflow 1→2→3→4…
+                    // identically. Fit-to-screen differs only by stretching each
+                    // row's height (`fitHeight`, applied to the card wrapper below)
+                    // so all rows fit on screen; scroll mode leaves heights natural.
+                    // The surrounding ScrollView is kept as-is so fit mode still
+                    // scrolls (never clips) when there are more rows than fit.
                     columns: Array(
                         repeating: GridItem(.flexible(), spacing: Self.gridSpacing),
-                        count: store.cardLayoutMode == .fit
-                            ? BrowserWindow.fitColumnCount(forCount: sortedProjects.count)
-                            : BrowserWindow.columnCount(forWidth: gridWidth)
+                        count: columns
                     ),
                     spacing: Self.gridSpacing
                 ) {
@@ -225,8 +282,22 @@ struct BrowserWindow: View {
                             ProjectCard(project: project) { path in
                                 newPlanRequest = NewPlanRequest(projectPath: path)
                             }
-                            Spacer(minLength: 0)
+                            // #033: in fit mode the trailing Spacer is suppressed and
+                            // the card is stretched to the fixed row height (frame
+                            // below): the card's OWN internal Spacer then distributes
+                            // the slack so its background/border fill the cell. In
+                            // scroll mode this Spacer absorbs LazyVGrid's row-height
+                            // equalization so short cards hug their content at the top.
+                            if fitHeight == nil {
+                                Spacer(minLength: 0)
+                            }
                         }
+                        // #033: in fit-to-screen, force every card cell to the
+                        // computed per-row height so the rows divide the viewport and
+                        // fill it vertically (the card stretches via its internal
+                        // Spacer). In scroll mode (`fitHeight == nil`) `height: nil`
+                        // is a no-op and cards keep their natural, content-hugging size.
+                        .frame(height: fitHeight)
                         .id(project.projectPath)
                         // #017 drop indicator: while a card is dragged over this
                         // cell, paint a vertical accent bar on its LEADING edge to
@@ -314,9 +385,15 @@ struct BrowserWindow: View {
                 GeometryReader { geo in
                     Color.clear
                         .preference(key: GridWidthKey.self, value: geo.size.width)
+                        // #033: the same probe reports the viewport HEIGHT, feeding
+                        // the fit-to-screen per-row height. Lives in `.background`
+                        // (not the scroll content) so reading it can't grow or loop
+                        // the scroll content's own height.
+                        .preference(key: GridHeightKey.self, value: geo.size.height)
                 }
             )
             .onPreferenceChange(GridWidthKey.self) { gridWidth = $0 }
+            .onPreferenceChange(GridHeightKey.self) { gridHeight = $0 }
             .overlay {
                 if sortedProjects.isEmpty {
                     Text("No projects")
@@ -378,6 +455,18 @@ private struct NewPlanRequest: Identifiable {
 /// can't collapse the grid or trip a layout loop. Reduces by taking the latest
 /// (max) reported width.
 private struct GridWidthKey: PreferenceKey {
+    static let defaultValue: CGFloat = 0
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        value = max(value, nextValue())
+    }
+}
+
+/// Carries the card grid's measured viewport HEIGHT up from the same
+/// `GeometryReader` probe (#033), driving the fit-to-screen per-row height in
+/// `BrowserWindow.fitRowHeight`. Mirrors `GridWidthKey`: read in `.background`
+/// so the height measurement never feeds back into the scroll content's own
+/// vertical layout. Reduces by taking the latest (max) reported height.
+private struct GridHeightKey: PreferenceKey {
     static let defaultValue: CGFloat = 0
     static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
         value = max(value, nextValue())

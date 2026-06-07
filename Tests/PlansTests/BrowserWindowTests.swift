@@ -352,37 +352,80 @@ final class BrowserWindowTests: XCTestCase {
         XCTAssertEqual(BrowserWindow.columnCount(forWidth: 2000), 4)
     }
 
-    // MARK: - fitColumnCount (fit-to-screen near-square grid)
+    // MARK: - effectiveLayoutMode (fit collapses to scroll at one column)
 
-    /// Zero cards still yields a single column (the `max(1, …)` floor) so the
-    /// grid math never produces a zero column count.
-    func testFitColumnCountZeroYieldsOneColumn() {
-        XCTAssertEqual(BrowserWindow.fitColumnCount(forCount: 0), 1)
+    /// Fit-to-screen at a SINGLE column collapses to scroll: stacking full-width
+    /// cards with stretched heights would just make one tall card per screen, so
+    /// the grid scrolls normally instead.
+    func testEffectiveLayoutModeFitAtOneColumnFallsBackToScroll() {
+        XCTAssertEqual(BrowserWindow.effectiveLayoutMode(.fit, columnCount: 1), .scroll)
     }
 
-    /// A single card is one column. ceil(sqrt(1)) = 1.
-    func testFitColumnCountOneYieldsOneColumn() {
-        XCTAssertEqual(BrowserWindow.fitColumnCount(forCount: 1), 1)
+    /// A zero/degenerate column count is also treated as the single-column case
+    /// and falls back to scroll (defensive — the grid floors columns at 1 anyway).
+    func testEffectiveLayoutModeFitAtZeroColumnsFallsBackToScroll() {
+        XCTAssertEqual(BrowserWindow.effectiveLayoutMode(.fit, columnCount: 0), .scroll)
     }
 
-    /// Two cards make a 2-wide row. ceil(sqrt(2)) = ceil(1.41) = 2.
-    func testFitColumnCountTwoYieldsTwoColumns() {
-        XCTAssertEqual(BrowserWindow.fitColumnCount(forCount: 2), 2)
+    /// With two or more columns the requested fit mode is honored verbatim.
+    func testEffectiveLayoutModeFitAtTwoColumnsStaysFit() {
+        XCTAssertEqual(BrowserWindow.effectiveLayoutMode(.fit, columnCount: 2), .fit)
     }
 
-    /// A perfect square (4) is exactly 2 columns. ceil(sqrt(4)) = 2.
-    func testFitColumnCountFourYieldsTwoColumns() {
-        XCTAssertEqual(BrowserWindow.fitColumnCount(forCount: 4), 2)
+    /// Scroll mode is never altered by the column count.
+    func testEffectiveLayoutModeScrollAlwaysScroll() {
+        XCTAssertEqual(BrowserWindow.effectiveLayoutMode(.scroll, columnCount: 1), .scroll)
+        XCTAssertEqual(BrowserWindow.effectiveLayoutMode(.scroll, columnCount: 4), .scroll)
     }
 
-    /// Five cards round up to 3 columns. ceil(sqrt(5)) = ceil(2.24) = 3.
-    func testFitColumnCountFiveYieldsThreeColumns() {
-        XCTAssertEqual(BrowserWindow.fitColumnCount(forCount: 5), 3)
+    // MARK: - rowCount (grid rows for a card count over N columns)
+
+    /// An empty grid has zero rows regardless of the column count.
+    func testRowCountZeroCardsIsZeroRows() {
+        XCTAssertEqual(BrowserWindow.rowCount(forCount: 0, columns: 3), 0)
     }
 
-    /// A perfect square (9) is exactly 3 columns. ceil(sqrt(9)) = 3.
-    func testFitColumnCountNineYieldsThreeColumns() {
-        XCTAssertEqual(BrowserWindow.fitColumnCount(forCount: 9), 3)
+    /// A partial final row rounds up: 5 cards over 2 columns is 3 rows.
+    func testRowCountRoundsUpPartialRow() {
+        XCTAssertEqual(BrowserWindow.rowCount(forCount: 5, columns: 2), 3)
+    }
+
+    /// An exact fit divides evenly: 6 cards over 3 columns is 2 rows.
+    func testRowCountExactFit() {
+        XCTAssertEqual(BrowserWindow.rowCount(forCount: 6, columns: 3), 2)
+    }
+
+    /// A degenerate zero column count yields zero rows (no division by zero).
+    func testRowCountZeroColumnsIsZeroRows() {
+        XCTAssertEqual(BrowserWindow.rowCount(forCount: 4, columns: 0), 0)
+    }
+
+    // MARK: - fitRowHeight (per-row card height for fit-to-screen)
+
+    /// Before the viewport is measured (height 0) there's nothing to divide, so
+    /// the helper returns nil and the grid keeps natural card heights.
+    func testFitRowHeightUnmeasuredViewportReturnsNil() {
+        XCTAssertNil(BrowserWindow.fitRowHeight(viewportHeight: 0, rowCount: 3))
+    }
+
+    /// With no rows there's nothing to size — nil, not a divide-by-zero.
+    func testFitRowHeightZeroRowsReturnsNil() {
+        XCTAssertNil(BrowserWindow.fitRowHeight(viewportHeight: 800, rowCount: 0))
+    }
+
+    /// Roomy viewport, few rows: the height divides evenly across rows minus the
+    /// outer padding and inter-row gutters. 1000 - 2*16 - 1*16 = 952; 952/2 = 476.
+    func testFitRowHeightDividesViewportAcrossRows() throws {
+        let h = try XCTUnwrap(BrowserWindow.fitRowHeight(viewportHeight: 1000, rowCount: 2))
+        XCTAssertEqual(h, 476, accuracy: 0.001)
+    }
+
+    /// Too many rows to fit: the per-row height is clamped to the legibility floor
+    /// (`fitRowMinHeight`) rather than shrinking to an unreadable sliver — the
+    /// ScrollView then absorbs the overflow.
+    func testFitRowHeightClampsToFloorWhenManyRows() {
+        let h = BrowserWindow.fitRowHeight(viewportHeight: 400, rowCount: 10)
+        XCTAssertEqual(h, BrowserWindow.fitRowMinHeight)
     }
 
     // MARK: - applyManualOrder (manual override ordering)
