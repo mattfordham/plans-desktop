@@ -44,24 +44,15 @@ struct NewPlanModal: View {
     /// Whether the "Elaborate" toggle is on (flesh the plan out after capture).
     @State private var elaborate = false
 
-    /// The measured, clamped height of the auto-growing editor. Starts at the
-    /// minimum and grows with content up to `Self.editorMaxHeight`, after which
-    /// the editor scrolls internally.
-    @State private var editorHeight: CGFloat = NewPlanModal.editorMinHeight
-
     /// Guards the project-switch draft swap: when a project change is loading the
     /// new project's draft into the fields, the field `.onChange` handlers must
     /// NOT persist back (that would overwrite the new project's draft with the
     /// old project's text mid-swap). Set true around the swap.
     @State private var isSwitchingProject = false
 
-    /// The minimum editor height (one comfortable multi-line box). Low-confidence
-    /// layout choice — see Assumptions.
+    /// The minimum editor height (one comfortable multi-line box) before it
+    /// stretches to fill the remaining sheet space.
     private static let editorMinHeight: CGFloat = 96
-
-    /// The maximum editor height before it scrolls internally. Low-confidence
-    /// layout choice — see Assumptions.
-    private static let editorMaxHeight: CGFloat = 280
 
     /// Seeds `projectPath` from the initially-selected project. The remaining
     /// fields are restored from that project's saved draft in `.onAppear` (the
@@ -128,6 +119,7 @@ struct NewPlanModal: View {
         }
         .padding(16)
         .frame(minWidth: 460, minHeight: 320)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
         .onAppear { loadDraft(for: projectPath) }
         .onChange(of: projectPath) { _, newPath in
             // Switching projects swaps to THAT project's saved draft rather than
@@ -142,18 +134,18 @@ struct NewPlanModal: View {
 
     // MARK: - Editor (auto-growing description box)
 
-    /// The auto-growing description editor with the placeholder + rounded-border
-    /// styling lifted from `ProjectCard.capturePopover`. Height tracks the
-    /// rendered content (measured by a hidden, width-matched `Text` in the
-    /// background) clamped between `editorMinHeight` and `editorMaxHeight`; past
-    /// the max the `TextEditor` scrolls internally.
+    /// The description editor with the placeholder + rounded-border styling lifted
+    /// from `ProjectCard.capturePopover`. It stretches to fill the remaining
+    /// vertical space in the sheet (floored at `editorMinHeight`), so the form
+    /// always fills the panel and grows when the window is resized; the
+    /// `TextEditor` scrolls internally once the content exceeds the visible box.
     private var editor: some View {
         ZStack(alignment: .topLeading) {
             TextEditor(text: $text)
                 .font(.body)
                 .scrollContentBackground(.hidden)
                 .padding(4)
-                .frame(height: editorHeight)
+                .frame(minHeight: Self.editorMinHeight, maxHeight: .infinity)
                 .background(
                     RoundedRectangle(cornerRadius: 6)
                         .fill(Color(nsColor: .textBackgroundColor))
@@ -162,38 +154,6 @@ struct NewPlanModal: View {
                     RoundedRectangle(cornerRadius: 6)
                         .stroke(Color.secondary.opacity(0.4), lineWidth: 1)
                 )
-                // Measure the rendered text height with a hidden, width-matched
-                // copy of the text behind the editor. Its measured height (plus
-                // the editor's vertical padding) drives `editorHeight`, clamped to
-                // the min/max band — a simple, robust auto-grow without an
-                // NSTextView bridge.
-                .background(
-                    GeometryReader { geo in
-                        Text(text.isEmpty ? " " : text)
-                            .font(.body)
-                            .padding(4)
-                            .frame(width: geo.size.width, alignment: .topLeading)
-                            .fixedSize(horizontal: false, vertical: true)
-                            .hidden()
-                            .background(
-                                GeometryReader { textGeo in
-                                    Color.clear.preference(
-                                        key: EditorContentHeightKey.self,
-                                        value: textGeo.size.height
-                                    )
-                                }
-                            )
-                    }
-                )
-                .onPreferenceChange(EditorContentHeightKey.self) { measured in
-                    let clamped = min(
-                        max(measured + 16, Self.editorMinHeight),
-                        Self.editorMaxHeight
-                    )
-                    if abs(clamped - editorHeight) > 0.5 {
-                        editorHeight = clamped
-                    }
-                }
 
             if text.isEmpty {
                 // Aligned to the cursor (the editor's text origin): 9pt leading /
@@ -269,12 +229,3 @@ struct NewPlanModal: View {
     }
 }
 
-/// Carries the measured rendered height of the editor's text content up from the
-/// hidden width-matched `Text` probe to drive the auto-growing editor height.
-/// Reduces by taking the latest reported height.
-private struct EditorContentHeightKey: PreferenceKey {
-    static let defaultValue: CGFloat = 0
-    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
-        value = nextValue()
-    }
-}
