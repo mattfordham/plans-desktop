@@ -87,6 +87,22 @@ final class PlansStore {
         }
     }
 
+    /// A non-persisted "open the New Plan form" trigger (#034). Bridges the
+    /// scene-level ⌘N menu command (in `PlansApp`) to `BrowserWindow`'s sheet
+    /// state: the menu command can't reach the window's `@State`, so it bumps
+    /// this observable counter and `BrowserWindow` observes it via `.onChange`,
+    /// opening the same modal the toolbar button does. Pure in-memory UI state —
+    /// deliberately NOT UserDefaults-backed (no `didSet`, never loaded in `init`),
+    /// since "open a form" is a transient action, not persisted preference.
+    var newPlanTrigger: Int = 0
+
+    /// Requests that the New Plan form open (#034). Increments `newPlanTrigger`
+    /// (overflow-safe) so any observer reacts to the change even on repeated
+    /// invocations. Invoked by the app-wide ⌘N command in `PlansApp`.
+    func requestNewPlan() {
+        newPlanTrigger &+= 1
+    }
+
     /// UserDefaults key for the persisted per-project capture drafts (#031). The
     /// stored value is the JSON-encoded `[String: CaptureDraft]` as `Data`.
     private static let captureDraftsKey = "captureDrafts"

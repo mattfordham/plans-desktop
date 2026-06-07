@@ -524,4 +524,31 @@ final class PlansStoreTests: XCTestCase {
         let reloaded = PlansStore(registryReader: reader, defaults: defaults)
         XCTAssertEqual(reloaded.cardLayoutMode, .fit)
     }
+
+    // MARK: - New Plan trigger (non-persisted ⌘N → sheet bridge, #034)
+
+    func testRequestNewPlanIncrementsTrigger() throws {
+        let reader = try makeReader(projectPaths: [])
+        let store = PlansStore(registryReader: reader, defaults: makeDefaults())
+
+        XCTAssertEqual(store.newPlanTrigger, 0)
+        store.requestNewPlan()
+        XCTAssertEqual(store.newPlanTrigger, 1)
+        store.requestNewPlan()
+        XCTAssertEqual(store.newPlanTrigger, 2)
+    }
+
+    func testNewPlanTriggerIsNotPersisted() throws {
+        let reader = try makeReader(projectPaths: [])
+        let defaults = makeDefaults()
+
+        let store = PlansStore(registryReader: reader, defaults: defaults)
+        store.requestNewPlan()
+        XCTAssertEqual(store.newPlanTrigger, 1)
+
+        // A fresh store over the SAME defaults starts back at 0 — the trigger is
+        // transient UI state, deliberately never written to UserDefaults.
+        let reloaded = PlansStore(registryReader: reader, defaults: defaults)
+        XCTAssertEqual(reloaded.newPlanTrigger, 0)
+    }
 }

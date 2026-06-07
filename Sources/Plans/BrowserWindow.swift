@@ -140,6 +140,12 @@ struct BrowserWindow: View {
             .sheet(item: $newPlanRequest) { request in
                 NewPlanModal(initialProjectPath: request.projectPath)
             }
+            // #034: the app-wide ⌘N command (in `PlansApp`) can't reach this
+            // window's `@State`, so it bumps `store.newPlanTrigger` and we open
+            // the modal here — opening it IDENTICALLY to the toolbar button.
+            .onChange(of: store.newPlanTrigger) { _, _ in
+                openNewPlanForTopProject()
+            }
             .toolbar {
                 // #031: open the shared "New Plan" modal pre-selected to the
                 // top-of-grid project (the first in the staleness sort, matching
@@ -148,9 +154,7 @@ struct BrowserWindow: View {
                 // their own project.
                 ToolbarItem {
                     Button {
-                        if let first = BrowserViewModel.sortByStaleness(store.projects).first {
-                            newPlanRequest = NewPlanRequest(projectPath: first.projectPath)
-                        }
+                        openNewPlanForTopProject()
                     } label: {
                         Label("New Plan", systemImage: "square.and.pencil")
                     }
@@ -217,6 +221,17 @@ struct BrowserWindow: View {
     /// `ProjectCard`s over the recency-sorted projects. Wrapped in a
     /// `ScrollViewReader` and each card item tagged with `.id(projectPath)` so a
     /// menu-bar drill-down (segment 4) can scroll the grid to a target project.
+    /// Opens the shared "New Plan" modal pre-selected to the top-of-grid project
+    /// (the first in the staleness sort, matching the grid order), or does
+    /// nothing when there are no projects (#031). Shared by the toolbar "New
+    /// Plan" button and the app-wide ⌘N command (#034, via `newPlanTrigger`) so
+    /// both open the modal identically.
+    private func openNewPlanForTopProject() {
+        if let first = BrowserViewModel.sortByStaleness(store.projects).first {
+            newPlanRequest = NewPlanRequest(projectPath: first.projectPath)
+        }
+    }
+
     private var cardGrid: some View {
         // #033: fit-to-screen reuses the SAME width-driven column breakpoints as
         // scroll (1→2→3→4…) — the two modes only differ in vertical sizing. The

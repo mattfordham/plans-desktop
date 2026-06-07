@@ -70,6 +70,20 @@ struct PlansApp: App {
                 .environment(taskRunner)
         }
         .defaultLaunchBehavior(.presented)
+        // #034: map ⌘N app-wide to the "New Plan" form. `replacing: .newItem`
+        // overrides AppKit's default ⌘N ("New Window") so the shortcut opens the
+        // plan-capture modal instead. The button can't reach `BrowserWindow`'s
+        // sheet `@State`, so it bumps the store's non-persisted `newPlanTrigger`,
+        // which the window observes and turns into the same modal the toolbar
+        // "New Plan" button opens. `.disabled` reflects state at menu-build time
+        // (no live projects → nothing to capture against), which is sufficient.
+        .commands {
+            CommandGroup(replacing: .newItem) {
+                Button("New Plan") { store.requestNewPlan() }
+                    .keyboardShortcut("n", modifiers: .command)
+                    .disabled(store.projects.isEmpty)
+            }
+        }
 
         // Surface B detail — a standalone, value-based window per plan (§011).
         // Tapping a plan row in the browser opens this via `openWindow(id:value:)`,
