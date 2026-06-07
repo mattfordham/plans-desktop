@@ -352,6 +352,39 @@ final class BrowserWindowTests: XCTestCase {
         XCTAssertEqual(BrowserWindow.columnCount(forWidth: 2000), 4)
     }
 
+    // MARK: - fitColumnCount (fit-to-screen near-square grid)
+
+    /// Zero cards still yields a single column (the `max(1, …)` floor) so the
+    /// grid math never produces a zero column count.
+    func testFitColumnCountZeroYieldsOneColumn() {
+        XCTAssertEqual(BrowserWindow.fitColumnCount(forCount: 0), 1)
+    }
+
+    /// A single card is one column. ceil(sqrt(1)) = 1.
+    func testFitColumnCountOneYieldsOneColumn() {
+        XCTAssertEqual(BrowserWindow.fitColumnCount(forCount: 1), 1)
+    }
+
+    /// Two cards make a 2-wide row. ceil(sqrt(2)) = ceil(1.41) = 2.
+    func testFitColumnCountTwoYieldsTwoColumns() {
+        XCTAssertEqual(BrowserWindow.fitColumnCount(forCount: 2), 2)
+    }
+
+    /// A perfect square (4) is exactly 2 columns. ceil(sqrt(4)) = 2.
+    func testFitColumnCountFourYieldsTwoColumns() {
+        XCTAssertEqual(BrowserWindow.fitColumnCount(forCount: 4), 2)
+    }
+
+    /// Five cards round up to 3 columns. ceil(sqrt(5)) = ceil(2.24) = 3.
+    func testFitColumnCountFiveYieldsThreeColumns() {
+        XCTAssertEqual(BrowserWindow.fitColumnCount(forCount: 5), 3)
+    }
+
+    /// A perfect square (9) is exactly 3 columns. ceil(sqrt(9)) = 3.
+    func testFitColumnCountNineYieldsThreeColumns() {
+        XCTAssertEqual(BrowserWindow.fitColumnCount(forCount: 9), 3)
+    }
+
     // MARK: - applyManualOrder (manual override ordering)
 
     /// Projects are ordered exactly as the `order` array dictates when every

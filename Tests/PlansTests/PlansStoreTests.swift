@@ -503,4 +503,25 @@ final class PlansStoreTests: XCTestCase {
         let reloaded = PlansStore(registryReader: reader, defaults: defaults)
         XCTAssertFalse(reloaded.manualOrderActive)
     }
+
+    // MARK: - Card layout mode (#033, persisted to injected UserDefaults)
+
+    func testCardLayoutModeDefaultsToScroll() throws {
+        let reader = try makeReader(projectPaths: [])
+        let store = PlansStore(registryReader: reader, defaults: makeDefaults())
+
+        XCTAssertEqual(store.cardLayoutMode, .scroll)
+    }
+
+    func testSettingCardLayoutModePersistsAcrossStoreInstances() throws {
+        let reader = try makeReader(projectPaths: [])
+        let defaults = makeDefaults()
+
+        let store = PlansStore(registryReader: reader, defaults: defaults)
+        store.cardLayoutMode = .fit
+
+        // A fresh store over the SAME defaults reads the saved mode back.
+        let reloaded = PlansStore(registryReader: reader, defaults: defaults)
+        XCTAssertEqual(reloaded.cardLayoutMode, .fit)
+    }
 }

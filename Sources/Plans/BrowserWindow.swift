@@ -58,6 +58,15 @@ struct BrowserWindow: View {
         max(1, Int((width - 2 * gridPadding) / (cardMinWidth + gridSpacing)))
     }
 
+    /// Pure count → column-count function for the "Fit to Screen" layout (#033):
+    /// arranges `count` cards into a near-square grid by taking the ceiling of the
+    /// square root of the count, with a floor of 1 (so `count == 0` yields a
+    /// single column rather than zero). No side effects and no view-state reads,
+    /// so it is directly unit-testable without instantiating the view.
+    static func fitColumnCount(forCount count: Int) -> Int {
+        max(1, Int(ceil(sqrt(Double(count)))))
+    }
+
     /// The projects in display order for the card grid. When the user's manual
     /// order is active and non-empty (#017), the grid honors that override
     /// (`applyManualOrder`, new project paths to the top); otherwise it falls
@@ -144,6 +153,23 @@ struct BrowserWindow: View {
                     .foregroundStyle(store.hideEmptyProjects ? AnyShapeStyle(.tint) : AnyShapeStyle(.primary))
                     .help("Hide projects with no outstanding plans")
                 }
+                // #033: card-layout toggle. Mirrors the "Hide Empty" chrome
+                // exactly — a plain `Button` (not a button-styled `Toggle`) so it
+                // shares the IDENTICAL square toolbar footprint. The glyph/label
+                // come from `CardLayoutMode`; the control is accent-tinted while
+                // fit-to-screen is the active mode.
+                ToolbarItem {
+                    Button {
+                        store.cardLayoutMode = store.cardLayoutMode.toggled
+                    } label: {
+                        Label(
+                            store.cardLayoutMode.label,
+                            systemImage: store.cardLayoutMode.symbolName
+                        )
+                    }
+                    .foregroundStyle(store.cardLayoutMode == .fit ? AnyShapeStyle(.tint) : AnyShapeStyle(.primary))
+                    .help("Toggle between scrolling and fit-to-screen card layout")
+                }
             }
     }
 
@@ -168,9 +194,16 @@ struct BrowserWindow: View {
                     // (`alignment:` here is HORIZONTAL only and stays at the
                     // default `.center`; cards fill their column via maxWidth so it
                     // has no visible effect.)
+                    // #033: the column count is mode-aware. `.scroll` (default)
+                    // keeps the responsive, width-derived count; `.fit` packs the
+                    // cards into a near-square grid sized to the card COUNT so they
+                    // all fit on screen at once. The surrounding ScrollView is kept
+                    // as-is so fit mode still scrolls (never clips) on small windows.
                     columns: Array(
                         repeating: GridItem(.flexible(), spacing: Self.gridSpacing),
-                        count: BrowserWindow.columnCount(forWidth: gridWidth)
+                        count: store.cardLayoutMode == .fit
+                            ? BrowserWindow.fitColumnCount(forCount: sortedProjects.count)
+                            : BrowserWindow.columnCount(forWidth: gridWidth)
                     ),
                     spacing: Self.gridSpacing
                 ) {

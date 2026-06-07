@@ -91,6 +91,15 @@ final class PlansStore {
     /// stored value is the JSON-encoded `[String: CaptureDraft]` as `Data`.
     private static let captureDraftsKey = "captureDrafts"
 
+    /// The card-grid layout mode for the browser dashboard (#033): `.scroll` (the
+    /// default responsive scrolling grid) or `.fit` (a near-square grid sized to
+    /// fit every card on screen). Persisted on every set (its `rawValue` is the
+    /// wire form) so the choice survives app restarts. NEVER written to `.plans/`
+    /// (§2 read-only) — UserDefaults is the only persistence sink.
+    var cardLayoutMode: CardLayoutMode = .scroll {
+        didSet { defaults.set(cardLayoutMode.rawValue, forKey: Self.cardLayoutKey) }
+    }
+
     /// UserDefaults key for the persisted manual card order (array of paths).
     private static let orderKey = "cardOrderOverride"
 
@@ -99,6 +108,9 @@ final class PlansStore {
 
     /// UserDefaults key for the persisted hide-empty-projects flag (#021).
     private static let hideEmptyKey = "hideEmptyProjects"
+
+    /// UserDefaults key for the persisted card layout mode (#033).
+    private static let cardLayoutKey = "cardLayoutMode"
 
     /// The statuses surfaced in the menu bar icon space, in a fresh order that
     /// leads with actively-running work: in-progress → review → in-review. This
@@ -163,6 +175,7 @@ final class PlansStore {
         _projectOrderOverride = defaults.stringArray(forKey: Self.orderKey) ?? []
         _manualOrderActive = defaults.bool(forKey: Self.activeKey)
         _hideEmptyProjects = defaults.bool(forKey: Self.hideEmptyKey)
+        _cardLayoutMode = CardLayoutMode(rawValue: defaults.string(forKey: Self.cardLayoutKey) ?? "") ?? .scroll
         // Load persisted capture drafts (#031): decode the stored JSON `Data`,
         // defaulting to an empty map on missing/corrupt data. Assigning the
         // backing field avoids the `didSet` re-persisting the just-read value.
