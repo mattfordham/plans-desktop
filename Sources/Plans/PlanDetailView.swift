@@ -1,4 +1,5 @@
 import SwiftUI
+import AppKit
 
 /// A standalone renderer for a single plan's detail body (§011). This is the
 /// reusable surface shown both inside the browser window's detail pane and in a
@@ -164,6 +165,34 @@ struct PlanDetailView: View {
                         }
                     }
                 }
+
+                // Read-only file actions, ALWAYS visible regardless of task
+                // status or running state: reveal the plan's markdown file in
+                // Finder, or open it in the default markdown app. Both no-op
+                // safely when the file can't be resolved.
+                Button {
+                    if let url = Self.taskFileURL(
+                        projectPath: row.projectPath,
+                        taskID: row.task.id,
+                        isCompletedDir: row.task.isCompletedDir
+                    ) {
+                        NSWorkspace.shared.activateFileViewerSelecting([url])
+                    }
+                } label: {
+                    Label("Show in Finder", systemImage: "folder")
+                }
+
+                Button {
+                    if let url = Self.taskFileURL(
+                        projectPath: row.projectPath,
+                        taskID: row.task.id,
+                        isCompletedDir: row.task.isCompletedDir
+                    ) {
+                        NSWorkspace.shared.open(url)
+                    }
+                } label: {
+                    Label("Open in Markdown App", systemImage: "doc.text")
+                }
             }
             .padding(.top, 4)
         }
@@ -187,6 +216,34 @@ struct PlanDetailView: View {
     static func canElaborate(status: TaskStatus?, isBlocked: Bool) -> Bool {
         guard !isBlocked else { return false }
         return status == .pending
+    }
+
+    /// Resolves the on-disk markdown file for a task, so the read-only
+    /// "Show in Finder" / "Open in Markdown App" actions have a URL to act on.
+    /// The `Task` model does not store the filename slug, so the file is found
+    /// by scanning `<projectPath>/.plans/<pending|completed>/` for the first
+    /// `.md` whose name begins with `<taskID>-`. Returns `nil` on any error or
+    /// when no matching file exists (the buttons then no-op).
+    static func taskFileURL(
+        projectPath: String,
+        taskID: String,
+        isCompletedDir: Bool
+    ) -> URL? {
+        let subdir = isCompletedDir ? "completed" : "pending"
+        let dir = URL(fileURLWithPath: projectPath)
+            .appendingPathComponent(".plans")
+            .appendingPathComponent(subdir)
+        guard let contents = try? FileManager.default.contentsOfDirectory(
+            at: dir,
+            includingPropertiesForKeys: nil
+        ) else {
+            return nil
+        }
+        let prefix = taskID + "-"
+        return contents.first { url in
+            url.pathExtension == "md"
+                && url.lastPathComponent.hasPrefix(prefix)
+        }
     }
 
     /// Renders one `## ` section: its heading, then its body. The `## How`
