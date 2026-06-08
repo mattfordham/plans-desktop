@@ -468,11 +468,20 @@ struct BrowserWindow: View {
     /// lands) is reasonable. Each visible cell shares the same `cardCell` chrome
     /// (`.id`, drop indicator, drag/drop, "+").
     private func fitCardGrid(columns: Int) -> some View {
-        let rows = Self.rowIndices(count: sortedProjects.count, columns: columns)
+        // #040: snapshot `sortedProjects` ONCE so every index below indexes the
+        // SAME array the row indices were computed from. `sortedProjects` is a
+        // computed property whose length SHRINKS when the "Hide Empty" toggle
+        // flips mid-render; the `ForEach` closures re-evaluate lazily, so without
+        // a stable snapshot a stale index would trap ("Index out of range").
+        let projects = sortedProjects
+        let rows = Self.rowIndices(count: projects.count, columns: columns)
         let naturalRowHeights = rows.map { row in
             // The row's natural height is its TALLEST card's measured height; an
             // as-yet-unmeasured card contributes the floor so the row isn't degenerate.
-            row.map { cardNaturalHeights[sortedProjects[$0].projectPath] ?? Self.fitRowMinHeight }
+            // The `< projects.count` guard is belt-and-braces against a stale index.
+            row.map { $0 < projects.count
+                ? (cardNaturalHeights[projects[$0].projectPath] ?? Self.fitRowMinHeight)
+                : Self.fitRowMinHeight }
                 .max() ?? Self.fitRowMinHeight
         }
         let finalHeights = Self.fitRowHeights(
@@ -486,14 +495,19 @@ struct BrowserWindow: View {
             ForEach(Array(rows.enumerated()), id: \.offset) { rowIndex, row in
                 HStack(alignment: .top, spacing: Self.gridSpacing) {
                     ForEach(row, id: \.self) { idx in
-                        // #038: hand the card the SAME fixed height the row frame
-                        // below imposes (`finalHeights[rowIndex]`) so an over-full
-                        // card scrolls its plan list internally and is clipped to its
-                        // bounds instead of overflowing the cell into its neighbour.
-                        cardCell(for: sortedProjects[idx], constrainedHeight: finalHeights[rowIndex])
-                            // Share the row's width evenly; the card stretches to the
-                            // row height via its internal Spacer.
-                            .frame(maxWidth: .infinity)
+                        // #040: skip a stale index left over from a mid-render
+                        // shrink of `sortedProjects` (see the snapshot note above);
+                        // indexing `projects[idx]` unguarded would trap here.
+                        if idx < projects.count {
+                            // #038: hand the card the SAME fixed height the row frame
+                            // below imposes (`finalHeights[rowIndex]`) so an over-full
+                            // card scrolls its plan list internally and is clipped to its
+                            // bounds instead of overflowing the cell into its neighbour.
+                            cardCell(for: projects[idx], constrainedHeight: finalHeights[rowIndex])
+                                // Share the row's width evenly; the card stretches to the
+                                // row height via its internal Spacer.
+                                .frame(maxWidth: .infinity)
+                        }
                     }
                     // Pad a short final row so its cards keep the full-grid column
                     // width instead of stretching to fill the leftover columns.
@@ -513,7 +527,7 @@ struct BrowserWindow: View {
         // at zero opacity / no hit-testing so it contributes nothing visible and
         // doesn't enter the visible grid's own height — measuring the visible cells
         // directly would feed their STRETCHED height back in and never settle.
-        .background(measurementLayer(rows: rows, columns: columns))
+        .background(measurementLayer(rows: rows, columns: columns, projects: projects))
         .onPreferenceChange(CardHeightKey.self) { heights in
             // Merge so a card that scrolled out (and stopped reporting) keeps its
             // last measurement; only update when a value actually changed to avoid
@@ -533,29 +547,35 @@ struct BrowserWindow: View {
     /// grid's height the way measuring the stretched cells directly would (which
     /// would loop). A bare `ProjectCard` (not `cardCell`) is enough — only the
     /// content height matters here, not the `.id`/drag/drop chrome.
-    private func measurementLayer(rows: [[Int]], columns: Int) -> some View {
+    ///
+    /// #040: receives the SAME `projects` snapshot `fitCardGrid` indexed from, so
+    /// its indices can't go stale against a mid-render shrink of `sortedProjects`.
+    private func measurementLayer(rows: [[Int]], columns: Int, projects: [ProjectTasks]) -> some View {
         VStack(spacing: Self.gridSpacing) {
             ForEach(Array(rows.enumerated()), id: \.offset) { _, row in
                 HStack(alignment: .top, spacing: Self.gridSpacing) {
                     ForEach(row, id: \.self) { idx in
-                        let project = sortedProjects[idx]
-                        ProjectCard(project: project) { _ in }
-                            .frame(maxWidth: .infinity)
-                            // `.fixedSize(vertical:)` pins the card to its NATURAL
-                            // (ideal) content height regardless of the height the
-                            // background context proposes — its internal Spacer
-                            // collapses to 0 — so the GeometryReader reports the
-                            // content height rather than a stretched one (otherwise
-                            // the proposed grid height would feed back and loop).
-                            .fixedSize(horizontal: false, vertical: true)
-                            .background(
-                                GeometryReader { geo in
-                                    Color.clear.preference(
-                                        key: CardHeightKey.self,
-                                        value: [project.projectPath: geo.size.height]
-                                    )
-                                }
-                            )
+                        // #040: same stale-index guard as the visible grid above.
+                        if idx < projects.count {
+                            let project = projects[idx]
+                            ProjectCard(project: project) { _ in }
+                                .frame(maxWidth: .infinity)
+                                // `.fixedSize(vertical:)` pins the card to its NATURAL
+                                // (ideal) content height regardless of the height the
+                                // background context proposes — its internal Spacer
+                                // collapses to 0 — so the GeometryReader reports the
+                                // content height rather than a stretched one (otherwise
+                                // the proposed grid height would feed back and loop).
+                                .fixedSize(horizontal: false, vertical: true)
+                                .background(
+                                    GeometryReader { geo in
+                                        Color.clear.preference(
+                                            key: CardHeightKey.self,
+                                            value: [project.projectPath: geo.size.height]
+                                        )
+                                    }
+                                )
+                        }
                     }
                     if row.count < columns {
                         ForEach(0..<(columns - row.count), id: \.self) { _ in
@@ -597,16 +617,23 @@ struct BrowserWindow: View {
     /// `cardCell(for:)` chrome (`.id`, drop indicator, drag/drop reorder, "+"
     /// glyph) as the fit path, so #017 reorder and #004 drill-down still work.
     private func variableCardGrid(columns: Int) -> some View {
+        // #040: snapshot once (see `fitCardGrid`) so the assignment indices index
+        // the same array; a mid-render shrink of `sortedProjects` from the "Hide
+        // Empty" toggle would otherwise trap on a stale index here.
+        let projects = sortedProjects
         let assignments = BrowserWindow.columnAssignments(
-            count: sortedProjects.count,
+            count: projects.count,
             columns: columns
         )
         return HStack(alignment: .top, spacing: Self.gridSpacing) {
             ForEach(0..<assignments.count, id: \.self) { col in
                 LazyVStack(spacing: Self.gridSpacing) {
                     ForEach(assignments[col], id: \.self) { idx in
-                        let project = sortedProjects[idx]
-                        cardCell(for: project)
+                        // #040: skip a stale index against the shrunk snapshot.
+                        if idx < projects.count {
+                            let project = projects[idx]
+                            cardCell(for: project)
+                        }
                     }
                 }
                 // Each column shares the available width evenly and tops-aligns its
