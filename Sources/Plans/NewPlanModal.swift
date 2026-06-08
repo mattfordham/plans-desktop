@@ -50,6 +50,14 @@ struct NewPlanModal: View {
     /// old project's text mid-swap). Set true around the swap.
     @State private var isSwitchingProject = false
 
+    /// A local snapshot of the staleness-ordered project list driving the picker
+    /// (#036). The body must NOT read `store.projects` directly: the store
+    /// reassigns `projects` on every 5s poll, which would invalidate this view —
+    /// and the `TextEditor` being typed into — on each tick, producing the typing
+    /// lag. Instead we capture the list once in `.onAppear` and refresh it only
+    /// when the set of project paths actually changes (see `refreshProjectsSnapshot`).
+    @State private var orderedProjectsSnapshot: [ProjectTasks] = []
+
     /// The minimum editor height (one comfortable multi-line box) before it
     /// stretches to fill the remaining sheet space.
     private static let editorMinHeight: CGFloat = 160
@@ -71,7 +79,8 @@ struct NewPlanModal: View {
     }
 
     /// The projects offered by the picker, in the same staleness order the grid
-    /// uses so the list reads consistently with the dashboard.
+    /// uses so the list reads consistently with the dashboard. This is the single
+    /// source of the snapshot computation — `refreshProjectsSnapshot` reads it.
     private var orderedProjects: [ProjectTasks] {
         BrowserViewModel.sortByStaleness(store.projects)
     }
@@ -95,7 +104,7 @@ struct NewPlanModal: View {
                 .font(.headline)
 
             Picker("Project", selection: $projectPath) {
-                ForEach(orderedProjects, id: \.projectPath) { project in
+                ForEach(orderedProjectsSnapshot, id: \.projectPath) { project in
                     Text(project.projectName).tag(project.projectPath)
                 }
             }
@@ -129,7 +138,17 @@ struct NewPlanModal: View {
         .padding(16)
         .frame(minWidth: 460, minHeight: 380)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .onAppear { loadDraft(for: projectPath) }
+        .onAppear {
+            refreshProjectsSnapshot()
+            loadDraft(for: projectPath)
+        }
+        // Refresh the picker's snapshot ONLY when the SET of project paths changes
+        // (project added/removed/linked), keyed on the value-equatable path list —
+        // NOT the whole `[ProjectTasks]` array. Routine 5s re-parses that keep the
+        // same paths leave this untouched, so typing in the editor doesn't churn.
+        .onChange(of: store.projects.map(\.projectPath)) { _, _ in
+            refreshProjectsSnapshot()
+        }
         .onChange(of: projectPath) { _, newPath in
             // Switching projects swaps to THAT project's saved draft rather than
             // carrying the old fields over. Suppress the field-change persistence
@@ -175,6 +194,19 @@ struct NewPlanModal: View {
                     .allowsHitTesting(false)
             }
         }
+    }
+
+    // MARK: - Project snapshot (#036)
+
+    /// Recomputes the local picker snapshot from the store's current projects.
+    /// Called once in `.onAppear` and again only when the set of project paths
+    /// changes, so the body never depends on `store.projects` live (which would
+    /// invalidate the editor on every poll). The selected `projectPath` is left
+    /// untouched: if the previously-selected project disappeared from the list the
+    /// Picker simply shows no matching row (it tolerates a tag with no row) and a
+    /// later user pick reselects a valid one.
+    private func refreshProjectsSnapshot() {
+        orderedProjectsSnapshot = orderedProjects
     }
 
     // MARK: - Draft persistence + actions

@@ -176,6 +176,95 @@ final class BrowserWindowTests: XCTestCase {
         XCTAssertEqual(sorted.map(\.projectName), ["alpha", "bravo", "charlie"])
     }
 
+    // MARK: - (b2) #036 New Plan picker snapshot / path-identity key
+    //
+    // The New Plan sheet (`NewPlanModal`) drives its project picker from a LOCAL
+    // snapshot of `BrowserViewModel.sortByStaleness(store.projects)` and refreshes
+    // it only when the SET of project paths changes — keyed on
+    // `store.projects.map(\.projectPath)`. These tests guard that identity key:
+    // routine 5s re-parses (same paths, mutated metadata) must NOT change it,
+    // while a genuine add/remove/relink MUST. They also confirm the snapshot
+    // captures the live staleness ordering.
+
+    /// Mirrors `NewPlanModal`'s `.onChange(of: store.projects.map(\.projectPath))`
+    /// identity key.
+    private func pathIdentityKey(_ projects: [ProjectTasks]) -> [String] {
+        projects.map(\.projectPath)
+    }
+
+    /// A routine 5s re-parse that keeps the SAME project paths but mutates their
+    /// metadata (`lastSeen`, `tasks`) leaves the path-identity key UNCHANGED — so
+    /// the editor's snapshot is not refreshed and typing never churns.
+    func testPathIdentityKeyUnchangedWhenOnlyMetadataMutates() {
+        let before = [
+            makeProject(path: "/a", name: "alpha", lastSeen: "2026-06-01T00:00:00Z"),
+            makeProject(path: "/b", name: "bravo", lastSeen: "2026-06-02T00:00:00Z"),
+        ]
+        // Same paths, but newer `lastSeen` and added tasks — a typical re-parse.
+        let after = [
+            makeProject(
+                path: "/a",
+                name: "alpha",
+                lastSeen: "2026-06-07T12:00:00Z",
+                tasks: [makeTask(id: "001", status: .inProgress)]
+            ),
+            makeProject(
+                path: "/b",
+                name: "bravo",
+                lastSeen: "2026-06-07T13:00:00Z",
+                tasks: [makeTask(id: "002", status: .pending)]
+            ),
+        ]
+        XCTAssertEqual(pathIdentityKey(before), pathIdentityKey(after))
+    }
+
+    /// Adding a project changes the path-identity key — a genuine project-set
+    /// change that MUST refresh the picker snapshot.
+    func testPathIdentityKeyChangesWhenProjectAdded() {
+        let before = [makeProject(path: "/a", name: "alpha")]
+        let after = [
+            makeProject(path: "/a", name: "alpha"),
+            makeProject(path: "/b", name: "bravo"),
+        ]
+        XCTAssertNotEqual(pathIdentityKey(before), pathIdentityKey(after))
+    }
+
+    /// Removing a project changes the path-identity key — the picker snapshot must
+    /// refresh to drop the vanished row.
+    func testPathIdentityKeyChangesWhenProjectRemoved() {
+        let before = [
+            makeProject(path: "/a", name: "alpha"),
+            makeProject(path: "/b", name: "bravo"),
+        ]
+        let after = [makeProject(path: "/a", name: "alpha")]
+        XCTAssertNotEqual(pathIdentityKey(before), pathIdentityKey(after))
+    }
+
+    /// Relinking a project to a new path (same count, same name) still changes the
+    /// path-identity key — the snapshot must refresh because the tag the picker
+    /// binds to changed.
+    func testPathIdentityKeyChangesWhenProjectRelinked() {
+        let before = [makeProject(path: "/old", name: "alpha")]
+        let after = [makeProject(path: "/new", name: "alpha")]
+        XCTAssertNotEqual(pathIdentityKey(before), pathIdentityKey(after))
+    }
+
+    /// The picker snapshot is `sortByStaleness(store.projects)`, so its captured
+    /// ordering matches the live staleness order even when the store delivers the
+    /// projects shuffled — confirming the snapshot reproduces the live ordering.
+    func testSnapshotCapturesLiveStalenessOrdering() {
+        let newest = makeProject(path: "/a", name: "alpha", lastSeen: "2026-06-04T12:00:00Z")
+        let older = makeProject(path: "/b", name: "bravo", lastSeen: "2026-01-01T00:00:00Z")
+        let absent = makeProject(path: "/c", name: "charlie", lastSeen: "")
+
+        // What `refreshProjectsSnapshot()` would assign from a shuffled store.
+        let snapshot = BrowserViewModel.sortByStaleness([absent, newest, older])
+
+        XCTAssertEqual(snapshot.map(\.projectName), ["alpha", "bravo", "charlie"])
+        // The path-identity key derived from the snapshot reflects that order.
+        XCTAssertEqual(pathIdentityKey(snapshot), ["/a", "/b", "/c"])
+    }
+
     // MARK: - (c) activeRows: one project's card rows
 
     /// Two projects; the second reuses task id "001" from the first to prove the
