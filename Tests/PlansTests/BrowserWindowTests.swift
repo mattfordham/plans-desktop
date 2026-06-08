@@ -378,26 +378,33 @@ final class BrowserWindowTests: XCTestCase {
         XCTAssertEqual(BrowserWindow.effectiveLayoutMode(.scroll, columnCount: 4), .scroll)
     }
 
-    // MARK: - rowCount (grid rows for a card count over N columns)
+    // MARK: - rowIndices (grouping card indices into fit-grid rows #039)
 
-    /// An empty grid has zero rows regardless of the column count.
-    func testRowCountZeroCardsIsZeroRows() {
-        XCTAssertEqual(BrowserWindow.rowCount(forCount: 0, columns: 3), 0)
+    /// An empty grid has no rows regardless of the column count.
+    func testRowIndicesZeroCardsIsEmpty() {
+        XCTAssertEqual(BrowserWindow.rowIndices(count: 0, columns: 3), [])
     }
 
-    /// A partial final row rounds up: 5 cards over 2 columns is 3 rows.
-    func testRowCountRoundsUpPartialRow() {
-        XCTAssertEqual(BrowserWindow.rowCount(forCount: 5, columns: 2), 3)
+    /// A partial final row keeps the remaining indices: 5 cards over 2 columns is
+    /// [0,1] [2,3] [4] in reading order.
+    func testRowIndicesPartialFinalRow() {
+        XCTAssertEqual(
+            BrowserWindow.rowIndices(count: 5, columns: 2),
+            [[0, 1], [2, 3], [4]]
+        )
     }
 
-    /// An exact fit divides evenly: 6 cards over 3 columns is 2 rows.
-    func testRowCountExactFit() {
-        XCTAssertEqual(BrowserWindow.rowCount(forCount: 6, columns: 3), 2)
+    /// An exact fit groups evenly: 6 cards over 3 columns is [0,1,2] [3,4,5].
+    func testRowIndicesExactFit() {
+        XCTAssertEqual(
+            BrowserWindow.rowIndices(count: 6, columns: 3),
+            [[0, 1, 2], [3, 4, 5]]
+        )
     }
 
-    /// A degenerate zero column count yields zero rows (no division by zero).
-    func testRowCountZeroColumnsIsZeroRows() {
-        XCTAssertEqual(BrowserWindow.rowCount(forCount: 4, columns: 0), 0)
+    /// A degenerate zero column count yields no rows (no infinite loop / divide).
+    func testRowIndicesZeroColumnsIsEmpty() {
+        XCTAssertEqual(BrowserWindow.rowIndices(count: 4, columns: 0), [])
     }
 
     // MARK: - columnAssignments (masonry column distribution #039)
@@ -457,32 +464,128 @@ final class BrowserWindowTests: XCTestCase {
         XCTAssertEqual(Set(flattened).count, 7)
     }
 
-    // MARK: - fitRowHeight (per-row card height for fit-to-screen)
+    // MARK: - fitRowHeights (content-driven, viewport-filling row heights #039)
 
-    /// Before the viewport is measured (height 0) there's nothing to divide, so
-    /// the helper returns nil and the grid keeps natural card heights.
-    func testFitRowHeightUnmeasuredViewportReturnsNil() {
-        XCTAssertNil(BrowserWindow.fitRowHeight(viewportHeight: 0, rowCount: 3))
+    /// The chrome (outer padding + inter-row gutters) a row layout consumes
+    /// outside the rows themselves, for asserting that the final rows fill the
+    /// viewport exactly. Mirrors the helper's own arithmetic.
+    private func chrome(rowCount: Int, spacing: CGFloat, padding: CGFloat) -> CGFloat {
+        2 * padding + CGFloat(max(0, rowCount - 1)) * spacing
     }
 
-    /// With no rows there's nothing to size — nil, not a divide-by-zero.
-    func testFitRowHeightZeroRowsReturnsNil() {
-        XCTAssertNil(BrowserWindow.fitRowHeight(viewportHeight: 800, rowCount: 0))
+    /// An unmeasured viewport (height 0) can't drive a fill, so the helper returns
+    /// the natural row heights unchanged as a sensible first-paint fallback.
+    func testFitRowHeightsUnmeasuredViewportReturnsNaturals() {
+        let naturals: [CGFloat] = [120, 200, 90]
+        let result = BrowserWindow.fitRowHeights(
+            naturalRowHeights: naturals,
+            viewportHeight: 0,
+            spacing: 16, padding: 16, minRowHeight: 160
+        )
+        XCTAssertEqual(result, naturals)
     }
 
-    /// Roomy viewport, few rows: the height divides evenly across rows minus the
-    /// outer padding and inter-row gutters. 1000 - 2*16 - 1*16 = 952; 952/2 = 476.
-    func testFitRowHeightDividesViewportAcrossRows() throws {
-        let h = try XCTUnwrap(BrowserWindow.fitRowHeight(viewportHeight: 1000, rowCount: 2))
-        XCTAssertEqual(h, 476, accuracy: 0.001)
+    /// A negative viewport height is also treated as unmeasured and returns the
+    /// naturals unchanged.
+    func testFitRowHeightsNegativeViewportReturnsNaturals() {
+        let naturals: [CGFloat] = [120, 200]
+        let result = BrowserWindow.fitRowHeights(
+            naturalRowHeights: naturals,
+            viewportHeight: -10,
+            spacing: 16, padding: 16, minRowHeight: 160
+        )
+        XCTAssertEqual(result, naturals)
     }
 
-    /// Too many rows to fit: the per-row height is clamped to the legibility floor
-    /// (`fitRowMinHeight`) rather than shrinking to an unreadable sliver — the
-    /// ScrollView then absorbs the overflow.
-    func testFitRowHeightClampsToFloorWhenManyRows() {
-        let h = BrowserWindow.fitRowHeight(viewportHeight: 400, rowCount: 10)
-        XCTAssertEqual(h, BrowserWindow.fitRowMinHeight)
+    /// No rows → no heights, never a divide-by-zero.
+    func testFitRowHeightsEmptyInputIsEmpty() {
+        let result = BrowserWindow.fitRowHeights(
+            naturalRowHeights: [],
+            viewportHeight: 800,
+            spacing: 16, padding: 16, minRowHeight: 160
+        )
+        XCTAssertTrue(result.isEmpty)
+    }
+
+    /// STRETCH: rows whose natural total is shorter than the viewport scale UP so
+    /// they (plus gutters + padding) fill the viewport exactly, and their relative
+    /// proportions are preserved (the 2:1 ratio survives the stretch).
+    func testFitRowHeightsStretchesToFillPreservingProportions() {
+        let naturals: [CGFloat] = [200, 100] // 2:1, sums to 300
+        let viewport: CGFloat = 1000
+        let result = BrowserWindow.fitRowHeights(
+            naturalRowHeights: naturals,
+            viewportHeight: viewport,
+            spacing: 16, padding: 16, minRowHeight: 160
+        )
+        // Rows + chrome fill the viewport.
+        let total = result.reduce(0, +) + chrome(rowCount: 2, spacing: 16, padding: 16)
+        XCTAssertEqual(total, viewport, accuracy: 0.001)
+        // Relative proportion preserved.
+        XCTAssertEqual(result[0] / result[1], 2.0, accuracy: 0.001)
+    }
+
+    /// EXACT FIT: rows whose natural total already equals the available space are
+    /// left essentially unchanged (factor ≈ 1).
+    func testFitRowHeightsExactFitLeavesRowsUnchanged() {
+        // availableForRows = viewport - chrome. Pick naturals summing to exactly that.
+        let viewport: CGFloat = 1000
+        let available = viewport - chrome(rowCount: 2, spacing: 16, padding: 16) // 1000 - 48 = 952
+        let naturals: [CGFloat] = [available * 0.6, available * 0.4]
+        let result = BrowserWindow.fitRowHeights(
+            naturalRowHeights: naturals,
+            viewportHeight: viewport,
+            spacing: 16, padding: 16, minRowHeight: 160
+        )
+        XCTAssertEqual(result[0], naturals[0], accuracy: 0.001)
+        XCTAssertEqual(result[1], naturals[1], accuracy: 0.001)
+    }
+
+    /// SHRINK above floor: rows whose natural total overflows the viewport but can
+    /// shrink without any row hitting the floor scale DOWN to fill the viewport
+    /// exactly, every row staying at or above the floor.
+    func testFitRowHeightsShrinksAboveFloorToFill() {
+        let floor: CGFloat = 160
+        let naturals: [CGFloat] = [600, 500] // sums to 1100, will shrink
+        let viewport: CGFloat = 800
+        let result = BrowserWindow.fitRowHeights(
+            naturalRowHeights: naturals,
+            viewportHeight: viewport,
+            spacing: 16, padding: 16, minRowHeight: floor
+        )
+        let total = result.reduce(0, +) + chrome(rowCount: 2, spacing: 16, padding: 16)
+        XCTAssertEqual(total, viewport, accuracy: 0.001)
+        for h in result { XCTAssertGreaterThanOrEqual(h, floor) }
+    }
+
+    /// SHRINK hits floor: a heavy overflow that can't fit even at the floor clamps
+    /// every row to the floor; the resulting total may EXCEED the viewport (the
+    /// surrounding ScrollView absorbs the overflow).
+    func testFitRowHeightsClampsAllRowsToFloorOnHeavyOverflow() {
+        let floor: CGFloat = 160
+        let naturals: [CGFloat] = [500, 500, 500, 500] // far too tall
+        let viewport: CGFloat = 400
+        let result = BrowserWindow.fitRowHeights(
+            naturalRowHeights: naturals,
+            viewportHeight: viewport,
+            spacing: 16, padding: 16, minRowHeight: floor
+        )
+        XCTAssertEqual(result, [floor, floor, floor, floor])
+        let total = result.reduce(0, +) + chrome(rowCount: 4, spacing: 16, padding: 16)
+        XCTAssertGreaterThan(total, viewport) // ScrollView handles it
+    }
+
+    /// A single row that's shorter than the viewport stretches to fill it.
+    func testFitRowHeightsSingleRowStretchesToFill() {
+        let viewport: CGFloat = 700
+        let result = BrowserWindow.fitRowHeights(
+            naturalRowHeights: [200],
+            viewportHeight: viewport,
+            spacing: 16, padding: 16, minRowHeight: 160
+        )
+        XCTAssertEqual(result.count, 1)
+        let total = result[0] + chrome(rowCount: 1, spacing: 16, padding: 16)
+        XCTAssertEqual(total, viewport, accuracy: 0.001)
     }
 
     // MARK: - applyManualOrder (manual override ordering)
