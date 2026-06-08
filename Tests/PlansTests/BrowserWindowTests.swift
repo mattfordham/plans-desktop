@@ -324,64 +324,11 @@ final class BrowserWindowTests: XCTestCase {
         XCTAssertEqual(row?.id, "/p/001")
     }
 
-    // MARK: - starredRows (#035: active rows + starred-completed rows)
+    // MARK: - visibleUnderHideEmpty (#035: keep starred projects past the hide-empty filter)
 
-    /// A project with 1 active task and 1 starred COMPLETED task returns BOTH
-    /// rows — the starred completed plan stays visible on the card.
-    func testStarredRowsIncludesActiveAndStarredCompleted() {
-        let project = makeProject(
-            path: "/p",
-            name: "p",
-            tasks: [
-                makeTask(id: "001", status: .inProgress),
-                makeTask(id: "099", status: .completed),
-            ],
-            activeTasks: [makeTask(id: "001", status: .inProgress)]
-        )
-        let rows = BrowserViewModel.starredRows(project, starredIDs: ["/p/099"])
-        XCTAssertEqual(rows.map(\.id), ["/p/001", "/p/099"])
-    }
-
-    /// An un-starred completed task is NOT surfaced — only active rows show.
-    func testStarredRowsExcludesUnstarredCompleted() {
-        let project = makeProject(
-            path: "/p",
-            name: "p",
-            tasks: [
-                makeTask(id: "001", status: .inProgress),
-                makeTask(id: "099", status: .completed),
-            ],
-            activeTasks: [makeTask(id: "001", status: .inProgress)]
-        )
-        let rows = BrowserViewModel.starredRows(project, starredIDs: [])
-        XCTAssertEqual(rows.map(\.id), ["/p/001"])
-    }
-
-    /// Starred-completed rows are APPENDED after the active rows, preserving the
-    /// parser's active order at the front.
-    func testStarredRowsAppendsStarredCompletedAfterActive() {
-        let project = makeProject(
-            path: "/p",
-            name: "p",
-            tasks: [
-                makeTask(id: "099", status: .completed),
-                makeTask(id: "001", status: .inProgress),
-                makeTask(id: "002", status: .pending),
-            ],
-            activeTasks: [
-                makeTask(id: "001", status: .inProgress),
-                makeTask(id: "002", status: .pending),
-            ]
-        )
-        let rows = BrowserViewModel.starredRows(project, starredIDs: ["/p/099"])
-        XCTAssertEqual(rows.map(\.id), ["/p/001", "/p/002", "/p/099"])
-    }
-
-    // MARK: - projectHasStarredTask (#035: keep starred projects past the hide-empty filter)
-
-    /// A project whose ONLY task is a starred completed task reports it has a
-    /// starred task, so the hide-empty filter keeps the card visible.
-    func testProjectHasStarredTaskTrueForStarredCompletedTask() {
+    /// A project with NO outstanding work whose path the user STARRED survives
+    /// the hide-empty filter, so its (empty) card stays in the dashboard.
+    func testVisibleUnderHideEmptyTrueForStarredEmptyProject() {
         let project = makeProject(
             path: "/p",
             name: "p",
@@ -389,37 +336,47 @@ final class BrowserWindowTests: XCTestCase {
             activeTasks: []
         )
         XCTAssertTrue(
-            BrowserViewModel.projectHasStarredTask(project, starredIDs: ["/p/099"])
+            BrowserViewModel.visibleUnderHideEmpty(project, starredProjectPaths: ["/p"])
         )
     }
 
-    /// A project with no starred tasks reports false.
-    func testProjectHasStarredTaskFalseWhenNoneStarred() {
+    /// A project with NO outstanding work and NOT starred is hidden by the filter.
+    func testVisibleUnderHideEmptyFalseForUnstarredEmptyProject() {
         let project = makeProject(
             path: "/p",
             name: "p",
-            tasks: [
-                makeTask(id: "001", status: .inProgress),
-                makeTask(id: "099", status: .completed),
-            ],
-            activeTasks: [makeTask(id: "001", status: .inProgress)]
+            tasks: [makeTask(id: "099", status: .completed)],
+            activeTasks: []
         )
         XCTAssertFalse(
-            BrowserViewModel.projectHasStarredTask(project, starredIDs: [])
+            BrowserViewModel.visibleUnderHideEmpty(project, starredProjectPaths: [])
         )
     }
 
-    /// A starred id that is ALSO an active task is not duplicated — it appears
-    /// once, in its active position.
-    func testStarredRowsDoesNotDuplicateActiveTask() {
+    /// A project with outstanding work is always kept, starred or not.
+    func testVisibleUnderHideEmptyTrueForProjectWithOutstandingWork() {
         let project = makeProject(
             path: "/p",
             name: "p",
             tasks: [makeTask(id: "001", status: .inProgress)],
             activeTasks: [makeTask(id: "001", status: .inProgress)]
         )
-        let rows = BrowserViewModel.starredRows(project, starredIDs: ["/p/001"])
-        XCTAssertEqual(rows.map(\.id), ["/p/001"])
+        XCTAssertTrue(
+            BrowserViewModel.visibleUnderHideEmpty(project, starredProjectPaths: [])
+        )
+    }
+
+    /// Starring a DIFFERENT project does not rescue this empty, unstarred one.
+    func testVisibleUnderHideEmptyFalseWhenOnlyAnotherProjectStarred() {
+        let project = makeProject(
+            path: "/p",
+            name: "p",
+            tasks: [makeTask(id: "099", status: .completed)],
+            activeTasks: []
+        )
+        XCTAssertFalse(
+            BrowserViewModel.visibleUnderHideEmpty(project, starredProjectPaths: ["/other"])
+        )
     }
 
     // MARK: - Cross-project selected-row resolution (mirrors the view)

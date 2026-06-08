@@ -525,43 +525,43 @@ final class PlansStoreTests: XCTestCase {
         XCTAssertEqual(reloaded.cardLayoutMode, .fit)
     }
 
-    // MARK: - Starred task ids (#035, persisted to injected UserDefaults)
+    // MARK: - Starred project paths (#035, persisted to injected UserDefaults)
 
-    func testStarredTaskIDsDefaultToEmpty() throws {
+    func testStarredProjectPathsDefaultToEmpty() throws {
         let reader = try makeReader(projectPaths: [])
         let store = PlansStore(registryReader: reader, defaults: makeDefaults())
 
-        XCTAssertTrue(store.starredTaskIDs.isEmpty)
+        XCTAssertTrue(store.starredProjectPaths.isEmpty)
     }
 
-    func testStarredTaskIDsPersistAcrossStoreInstances() throws {
+    func testStarredProjectPathsPersistAcrossStoreInstances() throws {
         let reader = try makeReader(projectPaths: [])
         let defaults = makeDefaults()
 
         let store = PlansStore(registryReader: reader, defaults: defaults)
-        store.starredTaskIDs.insert("/proj1/001")
-        store.starredTaskIDs.insert("/proj2/042")
+        store.starredProjectPaths.insert("/proj1")
+        store.starredProjectPaths.insert("/proj2")
 
-        XCTAssertEqual(store.starredTaskIDs, ["/proj1/001", "/proj2/042"])
+        XCTAssertEqual(store.starredProjectPaths, ["/proj1", "/proj2"])
 
         // A fresh store over the SAME defaults restores the starred set.
         let reloaded = PlansStore(registryReader: reader, defaults: defaults)
-        XCTAssertEqual(reloaded.starredTaskIDs, ["/proj1/001", "/proj2/042"])
+        XCTAssertEqual(reloaded.starredProjectPaths, ["/proj1", "/proj2"])
     }
 
-    func testRemovingStarredTaskIDPersistsAcrossStoreInstances() throws {
+    func testRemovingStarredProjectPathPersistsAcrossStoreInstances() throws {
         let reader = try makeReader(projectPaths: [])
         let defaults = makeDefaults()
 
         let store = PlansStore(registryReader: reader, defaults: defaults)
-        store.starredTaskIDs = ["/proj1/001", "/proj2/042"]
-        store.starredTaskIDs.remove("/proj1/001")
+        store.starredProjectPaths = ["/proj1", "/proj2"]
+        store.starredProjectPaths.remove("/proj1")
 
-        XCTAssertEqual(store.starredTaskIDs, ["/proj2/042"])
+        XCTAssertEqual(store.starredProjectPaths, ["/proj2"])
 
         // A fresh store over the SAME defaults reflects the removal.
         let reloaded = PlansStore(registryReader: reader, defaults: defaults)
-        XCTAssertEqual(reloaded.starredTaskIDs, ["/proj2/042"])
+        XCTAssertEqual(reloaded.starredProjectPaths, ["/proj2"])
     }
 
     // MARK: - New Plan trigger (non-persisted ⌘N → sheet bridge, #034)

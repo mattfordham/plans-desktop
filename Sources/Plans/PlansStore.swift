@@ -87,15 +87,15 @@ final class PlansStore {
         }
     }
 
-    /// The set of "starred" task composite ids the user has pinned to keep
-    /// visible (#035), keyed by the same `TaskRow.ID` the browser uses
-    /// (`projectPath + "/" + task.id`). A starred plan stays on its project card
-    /// even after it is completed (see `BrowserViewModel.starredRows`). Persisted
-    /// on every set by writing `Array(starredTaskIDs)` to `starredTasksKey` in
-    /// `defaults` (UserDefaults stores arrays, not Sets). NEVER written to
-    /// `.plans/` (§2 read-only) — UserDefaults is the only persistence sink.
-    var starredTaskIDs: Set<String> = [] {
-        didSet { defaults.set(Array(starredTaskIDs), forKey: Self.starredTasksKey) }
+    /// The set of "starred" project paths the user has pinned to keep visible
+    /// (#035), keyed by `ProjectTasks.projectPath`. A starred project's card
+    /// stays in the dashboard even when it has no outstanding work and the
+    /// "Hide Empty" filter is on (see `BrowserWindow.sortedProjects`). Persisted
+    /// on every set by writing `Array(starredProjectPaths)` to
+    /// `starredProjectsKey` in `defaults` (UserDefaults stores arrays, not Sets).
+    /// NEVER written to `.plans/` (§2 read-only) — UserDefaults is the only sink.
+    var starredProjectPaths: Set<String> = [] {
+        didSet { defaults.set(Array(starredProjectPaths), forKey: Self.starredProjectsKey) }
     }
 
     /// A non-persisted "open the New Plan form" trigger (#034). Bridges the
@@ -139,9 +139,9 @@ final class PlansStore {
     /// UserDefaults key for the persisted card layout mode (#033).
     private static let cardLayoutKey = "cardLayoutMode"
 
-    /// UserDefaults key for the persisted starred task composite ids (#035). The
-    /// stored value is `Array(starredTaskIDs)` (UserDefaults stores arrays).
-    private static let starredTasksKey = "starredTasks"
+    /// UserDefaults key for the persisted starred project paths (#035). The
+    /// stored value is `Array(starredProjectPaths)` (UserDefaults stores arrays).
+    private static let starredProjectsKey = "starredProjects"
 
     /// The statuses surfaced in the menu bar icon space, in a fresh order that
     /// leads with actively-running work: in-progress → review → in-review. This
@@ -207,10 +207,10 @@ final class PlansStore {
         _manualOrderActive = defaults.bool(forKey: Self.activeKey)
         _hideEmptyProjects = defaults.bool(forKey: Self.hideEmptyKey)
         _cardLayoutMode = CardLayoutMode(rawValue: defaults.string(forKey: Self.cardLayoutKey) ?? "") ?? .scroll
-        // Load persisted starred task ids (#035): the stored array round-trips
+        // Load persisted starred project paths (#035): the stored array round-trips
         // back into the `Set`. Assigning the backing field avoids the `didSet`
         // re-persisting the just-read value.
-        _starredTaskIDs = Set(defaults.stringArray(forKey: Self.starredTasksKey) ?? [])
+        _starredProjectPaths = Set(defaults.stringArray(forKey: Self.starredProjectsKey) ?? [])
         // Load persisted capture drafts (#031): decode the stored JSON `Data`,
         // defaulting to an empty map on missing/corrupt data. Assigning the
         // backing field avoids the `didSet` re-persisting the just-read value.

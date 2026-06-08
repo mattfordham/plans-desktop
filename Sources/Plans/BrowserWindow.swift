@@ -231,10 +231,10 @@ struct BrowserWindow: View {
     ///
     /// After the order is resolved, the "Hide Empty" toolbar toggle (#021) is
     /// applied: when `store.hideEmptyProjects` is true the result is filtered to
-    /// projects with outstanding work (`hasOutstandingWork`) OR with at least one
-    /// starred task (#035, `projectHasStarredTask`) — so a project kept on screen
-    /// only by a starred (e.g. completed) plan survives the filter — preserving
-    /// order. `store.projects` is never mutated — only this derived view is filtered.
+    /// projects with outstanding work (`hasOutstandingWork`) OR whose path the
+    /// user has STARRED (#035, `store.starredProjectPaths`) — so a starred but
+    /// empty project's card survives the filter — preserving order.
+    /// `store.projects` is never mutated — only this derived view is filtered.
     private var sortedProjects: [ProjectTasks] {
         let sorted: [ProjectTasks]
         if store.manualOrderActive && !store.projectOrderOverride.isEmpty {
@@ -247,8 +247,7 @@ struct BrowserWindow: View {
         }
         guard store.hideEmptyProjects else { return sorted }
         return sorted.filter {
-            $0.hasOutstandingWork
-                || BrowserViewModel.projectHasStarredTask($0, starredIDs: store.starredTaskIDs)
+            BrowserViewModel.visibleUnderHideEmpty($0, starredProjectPaths: store.starredProjectPaths)
         }
     }
 
@@ -823,45 +822,15 @@ enum BrowserViewModel {
         }
     }
 
-    /// The clickable plan rows for ONE project's card INCLUDING the user's
-    /// starred plans (#035). Returns `activeRows(project)` first (preserving
-    /// `TaskParser`'s active ordering) and then APPENDS a `TaskRow` for each
-    /// `.completed` task whose composite id (`projectPath + "/" + task.id`) is in
-    /// `starredIDs`, so a finished-but-pinned plan stays visible on the card after
-    /// completion. A task already present in `activeTasks` is never duplicated
-    /// (active rows are emitted once, in their active position, even if starred).
-    /// Pure value work — no I/O, no SwiftUI, never mutates `.plans/`.
-    static func starredRows(
+    /// Whether `project` survives the "Hide Empty" filter (#035): a project is
+    /// kept when it has outstanding work OR the user has STARRED its path (so a
+    /// starred but otherwise-empty project's card stays in the dashboard). Pure
+    /// value work — no I/O, no SwiftUI; drives `BrowserWindow.sortedProjects`.
+    static func visibleUnderHideEmpty(
         _ project: ProjectTasks,
-        starredIDs: Set<String>
-    ) -> [TaskRow] {
-        let active = activeRows(project)
-        let activeIDs = Set(active.map(\.id))
-        let starredCompleted = project.tasks
-            .filter { $0.status == .completed }
-            .map { task in
-                TaskRow(
-                    projectPath: project.projectPath,
-                    projectName: project.projectName,
-                    task: task
-                )
-            }
-            .filter { starredIDs.contains($0.id) && !activeIDs.contains($0.id) }
-        return active + starredCompleted
-    }
-
-    /// Whether ANY of `project`'s tasks is starred (#035), i.e. its composite id
-    /// (`project.projectPath + "/" + task.id`) is in `starredIDs`. Drives the
-    /// hide-empty filter so a project kept visible only by a starred (e.g.
-    /// completed) plan isn't dropped when it has no outstanding work. Pure value
-    /// work — no I/O, no SwiftUI, never mutates `.plans/`.
-    static func projectHasStarredTask(
-        _ project: ProjectTasks,
-        starredIDs: Set<String>
+        starredProjectPaths: Set<String>
     ) -> Bool {
-        project.tasks.contains { task in
-            starredIDs.contains(project.projectPath + "/" + task.id)
-        }
+        project.hasOutstandingWork || starredProjectPaths.contains(project.projectPath)
     }
 
     /// Splits a section body into paragraphs on blank lines for per-paragraph
