@@ -155,23 +155,21 @@ struct ProjectCard: View {
                 // height. Mirrors the wrapper Spacer in `BrowserWindow.cardGrid`.
                 Spacer(minLength: 0)
             }
-            // Git status footer (#026): mirrors the header's treatment — the
-            // header is FOLLOWED by a `Divider()` (bottom separator); the footer
-            // is PRECEDED by one (its top border). Only emitted for git repos so
-            // a non-git project never shows a dangling divider.
-            if project.gitBranch != nil {
-                Divider()
-                gitFooter
-            }
+            // Footer (#026 git status + #035 project star): the star toggle sits
+            // bottom-LEFT and the git status (when present) bottom-RIGHT, across
+            // from each other. Always emitted — the star is always available — so
+            // the footer divider always renders (it no longer depends on the repo
+            // being a git project). Mirrors the header's treatment: the header is
+            // FOLLOWED by a `Divider()`; the footer is PRECEDED by one.
+            Divider()
+            footer
         }
-        // Bottom padding matches the header's 14pt top gap. When the git footer
-        // is present it's the bottom-most element (a plain HStack with no vertical
-        // padding of its own), so it needs the full 14pt. With no footer the last
-        // element is a plan row that already carries `.padding(.vertical, 5)` (see
-        // `planRow`), so we subtract that to even out the gap (14 − 5 = 9).
+        // Bottom padding matches the header's 14pt top gap. The footer is now
+        // always the bottom-most element (a plain HStack with no vertical padding
+        // of its own), so it always needs the full 14pt.
         .padding(.top, 14)
         .padding(.horizontal, 14)
-        .padding(.bottom, project.gitBranch != nil ? 14 : 9)
+        .padding(.bottom, 14)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(.background.secondary, in: RoundedRectangle(cornerRadius: 12))
         // #038: clip the card's content to the same rounded rect as its
@@ -210,12 +208,6 @@ struct ProjectCard: View {
                 .font(.headline)
                 .lineLimit(1)
                 .layoutPriority(1)
-
-            // Star / unstar this PROJECT (#035): a filled yellow star keeps the
-            // card visible in the dashboard even when it has no outstanding work
-            // and "Hide Empty" is on. Placed immediately right of the project name
-            // so it reads as a property of the project itself, not of any plan.
-            starToggle
 
             // Capture / execute control: placed immediately right of the project
             // name. "+" opens the popover and stays put so back-to-back captures
@@ -318,9 +310,21 @@ struct ProjectCard: View {
         .help("Show capture progress")
     }
 
-    // MARK: - Footer (git status)
+    // MARK: - Footer (project star + git status)
 
-    /// The card footer: the project's git status — the branch glyph + name plus
+    /// The card footer row: the git status (when the project is a git repo)
+    /// pinned bottom-LEFT and the project star toggle bottom-RIGHT, across from
+    /// each other. Git status is leading-aligned and the `Spacer` pushes the star
+    /// to the trailing edge; a non-git project simply shows the star alone.
+    private var footer: some View {
+        HStack(spacing: 8) {
+            gitFooter
+            Spacer(minLength: 8)
+            starToggle
+        }
+    }
+
+    /// The card's git status — the branch glyph + name plus
     /// an orange dirty dot when the working tree is known-dirty (#026 moved this
     /// out of the header). Rendered only when the project is a git repo
     /// (`gitBranch != nil`); a `nil`/`false` `gitIsDirty` shows no dot. The
@@ -542,8 +546,10 @@ struct ProjectCard: View {
 }
 
 /// The project star/unstar glyph (#035). A `Button` with `.buttonStyle(.plain)`
-/// whose label symbol and tint reflect the starred state: a filled yellow
-/// `star.fill` when starred, an outline `star` otherwise. Adds a subtle hover
+/// using a solid `star.fill` in BOTH states; only the white opacity changes —
+/// medium when starred, very low when not (brightening slightly on hover) — so
+/// an unstarred project reads as a faint filled star that lights up on hover and
+/// reads as a clearly-filled medium-white star when starred. Adds a subtle hover
 /// background + cursor like `RowActionGlyph`.
 private struct StarToggleGlyph: View {
     let isStarred: Bool
@@ -554,10 +560,9 @@ private struct StarToggleGlyph: View {
 
     var body: some View {
         Button(action: action) {
-            Image(systemName: isStarred ? "star.fill" : "star")
+            Image(systemName: "star.fill")
                 .imageScale(.medium)
-                .foregroundStyle(isStarred ? AnyShapeStyle(.yellow)
-                                           : AnyShapeStyle(hovering ? Color.primary : Color.secondary))
+                .foregroundStyle(Color.white.opacity(isStarred ? 0.6 : (hovering ? 0.35 : 0.15)))
                 .frame(width: 22, height: 22)
                 .background(
                     RoundedRectangle(cornerRadius: 5)
