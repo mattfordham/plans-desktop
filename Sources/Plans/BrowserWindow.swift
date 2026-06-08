@@ -481,7 +481,11 @@ struct BrowserWindow: View {
             ForEach(Array(rows.enumerated()), id: \.offset) { rowIndex, row in
                 HStack(alignment: .top, spacing: Self.gridSpacing) {
                     ForEach(row, id: \.self) { idx in
-                        cardCell(for: sortedProjects[idx])
+                        // #038: hand the card the SAME fixed height the row frame
+                        // below imposes (`finalHeights[rowIndex]`) so an over-full
+                        // card scrolls its plan list internally and is clipped to its
+                        // bounds instead of overflowing the cell into its neighbour.
+                        cardCell(for: sortedProjects[idx], constrainedHeight: finalHeights[rowIndex])
                             // Share the row's width evenly; the card stretches to the
                             // row height via its internal Spacer.
                             .frame(maxWidth: .infinity)
@@ -615,12 +619,18 @@ struct BrowserWindow: View {
     /// wired to the shared "New Plan" modal pre-selected to THIS project (#031). It
     /// applies NO height frame and NO trailing Spacer — the fit path wraps it in a
     /// fixed-height frame, while the scroll path lets it size to its content.
+    ///
+    /// #038: `constrainedHeight` is the fixed cell height the fit path imposes on
+    /// this card's row (`finalHeights[rowIndex]`); the scroll path passes `nil`. A
+    /// non-nil value tells `ProjectCard` to scroll its plan list internally (and
+    /// clip to its bounds) instead of overflowing the cell and overlapping the card
+    /// beneath it; `nil` keeps the card at its natural, content-hugging height.
     @ViewBuilder
-    private func cardCell(for project: ProjectTasks) -> some View {
+    private func cardCell(for project: ProjectTasks, constrainedHeight: CGFloat? = nil) -> some View {
         // #031: the card's "+" glyph opens the shared modal pre-selected to THIS
         // card's project via this closure (a fresh `NewPlanRequest` id so
         // `.sheet(item:)` fires).
-        ProjectCard(project: project) { path in
+        ProjectCard(project: project, constrainedHeight: constrainedHeight) { path in
             newPlanRequest = NewPlanRequest(projectPath: path)
         }
         // #004 drill-down target: the ScrollViewReader scrolls to this id.

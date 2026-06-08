@@ -29,6 +29,18 @@ struct ProjectCard: View {
     /// The project this card renders. Read-only; never mutated.
     let project: ProjectTasks
 
+    /// The fixed cell height imposed on this card by `BrowserWindow.cardGrid` in
+    /// fit-to-screen ("grid") layout, or `nil` in scroll layout (#038).
+    ///
+    /// When non-nil the card is height-constrained, so its body scrolls
+    /// internally (`shouldScrollContent`) rather than overflowing the cell. When
+    /// `nil` the card lays out at its natural, content-hugging height exactly as
+    /// before. Defaulted to `nil` so existing call sites stay source-compatible;
+    /// declared BEFORE `onNewPlan` so the synthesized memberwise initializer is
+    /// `ProjectCard(project:constrainedHeight:onNewPlan:)` and the trailing-closure
+    /// call site keeps working.
+    var constrainedHeight: CGFloat? = nil
+
     /// Opens the shared "New Plan" modal pre-selected to this card's project
     /// (#031). Invoked by the header "+" glyph with `project.projectPath`; the
     /// presenting `BrowserWindow` owns the sheet state. Replaces the former
@@ -79,22 +91,67 @@ struct ProjectCard: View {
         BrowserViewModel.activeRows(project)
     }
 
+    // MARK: - Layout decision (scroll the body when height-constrained)
+
+    /// Whether the card should scroll its body internally instead of laying it
+    /// out at natural height.
+    ///
+    /// #038: in fit-to-screen ("grid") card layout, `BrowserWindow.cardGrid`
+    /// imposes a FIXED per-row cell height on each card (the non-nil
+    /// `constrainedHeight`). A project with many plans has a natural content
+    /// height taller than that imposed frame, so without an inner scroll its plan
+    /// list overflows the cell and overlaps the card beneath it. In scroll mode
+    /// the card is handed `nil` (no imposed height) and lays out at its natural,
+    /// content-hugging size while the surrounding `ScrollView` absorbs overflow.
+    ///
+    /// So the rule is purely: a non-nil imposed height → scroll the body inside
+    /// the card (`true`); `nil` → natural height, no inner scroll (`false`). Any
+    /// non-nil value (including `0`) counts as "constrained". Pure and view-free
+    /// so the decision is unit-tested as a plain value, mirroring the layout
+    /// helpers in `BrowserWindow`.
+    static func shouldScrollContent(constrainedHeight: CGFloat?) -> Bool {
+        constrainedHeight != nil
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             header
             Divider()
-            captureRows
-            body(for: rows)
-            // Top-anchor the header + body and bottom-anchor the footer: LazyVGrid
-            // sizes every cell to its ROW's max height, so a short card handed a
-            // taller cell has slack to distribute. This `Spacer(minLength: 0)` sits
-            // BETWEEN the body and the footer, so it absorbs all that slack in the
-            // middle — keeping header/divider/plan rows pinned to the TOP and the
-            // git footer pinned to the BOTTOM edge of the card. The card's frame
-            // sets NO maxHeight (below), so a content-sized card still hugs its
-            // content — the Spacer only does work when the card is given extra
-            // height. Mirrors the wrapper Spacer in `BrowserWindow.cardGrid`.
-            Spacer(minLength: 0)
+            // #038: the captures + plan list are the only growable content. When
+            // the card is height-constrained (fit/grid mode imposes a fixed cell
+            // height) a long list would overflow the cell and overlap the card
+            // beneath it, so wrap that middle content in a `ScrollView` — header
+            // stays pinned at the top, git footer pinned at the bottom, and the
+            // list scrolls between them. The ScrollView greedily fills the slack
+            // between header and footer, so no `Spacer` is needed in this path.
+            //
+            // In scroll mode (`constrainedHeight == nil`) the card lays out at its
+            // natural, content-hugging height and the surrounding `ScrollView` in
+            // `BrowserWindow.cardGrid` handles overflow, so render the content
+            // inline (NO inner ScrollView) and keep the trailing `Spacer` that
+            // pins header to the top and footer to the bottom of a taller cell —
+            // byte-for-byte unchanged from before.
+            if ProjectCard.shouldScrollContent(constrainedHeight: constrainedHeight) {
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 10) {
+                        scrollableContent
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                }
+            } else {
+                scrollableContent
+                // Top-anchor the header + body and bottom-anchor the footer:
+                // LazyVGrid sizes every cell to its ROW's max height, so a short
+                // card handed a taller cell has slack to distribute. This
+                // `Spacer(minLength: 0)` sits BETWEEN the body and the footer, so
+                // it absorbs all that slack in the middle — keeping
+                // header/divider/plan rows pinned to the TOP and the git footer
+                // pinned to the BOTTOM edge of the card. The card's frame sets NO
+                // maxHeight (below), so a content-sized card still hugs its
+                // content — the Spacer only does work when the card is given extra
+                // height. Mirrors the wrapper Spacer in `BrowserWindow.cardGrid`.
+                Spacer(minLength: 0)
+            }
             // Git status footer (#026): mirrors the header's treatment — the
             // header is FOLLOWED by a `Divider()` (bottom separator); the footer
             // is PRECEDED by one (its top border). Only emitted for git repos so
@@ -114,10 +171,30 @@ struct ProjectCard: View {
         .padding(.bottom, project.gitBranch != nil ? 14 : 9)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(.background.secondary, in: RoundedRectangle(cornerRadius: 12))
+        // #038: clip the card's content to the same rounded rect as its
+        // background/border so a height-constrained card's scrolled body can
+        // never paint outside its rounded bounds (e.g. into the corners or over
+        // the card beneath it). Placed AFTER `.background` and BEFORE `.overlay`
+        // so the stroke border still renders crisply on top of the clipped
+        // content. A no-op in scroll/natural-height mode where the card already
+        // hugs its content.
+        .clipShape(RoundedRectangle(cornerRadius: 12))
         .overlay(
             RoundedRectangle(cornerRadius: 12)
                 .stroke(.separator, lineWidth: 1)
         )
+    }
+
+    /// The growable middle content of the card: the in-flight capture rows and
+    /// the active plan list. Factored into one `@ViewBuilder` so it can be
+    /// rendered either inline (scroll mode, natural height) or inside a
+    /// `ScrollView` (fit/grid mode, height-constrained) without duplicating it
+    /// across the `if`/`else` in `body` (#038). The header and git footer stay
+    /// OUTSIDE this — they're pinned to the card's top and bottom edges.
+    @ViewBuilder
+    private var scrollableContent: some View {
+        captureRows
+        body(for: rows)
     }
 
     // MARK: - Header (project name + per-status count summary)

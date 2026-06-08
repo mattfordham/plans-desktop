@@ -71,4 +71,29 @@ final class ProjectCardTests: XCTestCase {
         XCTAssertNil(project.gitBranch)
         XCTAssertNil(project.gitIsDirty)
     }
+
+    // MARK: - shouldScrollContent (fit/grid mode → scroll the card body)
+
+    /// #038: in fit-to-screen ("grid") mode `BrowserWindow.cardGrid` hands each
+    /// card a FIXED cell height (the non-nil `constrainedHeight`). With a fixed
+    /// height a long plan list would overflow the cell and overlap the card
+    /// beneath it, so the card must scroll its body internally — hence a non-nil
+    /// constrained height returns `true`.
+    func testShouldScrollContentWhenHeightConstrained() {
+        XCTAssertTrue(ProjectCard.shouldScrollContent(constrainedHeight: 480))
+    }
+
+    /// A zero (or tiny) constrained height is still a non-nil imposed height, so
+    /// the body still scrolls — only `nil` means "natural height".
+    func testShouldScrollContentWhenHeightIsZero() {
+        XCTAssertTrue(ProjectCard.shouldScrollContent(constrainedHeight: 0))
+    }
+
+    /// #038: in scroll mode (`constrainedHeight == nil`) the card lays its content
+    /// out at natural height and the surrounding `ScrollView` handles overflow, so
+    /// the card must NOT introduce an inner scroll — natural-height layout stays
+    /// byte-for-byte unchanged.
+    func testShouldNotScrollContentWhenHeightUnconstrained() {
+        XCTAssertFalse(ProjectCard.shouldScrollContent(constrainedHeight: nil))
+    }
 }
