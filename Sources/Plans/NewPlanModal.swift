@@ -54,6 +54,15 @@ struct NewPlanModal: View {
     /// stretches to fill the remaining sheet space.
     private static let editorMinHeight: CGFloat = 160
 
+    /// The description editor's font — a prompt-box-sized hero (Claude/ChatGPT
+    /// style). Shared by the real text and the placeholder so they never diverge.
+    private static let editorFont = NSFont.preferredFont(forTextStyle: .title2)
+
+    /// The editor's `textContainerInset`. The placeholder is positioned against
+    /// this exact value (plus the text container's line-fragment padding) so it
+    /// lands precisely on the caret regardless of font size.
+    private static let editorInset = CGSize(width: 12, height: 10)
+
     /// Seeds `projectPath` from the initially-selected project. The remaining
     /// fields are restored from that project's saved draft in `.onAppear` (the
     /// store is only available from the environment, not at init time).
@@ -141,11 +150,7 @@ struct NewPlanModal: View {
     /// `TextEditor` scrolls internally once the content exceeds the visible box.
     private var editor: some View {
         ZStack(alignment: .topLeading) {
-            TextEditor(text: $text)
-                .font(.body)
-                .scrollContentBackground(.hidden)
-                .padding(.horizontal, 12)
-                .padding(.vertical, 10)
+            PlanTextEditor(text: $text, font: Self.editorFont, inset: Self.editorInset)
                 .frame(minHeight: Self.editorMinHeight, maxHeight: .infinity)
                 .background(
                     RoundedRectangle(cornerRadius: 8)
@@ -157,15 +162,16 @@ struct NewPlanModal: View {
                 )
 
             if text.isEmpty {
-                // Aligned to the cursor (the editor's text origin): 14pt leading /
-                // 12pt top sit the placeholder right at the caret given the
-                // editor's 12pt horizontal / 10pt vertical insets plus the
-                // TextEditor's own ~2pt intrinsic text inset.
+                // The placeholder shares the editor's exact text origin: the
+                // underlying NSTextView's text starts at `editorInset` (its
+                // `textContainerInset`) plus the text container's own ~5pt line
+                // fragment padding on the leading edge. Matching those here keeps
+                // "Describe the plan…" sitting precisely on the caret at any font.
                 Text("Describe the plan…")
-                    .font(.body)
+                    .font(Font(Self.editorFont))
                     .foregroundStyle(.secondary)
-                    .padding(.leading, 14)
-                    .padding(.top, 12)
+                    .padding(.leading, Self.editorInset.width + 5)
+                    .padding(.top, Self.editorInset.height)
                     .allowsHitTesting(false)
             }
         }
@@ -228,6 +234,63 @@ struct NewPlanModal: View {
         )
         store.clearDraft(for: projectPath)
         dismiss()
+    }
+}
+
+// MARK: - PlanTextEditor
+
+/// An `NSTextView`-backed editor that exposes a known `textContainerInset` and
+/// font. SwiftUI's `TextEditor` hides the text view's intrinsic insets, which
+/// makes a ZStack placeholder overlay drift away from the real caret as the font
+/// changes. Driving the `NSTextView` directly lets the placeholder be positioned
+/// against the exact same inset (see `NewPlanModal.editor`), so they always align.
+private struct PlanTextEditor: NSViewRepresentable {
+    @Binding var text: String
+    let font: NSFont
+    /// The text view's `textContainerInset`. The placeholder mirrors this value.
+    let inset: CGSize
+
+    func makeCoordinator() -> Coordinator { Coordinator(self) }
+
+    func makeNSView(context: Context) -> NSScrollView {
+        let scrollView = NSTextView.scrollableTextView()
+        let textView = scrollView.documentView as! NSTextView
+
+        textView.delegate = context.coordinator
+        textView.font = font
+        textView.textContainerInset = inset
+        textView.isRichText = false
+        textView.allowsUndo = true
+        textView.drawsBackground = false      // the SwiftUI background shows through
+        textView.backgroundColor = .clear
+        textView.textColor = .labelColor
+        textView.isAutomaticQuoteSubstitutionEnabled = false
+        textView.isAutomaticDashSubstitutionEnabled = false
+
+        scrollView.drawsBackground = false
+        scrollView.backgroundColor = .clear
+
+        return scrollView
+    }
+
+    func updateNSView(_ scrollView: NSScrollView, context: Context) {
+        guard let textView = scrollView.documentView as? NSTextView else { return }
+        if textView.string != text {
+            textView.string = text
+        }
+        textView.font = font
+        textView.textContainerInset = inset
+    }
+
+    final class Coordinator: NSObject, NSTextViewDelegate {
+        private let parent: PlanTextEditor
+
+        init(_ parent: PlanTextEditor) { self.parent = parent }
+
+        func textDidChange(_ notification: Notification) {
+            guard let textView = notification.object as? NSTextView else { return }
+            parent.text = textView.string
+        }
     }
 }
 
