@@ -105,6 +105,25 @@ struct BrowserWindow: View {
         return Int(ceil(Double(count) / Double(columns)))
     }
 
+    /// Distributes `count` card indices across `columns` columns for the variable-
+    /// height (masonry) scroll layout (#039). Returns one inner array per column
+    /// (outer length == the effective column count), each listing the ordered
+    /// card indices assigned to that column. Index `i` lands in column `i %
+    /// columns`, so a left-to-right read across the columns' heads still yields
+    /// reading order (top-to-bottom, left-to-right). `columns <= 0` is floored to
+    /// 1 (defensive — the grid floors columns at 1 anyway); `count <= 0` yields an
+    /// empty result (no columns). Pure (no view-state reads) so it is directly
+    /// unit-testable without instantiating the view.
+    static func columnAssignments(count: Int, columns: Int) -> [[Int]] {
+        guard count > 0 else { return [] }
+        let cols = max(1, columns)
+        var result = Array(repeating: [Int](), count: cols)
+        for i in 0..<count {
+            result[i % cols].append(i)
+        }
+        return result
+    }
+
     /// The projects in display order for the card grid. When the user's manual
     /// order is active and non-empty (#017), the grid honors that override
     /// (`applyManualOrder`, new project paths to the top); otherwise it falls
@@ -257,110 +276,17 @@ struct BrowserWindow: View {
             : nil
         return ScrollViewReader { proxy in
             ScrollView {
-                LazyVGrid(
-                    // Responsive equal-flexible columns: the count is derived from
-                    // the measured viewport width (`gridWidth`) via the pure
-                    // `columnCount(forWidth:)` helper, so cards reflow 1→2→3→4… as
-                    // the window/split divider resizes while still sharing width
-                    // evenly. LazyVGrid sizes each cell to its ROW's max height, so
-                    // each card is wrapped in a top-anchor VStack + trailing Spacer
-                    // (see the ForEach below) to keep the card content-sized and
-                    // pinned to the top of a taller cell rather than stretched.
-                    // (`alignment:` here is HORIZONTAL only and stays at the
-                    // default `.center`; cards fill their column via maxWidth so it
-                    // has no visible effect.)
-                    // #033: BOTH modes use the same width-driven column count
-                    // (`columns`, computed above), so cards reflow 1→2→3→4…
-                    // identically. Fit-to-screen differs only by stretching each
-                    // row's height (`fitHeight`, applied to the card wrapper below)
-                    // so all rows fit on screen; scroll mode leaves heights natural.
-                    // The surrounding ScrollView is kept as-is so fit mode still
-                    // scrolls (never clips) when there are more rows than fit.
-                    columns: Array(
-                        repeating: GridItem(.flexible(), spacing: Self.gridSpacing),
-                        count: columns
-                    ),
-                    spacing: Self.gridSpacing
-                ) {
-                    ForEach(sortedProjects, id: \.projectPath) { project in
-                        // Top-anchor wrapper: LazyVGrid sizes every cell in a row
-                        // to the row's max height, which would otherwise stretch a
-                        // short card's background/border to fill the whole cell.
-                        // Keeping the card content-sized and pairing it with a
-                        // trailing `Spacer(minLength: 0)` lets the spacer absorb the
-                        // extra cell height so the card's chrome hugs its content
-                        // and pins to the TOP of the cell. ProjectCard's own frame
-                        // intentionally sets NO maxHeight — adding one here would
-                        // re-introduce the stretch. The `.id` stays on this wrapper
-                        // so the ScrollViewReader drill-down still targets the cell.
-                        VStack(spacing: 0) {
-                            // #031: the card's "+" glyph opens the shared modal
-                            // pre-selected to THIS card's project via this closure
-                            // (a fresh `NewPlanRequest` id so `.sheet(item:)` fires).
-                            ProjectCard(project: project) { path in
-                                newPlanRequest = NewPlanRequest(projectPath: path)
-                            }
-                            // #033: in fit mode the trailing Spacer is suppressed and
-                            // the card is stretched to the fixed row height (frame
-                            // below): the card's OWN internal Spacer then distributes
-                            // the slack so its background/border fill the cell. In
-                            // scroll mode this Spacer absorbs LazyVGrid's row-height
-                            // equalization so short cards hug their content at the top.
-                            if fitHeight == nil {
-                                Spacer(minLength: 0)
-                            }
-                        }
-                        // #033: in fit-to-screen, force every card cell to the
-                        // computed per-row height so the rows divide the viewport and
-                        // fill it vertically (the card stretches via its internal
-                        // Spacer). In scroll mode (`fitHeight == nil`) `height: nil`
-                        // is a no-op and cards keep their natural, content-hugging size.
-                        .frame(height: fitHeight)
-                        .id(project.projectPath)
-                        // #017 drop indicator: while a card is dragged over this
-                        // cell, paint a vertical accent bar on its LEADING edge to
-                        // show the dragged card will be inserted BEFORE this one —
-                        // the same semantics `handleDrop`/`reorder` apply. Without
-                        // this the drop position is invisible and dragging is hard
-                        // to aim. The overlay is inside the drag/drop chrome but
-                        // adds no layout (it's an `.overlay`), so the grid math is
-                        // untouched.
-                        .overlay(alignment: .leading) {
-                            if dropTargetPath == project.projectPath {
-                                RoundedRectangle(cornerRadius: 2)
-                                    .fill(Color.accentColor)
-                                    .frame(width: 4)
-                                    .padding(.vertical, 2)
-                                    .transition(.opacity)
-                            }
-                        }
-                        // #017: drag a card and drop it onto another card to
-                        // override the order. The card carries its project path
-                        // as the dragged payload; the drop target re-inserts the
-                        // dragged path BEFORE this card via the pure `reorder`
-                        // helper over the CURRENTLY displayed order, then persists
-                        // through the store. View modifier stays thin — all order
-                        // math lives in `BrowserViewModel`. `isTargeted` drives the
-                        // `dropTargetPath` highlight above.
-                        .draggable(project.projectPath)
-                        .dropDestination(for: String.self) { items, _ in
-                            dropTargetPath = nil
-                            guard let sourcePath = items.first else { return false }
-                            handleDrop(sourcePath: sourcePath, before: project.projectPath)
-                            return true
-                        } isTargeted: { targeted in
-                            // Set on enter; clear only if WE are still the recorded
-                            // target, so a neighbor's enter (which may arrive before
-                            // our exit) isn't clobbered back to nil.
-                            if targeted {
-                                dropTargetPath = project.projectPath
-                            } else if dropTargetPath == project.projectPath {
-                                dropTargetPath = nil
-                            }
-                        }
-                    }
+                // #039: scroll mode now uses a content-driven, variable-height
+                // (masonry) layout (`variableCardGrid`) so short cards no longer
+                // leave a gap below them. Fit-to-screen mode keeps the existing
+                // uniform-row `LazyVGrid` (`fitCardGrid`) that divides the viewport
+                // into equal rows. Both share the same width-driven `columns` count
+                // (computed above) and the same per-card chrome via `cardCell(for:)`.
+                if let fitHeight {
+                    fitCardGrid(columns: columns, fitHeight: fitHeight)
+                } else {
+                    variableCardGrid(columns: columns)
                 }
-                .padding(Self.gridPadding)
             }
             // #017 step 4: a revert affordance lives in the window toolbar so the
             // user can leave the manual card order and return to the automatic
@@ -424,6 +350,123 @@ struct BrowserWindow: View {
             .onAppear { scrollToSelectedProject(proxy) }
             .onChange(of: store.selectedProjectPath) { _, _ in
                 scrollToSelectedProject(proxy)
+            }
+        }
+    }
+
+    /// The fit-to-screen card grid (#033): the responsive `LazyVGrid` that divides
+    /// the viewport into uniform rows, each card forced to the computed per-row
+    /// `fitHeight` so every row fills the screen vertically. Unchanged in behavior
+    /// from the pre-#039 grid — only factored out of `cardGrid` so the scroll path
+    /// can branch to the variable-height `variableCardGrid` instead. Each cell wraps
+    /// the shared `cardCell(for:)` chrome in a fixed-height frame; the card's own
+    /// internal Spacer distributes the slack so its background/border fill the cell.
+    private func fitCardGrid(columns: Int, fitHeight: CGFloat) -> some View {
+        LazyVGrid(
+            // Responsive equal-flexible columns: the count is derived from the
+            // measured viewport width (`gridWidth`) via the pure
+            // `columnCount(forWidth:)` helper, so cards reflow 1→2→3→4… as the
+            // window/split divider resizes while still sharing width evenly.
+            // (`alignment:` here is HORIZONTAL only and stays at the default
+            // `.center`; cards fill their column via maxWidth so it has no visible
+            // effect.)
+            columns: Array(
+                repeating: GridItem(.flexible(), spacing: Self.gridSpacing),
+                count: columns
+            ),
+            spacing: Self.gridSpacing
+        ) {
+            ForEach(sortedProjects, id: \.projectPath) { project in
+                // #033: force every card cell to the computed per-row height so the
+                // rows divide the viewport and fill it vertically (the card
+                // stretches via its internal Spacer). The shared `cardCell` carries
+                // the `.id`, drop indicator, drag/drop reorder, and "+" chrome.
+                cardCell(for: project)
+                    .frame(height: fitHeight)
+            }
+        }
+        .padding(Self.gridPadding)
+    }
+
+    /// The variable-height (masonry) card grid for scroll mode (#039): N column
+    /// `LazyVStack`s side-by-side in an `HStack(alignment: .top)`, each rendering
+    /// the cards the pure `columnAssignments` helper assigned to it at their
+    /// NATURAL content height — no trailing Spacer and no fixed `.frame(height:)`.
+    /// This removes the gap a `LazyVGrid` left below a short card (which forced
+    /// every cell in a row to the row's max height). The index-modulo assignment
+    /// keeps the grid reading left-to-right, top-to-bottom. Each card uses the same
+    /// `cardCell(for:)` chrome (`.id`, drop indicator, drag/drop reorder, "+"
+    /// glyph) as the fit path, so #017 reorder and #004 drill-down still work.
+    private func variableCardGrid(columns: Int) -> some View {
+        let assignments = BrowserWindow.columnAssignments(
+            count: sortedProjects.count,
+            columns: columns
+        )
+        return HStack(alignment: .top, spacing: Self.gridSpacing) {
+            ForEach(0..<assignments.count, id: \.self) { col in
+                LazyVStack(spacing: Self.gridSpacing) {
+                    ForEach(assignments[col], id: \.self) { idx in
+                        let project = sortedProjects[idx]
+                        cardCell(for: project)
+                    }
+                }
+                // Each column shares the available width evenly and tops-aligns its
+                // stack so a shorter column doesn't get stretched vertically.
+                .frame(maxWidth: .infinity, alignment: .top)
+            }
+        }
+        .padding(Self.gridPadding)
+    }
+
+    /// The shared per-card chrome used by BOTH the fit (`fitCardGrid`) and the
+    /// variable-height scroll (`variableCardGrid`) paths: the `ProjectCard` plus
+    /// the menu-bar drill-down `.id` (#004), the #017 leading drop-indicator
+    /// overlay, and the #017 drag/drop reorder modifiers, with the card's "+" glyph
+    /// wired to the shared "New Plan" modal pre-selected to THIS project (#031). It
+    /// applies NO height frame and NO trailing Spacer — the fit path wraps it in a
+    /// fixed-height frame, while the scroll path lets it size to its content.
+    @ViewBuilder
+    private func cardCell(for project: ProjectTasks) -> some View {
+        // #031: the card's "+" glyph opens the shared modal pre-selected to THIS
+        // card's project via this closure (a fresh `NewPlanRequest` id so
+        // `.sheet(item:)` fires).
+        ProjectCard(project: project) { path in
+            newPlanRequest = NewPlanRequest(projectPath: path)
+        }
+        // #004 drill-down target: the ScrollViewReader scrolls to this id.
+        .id(project.projectPath)
+        // #017 drop indicator: while a card is dragged over this cell, paint a
+        // vertical accent bar on its LEADING edge to show the dragged card will be
+        // inserted BEFORE this one. The overlay adds no layout so the grid math is
+        // untouched.
+        .overlay(alignment: .leading) {
+            if dropTargetPath == project.projectPath {
+                RoundedRectangle(cornerRadius: 2)
+                    .fill(Color.accentColor)
+                    .frame(width: 4)
+                    .padding(.vertical, 2)
+                    .transition(.opacity)
+            }
+        }
+        // #017: drag a card and drop it onto another card to override the order.
+        // The card carries its project path as the dragged payload; the drop target
+        // re-inserts the dragged path BEFORE this card via the pure `reorder` helper
+        // over the CURRENTLY displayed order, then persists through the store.
+        // `isTargeted` drives the `dropTargetPath` highlight above.
+        .draggable(project.projectPath)
+        .dropDestination(for: String.self) { items, _ in
+            dropTargetPath = nil
+            guard let sourcePath = items.first else { return false }
+            handleDrop(sourcePath: sourcePath, before: project.projectPath)
+            return true
+        } isTargeted: { targeted in
+            // Set on enter; clear only if WE are still the recorded target, so a
+            // neighbor's enter (which may arrive before our exit) isn't clobbered
+            // back to nil.
+            if targeted {
+                dropTargetPath = project.projectPath
+            } else if dropTargetPath == project.projectPath {
+                dropTargetPath = nil
             }
         }
     }

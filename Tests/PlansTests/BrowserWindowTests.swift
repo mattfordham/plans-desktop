@@ -400,6 +400,63 @@ final class BrowserWindowTests: XCTestCase {
         XCTAssertEqual(BrowserWindow.rowCount(forCount: 4, columns: 0), 0)
     }
 
+    // MARK: - columnAssignments (masonry column distribution #039)
+
+    /// An even split distributes indices round-robin in reading order: 4 cards
+    /// over 2 columns puts 0,2 in the first column and 1,3 in the second.
+    func testColumnAssignmentsEvenSplit() {
+        XCTAssertEqual(
+            BrowserWindow.columnAssignments(count: 4, columns: 2),
+            [[0, 2], [1, 3]]
+        )
+    }
+
+    /// An uneven count leaves the remainder in the leading columns: 5 cards over 2
+    /// columns is [0,2,4] and [1,3].
+    func testColumnAssignmentsUnevenRemainder() {
+        XCTAssertEqual(
+            BrowserWindow.columnAssignments(count: 5, columns: 2),
+            [[0, 2, 4], [1, 3]]
+        )
+    }
+
+    /// A single column collects every index in order.
+    func testColumnAssignmentsSingleColumn() {
+        XCTAssertEqual(
+            BrowserWindow.columnAssignments(count: 3, columns: 1),
+            [[0, 1, 2]]
+        )
+    }
+
+    /// A zero (or negative) card count yields no columns at all — an empty result.
+    func testColumnAssignmentsZeroCountIsEmpty() {
+        XCTAssertEqual(BrowserWindow.columnAssignments(count: 0, columns: 3), [])
+        XCTAssertEqual(BrowserWindow.columnAssignments(count: -5, columns: 3), [])
+    }
+
+    /// A zero/negative column count is floored to a single column (defensive — the
+    /// grid floors columns at 1 anyway), so every index lands in one column.
+    func testColumnAssignmentsZeroColumnsFlooredToOne() {
+        XCTAssertEqual(
+            BrowserWindow.columnAssignments(count: 2, columns: 0),
+            [[0, 1]]
+        )
+        XCTAssertEqual(
+            BrowserWindow.columnAssignments(count: 2, columns: -3),
+            [[0, 1]]
+        )
+    }
+
+    /// The flattened union of every column's indices is exactly `0..<count` with no
+    /// duplicates and no omissions — a representative coverage guard (7 over 3).
+    func testColumnAssignmentsUnionCoversAllIndicesExactly() {
+        let assignments = BrowserWindow.columnAssignments(count: 7, columns: 3)
+        let flattened = assignments.flatMap { $0 }.sorted()
+        XCTAssertEqual(flattened, Array(0..<7))
+        // No duplicates: the flattened set size equals the count.
+        XCTAssertEqual(Set(flattened).count, 7)
+    }
+
     // MARK: - fitRowHeight (per-row card height for fit-to-screen)
 
     /// Before the viewport is measured (height 0) there's nothing to divide, so
