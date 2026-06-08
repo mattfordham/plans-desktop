@@ -86,9 +86,13 @@ struct ProjectCard: View {
         }
     }
 
-    /// The clickable plan rows for this card, in `TaskParser`'s active order.
+    /// The clickable plan rows for this card: the active plans (in `TaskParser`'s
+    /// active order) PLUS the user's starred plans (#035), so a finished-but-
+    /// starred plan stays visible on the card after completion. The "No outstanding
+    /// plans" empty state therefore only appears when there are no active AND no
+    /// starred rows.
     private var rows: [TaskRow] {
-        BrowserViewModel.activeRows(project)
+        BrowserViewModel.starredRows(project, starredIDs: store.starredTaskIDs)
     }
 
     // MARK: - Layout decision (scroll the body when height-constrained)
@@ -424,14 +428,19 @@ struct ProjectCard: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .modifier(OpenDetailOnTap(row: row, openWindow: openWindow))
 
-            // Trailing per-row action: the single status-relevant Elaborate /
-            // Execute icon button, or an inline spinner while THIS row is being
-            // worked. This cell deliberately does NOT carry the open-detail tap
-            // gesture (which lives on the content cells above) so the button's
-            // own tap is never swallowed by a row-level gesture. The full live
-            // log is available by opening the row's detail window.
-            rowActions(row)
-                .gridColumnAlignment(.trailing)
+            // Trailing per-row actions: the star/unstar toggle (#035) alongside
+            // the single status-relevant Elaborate / Execute icon button (or an
+            // inline spinner while THIS row is being worked). Both live together
+            // in one trailing cell via an HStack so Grid's cross-row column
+            // alignment is preserved (one trailing column, not two). This cell
+            // deliberately does NOT carry the open-detail tap gesture (which lives
+            // on the content cells above) so the controls' own taps are never
+            // swallowed by a row-level gesture — mirroring `rowActions`.
+            HStack(spacing: 0) {
+                starToggle(row)
+                rowActions(row)
+            }
+            .gridColumnAlignment(.trailing)
         }
         // `.padding(.vertical, 5)` sets the row's height/tap area. The open-detail
         // tap gesture is applied per content cell (see `OpenDetailOnTap`) rather
@@ -509,6 +518,61 @@ struct ProjectCard: View {
         // Pin the cell to the glyph's height in every state so swapping between
         // spinner / glyph / empty never changes the row's line height.
         .frame(height: 22)
+    }
+
+    /// The per-row star/unstar toggle (#035). A filled yellow `star.fill` when
+    /// this row's composite id is in `store.starredTaskIDs`, otherwise an outline
+    /// `star`. Tapping toggles membership of `row.id` in the persisted set
+    /// (`insert`/`remove` triggers the store's `didSet` persistence). Like
+    /// `rowActions`, it deliberately does NOT carry the open-detail tap gesture so
+    /// its own tap is never swallowed by a row-level gesture. Starring keeps a
+    /// finished plan visible on the card and its project past the hide-empty filter.
+    @ViewBuilder
+    private func starToggle(_ row: TaskRow) -> some View {
+        let isStarred = store.starredTaskIDs.contains(row.id)
+        StarToggleGlyph(
+            isStarred: isStarred,
+            help: isStarred ? "Unstar plan" : "Star plan"
+        ) {
+            if store.starredTaskIDs.contains(row.id) {
+                store.starredTaskIDs.remove(row.id)
+            } else {
+                store.starredTaskIDs.insert(row.id)
+            }
+        }
+    }
+}
+
+/// The per-row star/unstar glyph (#035). A `Button` with `.buttonStyle(.plain)`
+/// whose label symbol and tint reflect the starred state: a filled yellow
+/// `star.fill` when starred, an outline `star` otherwise. Adds a subtle hover
+/// background + cursor like `RowActionGlyph`. It is NOT given the row's
+/// open-detail tap gesture, so tapping the star toggles membership rather than
+/// opening the detail window.
+private struct StarToggleGlyph: View {
+    let isStarred: Bool
+    let help: String
+    let action: () -> Void
+
+    @State private var hovering = false
+
+    var body: some View {
+        Button(action: action) {
+            Image(systemName: isStarred ? "star.fill" : "star")
+                .imageScale(.medium)
+                .foregroundStyle(isStarred ? AnyShapeStyle(.yellow)
+                                           : AnyShapeStyle(hovering ? Color.primary : Color.secondary))
+                .frame(width: 22, height: 22)
+                .background(
+                    RoundedRectangle(cornerRadius: 5)
+                        .fill(Color.primary.opacity(hovering ? 0.10 : 0))
+                )
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .animation(.easeOut(duration: 0.12), value: hovering)
+        .onHover { hovering = $0 }
+        .help(help)
     }
 }
 

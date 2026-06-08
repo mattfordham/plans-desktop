@@ -324,6 +324,104 @@ final class BrowserWindowTests: XCTestCase {
         XCTAssertEqual(row?.id, "/p/001")
     }
 
+    // MARK: - starredRows (#035: active rows + starred-completed rows)
+
+    /// A project with 1 active task and 1 starred COMPLETED task returns BOTH
+    /// rows — the starred completed plan stays visible on the card.
+    func testStarredRowsIncludesActiveAndStarredCompleted() {
+        let project = makeProject(
+            path: "/p",
+            name: "p",
+            tasks: [
+                makeTask(id: "001", status: .inProgress),
+                makeTask(id: "099", status: .completed),
+            ],
+            activeTasks: [makeTask(id: "001", status: .inProgress)]
+        )
+        let rows = BrowserViewModel.starredRows(project, starredIDs: ["/p/099"])
+        XCTAssertEqual(rows.map(\.id), ["/p/001", "/p/099"])
+    }
+
+    /// An un-starred completed task is NOT surfaced — only active rows show.
+    func testStarredRowsExcludesUnstarredCompleted() {
+        let project = makeProject(
+            path: "/p",
+            name: "p",
+            tasks: [
+                makeTask(id: "001", status: .inProgress),
+                makeTask(id: "099", status: .completed),
+            ],
+            activeTasks: [makeTask(id: "001", status: .inProgress)]
+        )
+        let rows = BrowserViewModel.starredRows(project, starredIDs: [])
+        XCTAssertEqual(rows.map(\.id), ["/p/001"])
+    }
+
+    /// Starred-completed rows are APPENDED after the active rows, preserving the
+    /// parser's active order at the front.
+    func testStarredRowsAppendsStarredCompletedAfterActive() {
+        let project = makeProject(
+            path: "/p",
+            name: "p",
+            tasks: [
+                makeTask(id: "099", status: .completed),
+                makeTask(id: "001", status: .inProgress),
+                makeTask(id: "002", status: .pending),
+            ],
+            activeTasks: [
+                makeTask(id: "001", status: .inProgress),
+                makeTask(id: "002", status: .pending),
+            ]
+        )
+        let rows = BrowserViewModel.starredRows(project, starredIDs: ["/p/099"])
+        XCTAssertEqual(rows.map(\.id), ["/p/001", "/p/002", "/p/099"])
+    }
+
+    // MARK: - projectHasStarredTask (#035: keep starred projects past the hide-empty filter)
+
+    /// A project whose ONLY task is a starred completed task reports it has a
+    /// starred task, so the hide-empty filter keeps the card visible.
+    func testProjectHasStarredTaskTrueForStarredCompletedTask() {
+        let project = makeProject(
+            path: "/p",
+            name: "p",
+            tasks: [makeTask(id: "099", status: .completed)],
+            activeTasks: []
+        )
+        XCTAssertTrue(
+            BrowserViewModel.projectHasStarredTask(project, starredIDs: ["/p/099"])
+        )
+    }
+
+    /// A project with no starred tasks reports false.
+    func testProjectHasStarredTaskFalseWhenNoneStarred() {
+        let project = makeProject(
+            path: "/p",
+            name: "p",
+            tasks: [
+                makeTask(id: "001", status: .inProgress),
+                makeTask(id: "099", status: .completed),
+            ],
+            activeTasks: [makeTask(id: "001", status: .inProgress)]
+        )
+        XCTAssertFalse(
+            BrowserViewModel.projectHasStarredTask(project, starredIDs: [])
+        )
+    }
+
+    /// A starred id that is ALSO an active task is not duplicated — it appears
+    /// once, in its active position.
+    func testStarredRowsDoesNotDuplicateActiveTask() {
+        let project = makeProject(
+            path: "/p",
+            name: "p",
+            tasks: [makeTask(id: "001", status: .inProgress)],
+            activeTasks: [makeTask(id: "001", status: .inProgress)]
+        )
+        let rows = BrowserViewModel.starredRows(project, starredIDs: ["/p/001"])
+        XCTAssertEqual(rows.map(\.id), ["/p/001"])
+    }
+
     // MARK: - Cross-project selected-row resolution (mirrors the view)
 
     /// The view resolves `selectedRowID` by scanning EVERY project's active rows.
