@@ -52,7 +52,7 @@ struct NewPlanModal: View {
 
     /// The minimum editor height (one comfortable multi-line box) before it
     /// stretches to fill the remaining sheet space.
-    private static let editorMinHeight: CGFloat = 96
+    private static let editorMinHeight: CGFloat = 160
 
     /// Seeds `projectPath` from the initially-selected project. The remaining
     /// fields are restored from that project's saved draft in `.onAppear` (the
@@ -118,7 +118,7 @@ struct NewPlanModal: View {
             }
         }
         .padding(16)
-        .frame(minWidth: 460, minHeight: 320)
+        .frame(minWidth: 460, minHeight: 380)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .onAppear { loadDraft(for: projectPath) }
         .onChange(of: projectPath) { _, newPath in
@@ -144,26 +144,28 @@ struct NewPlanModal: View {
             TextEditor(text: $text)
                 .font(.body)
                 .scrollContentBackground(.hidden)
-                .padding(4)
+                .padding(.horizontal, 12)
+                .padding(.vertical, 10)
                 .frame(minHeight: Self.editorMinHeight, maxHeight: .infinity)
                 .background(
-                    RoundedRectangle(cornerRadius: 6)
+                    RoundedRectangle(cornerRadius: 8)
                         .fill(Color(nsColor: .textBackgroundColor))
                 )
                 .overlay(
-                    RoundedRectangle(cornerRadius: 6)
+                    RoundedRectangle(cornerRadius: 8)
                         .stroke(Color.secondary.opacity(0.4), lineWidth: 1)
                 )
 
             if text.isEmpty {
-                // Aligned to the cursor (the editor's text origin): 9pt leading /
-                // 4pt top sit the placeholder right at the caret (matches
-                // `ProjectCard.capturePopover`).
+                // Aligned to the cursor (the editor's text origin): 14pt leading /
+                // 12pt top sit the placeholder right at the caret given the
+                // editor's 12pt horizontal / 10pt vertical insets plus the
+                // TextEditor's own ~2pt intrinsic text inset.
                 Text("Describe the plan…")
                     .font(.body)
                     .foregroundStyle(.secondary)
-                    .padding(.leading, 9)
-                    .padding(.top, 4)
+                    .padding(.leading, 14)
+                    .padding(.top, 12)
                     .allowsHitTesting(false)
             }
         }
