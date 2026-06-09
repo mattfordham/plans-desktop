@@ -321,6 +321,13 @@ struct RunProgressSheet: View {
 
     @Environment(\.dismiss) private var dismiss
 
+    /// The id of the line to scroll into view on first appearance: the last
+    /// (newest) line, or `nil` when there are no lines yet. Pure so it's unit
+    /// testable without constructing the view.
+    static func scrollTarget(for lines: [LoggedEvent]) -> UUID? {
+        lines.last?.id
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             header
@@ -425,6 +432,15 @@ struct RunProgressSheet: View {
             .onChange(of: lines.count) {
                 if let last = lines.last {
                     withAnimation { proxy.scrollTo(last.id, anchor: .bottom) }
+                }
+            }
+            // On first appearance against a run that already has buffered
+            // lines (e.g. opening the spinner of an in-progress task), jump
+            // straight to the newest line — instantly, no animation — so the
+            // view opens at the bottom instead of the top.
+            .onAppear {
+                if let target = RunProgressSheet.scrollTarget(for: lines) {
+                    proxy.scrollTo(target, anchor: .bottom)
                 }
             }
         }

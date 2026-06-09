@@ -96,4 +96,23 @@ final class PlanDetailViewTests: XCTestCase {
 
         XCTAssertNil(url)
     }
+
+    // MARK: - RunProgressSheet.scrollTarget
+
+    func testScrollTargetReturnsLastLineIDForNonEmptyList() {
+        let lines = [
+            LoggedEvent(event: .text(chunk: "a")),
+            LoggedEvent(event: .text(chunk: "b")),
+            LoggedEvent(event: .activity(tool: "Read", detail: nil)),
+        ]
+
+        XCTAssertEqual(
+            RunProgressSheet.scrollTarget(for: lines),
+            lines.last?.id
+        )
+    }
+
+    func testScrollTargetReturnsNilForEmptyList() {
+        XCTAssertNil(RunProgressSheet.scrollTarget(for: []))
+    }
 }
