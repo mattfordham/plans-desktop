@@ -231,6 +231,23 @@ final class TaskRunnerTests: XCTestCase {
         XCTAssertFalse(run.isRunning)
     }
 
+    // MARK: - Running-run accounting (task #044)
+
+    /// The quit-confirmation hook (`applicationShouldTerminate`) queries
+    /// `runningRunCount` / `hasRunningRuns` as its single source of truth for
+    /// "are spinners running?". A fresh coordinator has no runs, so the count is
+    /// zero and `hasRunningRuns` is false — the delegate must then terminate
+    /// immediately without prompting. We assert only the empty case here because
+    /// populating `runs` with an *actually running* `TaskRun` requires spawning a
+    /// real `node` process; the helper is a trivial filter over `isRunning`, so
+    /// the empty case plus the existing per-task tracking tests cover it.
+    @MainActor
+    func testRunningRunCountIsZeroForFreshCoordinator() {
+        let coordinator = TaskRunner()
+        XCTAssertEqual(coordinator.runningRunCount, 0)
+        XCTAssertFalse(coordinator.hasRunningRuns)
+    }
+
     // MARK: - Capture mode (task #023)
 
     /// `RunMode` is `String`-backed; the raw value is the `--mode` flag passed

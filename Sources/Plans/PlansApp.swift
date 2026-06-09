@@ -29,6 +29,41 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // surfaces immediately rather than waiting for the next 5s poll tick.
         taskRunner.onAnyRunFinished = { [weak store] in store?.reload() }
     }
+
+    /// Guards quit when task spinners are still running (#044). AppKit calls this
+    /// synchronously and expects a synchronous `TerminateReply`, so we run a modal
+    /// `NSAlert` inline rather than awaiting anything. With nothing running we
+    /// terminate immediately; otherwise we confirm, and on confirmation stop every
+    /// in-flight run before terminating so child `node` processes don't outlive
+    /// the app. Cancel aborts the quit. `runningRunCount` is the single source of
+    /// truth, shared with the live spinner UI.
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        let count = taskRunner.runningRunCount
+        guard count > 0 else { return .terminateNow }
+
+        let alert = NSAlert()
+        alert.messageText = "Quit Plans?"
+        let noun = count == 1 ? "task" : "tasks"
+        alert.informativeText =
+            "You have \(count) running \(noun). Quitting will stop \(count == 1 ? "it" : "them")."
+        // First button is the default; mark it destructive so the system can style
+        // it (and it sits as the rightmost/primary action).
+        let quitButton = alert.addButton(withTitle: "Quit")
+        quitButton.hasDestructiveAction = true
+        alert.addButton(withTitle: "Cancel")
+
+        switch alert.runModal() {
+        case .alertFirstButtonReturn:
+            // Stop every still-running run; finished-but-not-dismissed runs are
+            // left alone (their `stop()` is a no-op anyway).
+            for (taskID, run) in taskRunner.runs where run.isRunning {
+                taskRunner.stop(taskID: taskID)
+            }
+            return .terminateNow
+        default:
+            return .terminateCancel
+        }
+    }
 }
 
 @main

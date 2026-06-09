@@ -529,6 +529,17 @@ final class TaskRunner {
     /// True when a run is currently in flight for `taskID`.
     func isRunning(taskID: String) -> Bool { runs[taskID]?.isRunning ?? false }
 
+    /// How many runs are currently in flight across all tasks. This is the single
+    /// source of truth the quit-confirmation hook (`applicationShouldTerminate`)
+    /// queries to decide whether to prompt before terminating — so the alert and
+    /// the live spinner state never disagree. Finished-but-not-dismissed runs stay
+    /// in `runs` but are not counted (their `isRunning` is false).
+    var runningRunCount: Int { runs.values.filter { $0.isRunning }.count }
+
+    /// Convenience over `runningRunCount` for the common "is anything running?"
+    /// branch in the terminate hook.
+    var hasRunningRuns: Bool { runningRunCount > 0 }
+
     /// Launches a run for `taskID` in `projectPath` with `mode`. If a run for
     /// this task is already in flight, this is a no-op; otherwise it replaces any
     /// prior finished run for the task and starts a fresh one.

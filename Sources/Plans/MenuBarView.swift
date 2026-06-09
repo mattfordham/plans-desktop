@@ -50,7 +50,11 @@ struct MenuBarView: View {
             .buttonStyle(.plain)
 
             Button("Quit") {
-                NSApplication.shared.terminate(nil)
+                // Route through `NSApp.terminate`, so the delegate's
+                // `applicationShouldTerminate(_:)` quit-confirmation hook (#044)
+                // runs before the app exits. `NSApp` is the same shared
+                // application instance as `NSApplication.shared`.
+                NSApp.terminate(nil)
             }
             .buttonStyle(.plain)
         }
