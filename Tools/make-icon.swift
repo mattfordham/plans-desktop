@@ -2,13 +2,21 @@
 
 // make-icon.swift
 //
-// Standalone generator for the Plans app icon. Draws a full-bleed rounded-rect
-// ("squircle"-ish) icon with a diagonal blue → purple → pink gradient and a
+// Standalone generator for the Plans app icon. Draws a native-macOS-style
+// squircle tile filled with a single FLAT brand indigo (no gradient) and a
 // centered WHITE `list.bullet` SF Symbol glyph on top, matching the menu-bar
 // icon (see Sources/Plans/MenuBarLabel.swift).
 //
 // It renders one PNG per required macOS iconset size, using Apple's mandated
 // filenames, into an output directory (default `Plans.iconset` in the cwd).
+//
+// NOTE: The canonical drawing logic lives in Sources/Plans/IconRenderer.swift,
+// which the test suite exercises directly. This script is a standalone Swift
+// file run via `swift Tools/make-icon.swift` and CANNOT `import Plans` (it is
+// not linked against the library target), so the `drawIcon`/`renderPNG`
+// functions below intentionally MIRROR IconRenderer and MUST be kept in sync
+// with it. The flat-fill property is guarded by MakeIconTests against the
+// canonical IconRenderer.
 //
 // Usage:
 //   ./Tools/make-icon.swift [output-iconset-dir]
@@ -43,14 +51,9 @@ let entries: [IconEntry] = [
 
 // MARK: - Drawing
 
-/// Brand gradient stops — a subtle, dark diagonal blue → purple → pink.
-/// Muted/desaturated so the icon reads as a calm dark tile (like a native
-/// macOS app), with the white glyph providing the contrast.
-let gradientColors: [NSColor] = [
-    NSColor(srgbRed: 0.16, green: 0.20, blue: 0.38, alpha: 1.0), // dark blue
-    NSColor(srgbRed: 0.26, green: 0.18, blue: 0.36, alpha: 1.0), // dark purple
-    NSColor(srgbRed: 0.38, green: 0.18, blue: 0.32, alpha: 1.0), // dark pink/plum
-]
+/// The flat brand fill — modern indigo (≈ #5B6BF0). Mirrors
+/// `IconRenderer.brandColor`.
+let brandColor = NSColor(srgbRed: 0.357, green: 0.420, blue: 0.941, alpha: 1.0)
 
 /// Draws the full icon into the current graphics context for a given pixel size.
 func drawIcon(pixelSize: Int) {
@@ -73,13 +76,9 @@ func drawIcon(pixelSize: Int) {
     NSGraphicsContext.current?.saveGraphicsState()
     roundedPath.addClip()
 
-    // Diagonal gradient (45°) across the tile.
-    if let gradient = NSGradient(colors: gradientColors) {
-        gradient.draw(in: tileRect, angle: 45)
-    } else {
-        gradientColors.first?.setFill()
-        tileRect.fill()
-    }
+    // Flat single-color fill — no gradient.
+    brandColor.setFill()
+    tileRect.fill()
 
     NSGraphicsContext.current?.restoreGraphicsState()
 
