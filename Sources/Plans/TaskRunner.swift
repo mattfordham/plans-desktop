@@ -358,19 +358,61 @@ final class TaskRun {
         }
     }
 
+    /// The set of `done` stop reasons that mean the agent was cut short by a cap
+    /// (budget or turn limit) rather than finishing the task. When the run stops
+    /// for one of these, the work is incomplete and the task was left at
+    /// in-progress (it never reached review), so the UI must surface an error.
+    /// Centralized here as the single source of truth so it is unit-testable and
+    /// reused by `handle(_:)` (mirrors the `static`-helper pattern used for
+    /// `RunMode.usesDescription` / `TaskRunner.captureMode`).
+    nonisolated static let truncatingStopReasons: Set<String> = [
+        "error_max_budget_usd",
+        "error_max_turns",
+    ]
+
+    /// Maps a `done` event's `stopReason` to a human-readable error message when
+    /// the run was cut short by a budget/turn cap, or `nil` for a clean finish
+    /// (including a missing/normal reason). Pure so the truncation mapping is
+    /// unit-testable without spawning a process.
+    nonisolated static func truncationError(for stopReason: String?) -> String? {
+        guard let stopReason, truncatingStopReasons.contains(stopReason) else {
+            return nil
+        }
+        return "Run cut short — agent budget/turn cap hit before completion. "
+            + "The task was left at in-progress (it did not reach review). "
+            + "Re-run /plan-execute to resume, or raise the budget."
+    }
+
     /// Applies one decoded event to observable state: append to the log, and
     /// fan terminal events out to the dedicated `summary` / `error` fields.
     private func handle(_ event: RunEvent) {
         lines.append(LoggedEvent(event: event))
         switch event {
-        case let .done(costUsd, turns, _):
+        case let .done(costUsd, turns, stopReason):
+            // Always record the cost/turns summary. When the run was truncated
+            // by a cap (budget/turns), ALSO set `error` so the red banner fires
+            // above the summary — the task was stranded at in-progress and the
+            // user must re-run to finish it.
             summary = (costUsd: costUsd, turns: turns)
+            if let truncation = Self.truncationError(for: stopReason), error == nil {
+                error = truncation
+            }
         case let .error(message):
             error = message
         case .activity, .text:
             break
         }
     }
+
+    #if DEBUG
+    /// Test seam: feeds raw NDJSON bytes through the exact private ingest path
+    /// (`ingest` → `parseLines` → `handle`) so unit tests can exercise terminal
+    /// event handling without spawning a `Process`. DEBUG-only; not part of the
+    /// shipping API.
+    func ingestForTesting(_ ndjson: String) {
+        ingest(Data(ndjson.utf8))
+    }
+    #endif
 
     /// Finalizes a run when the process exits. Surfaces a generic error only if
     /// the process exited nonzero without any `done`/`error` line being seen

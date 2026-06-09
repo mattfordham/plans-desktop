@@ -125,6 +125,53 @@ final class TaskRunnerTests: XCTestCase {
         XCTAssertTrue(buffer.isEmpty)
     }
 
+    // MARK: - Budget/turn-cap truncation surfacing (task #041)
+
+    /// `TaskRun.truncationError(for:)` is the single source of truth for which
+    /// `done` stop reasons mean the run was cut short by a cap (so the red banner
+    /// must fire). The two truncating SDK subtypes (`error_max_budget_usd`,
+    /// `error_max_turns`) map to a non-nil message; a normal `end_turn` (and a
+    /// missing reason) map to nil so a clean run shows no error.
+    func testTruncationErrorMapsCapReasonsOnly() {
+        XCTAssertNotNil(TaskRun.truncationError(for: "error_max_budget_usd"))
+        XCTAssertNotNil(TaskRun.truncationError(for: "error_max_turns"))
+
+        XCTAssertNil(TaskRun.truncationError(for: "end_turn"))
+        XCTAssertNil(TaskRun.truncationError(for: nil))
+        XCTAssertNil(TaskRun.truncationError(for: "unknown"))
+    }
+
+    /// Driving a `done` event whose `stopReason` is a truncating cap value
+    /// through the run's ingest path sets BOTH `summary` (cost/turns, as today)
+    /// AND `error` (so `PlanDetailView` shows the red banner above the summary).
+    /// A normal `end_turn` done leaves `error` nil and only sets `summary`.
+    @MainActor
+    func testTruncatingDoneEventSurfacesErrorAndSummary() {
+        // Budget cap → error + summary.
+        let budgetRun = TaskRun(taskID: "041", mode: .execute)
+        budgetRun.ingestForTesting(
+            #"{"kind":"done","costUsd":19.5,"turns":42,"stopReason":"error_max_budget_usd"}"# + "\n"
+        )
+        XCTAssertNotNil(budgetRun.error)
+        XCTAssertEqual(budgetRun.summary?.turns, 42)
+
+        // Turn cap → error + summary.
+        let turnsRun = TaskRun(taskID: "041", mode: .execute)
+        turnsRun.ingestForTesting(
+            #"{"kind":"done","costUsd":2.0,"turns":99,"stopReason":"error_max_turns"}"# + "\n"
+        )
+        XCTAssertNotNil(turnsRun.error)
+        XCTAssertEqual(turnsRun.summary?.turns, 99)
+
+        // Normal completion → summary only, no error banner.
+        let cleanRun = TaskRun(taskID: "041", mode: .execute)
+        cleanRun.ingestForTesting(
+            #"{"kind":"done","costUsd":0.42,"turns":7,"stopReason":"end_turn"}"# + "\n"
+        )
+        XCTAssertNil(cleanRun.error)
+        XCTAssertEqual(cleanRun.summary?.turns, 7)
+    }
+
     // MARK: - "Work this task" button gating (segment 3)
 
     /// `PlanDetailView.canWork` is the pure predicate behind the Execute action's

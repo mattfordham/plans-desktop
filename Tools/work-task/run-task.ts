@@ -34,8 +34,10 @@
 import { query } from "@anthropic-ai/claude-agent-sdk";
 
 // Hard ceiling on spend. Under subscription (claude login) auth the real bound
-// is the plan; this ceiling is the safety net for API-key fallback.
-const MAX_BUDGET_USD = 5.0;
+// is the plan; this ceiling is the safety net for API-key fallback. Raised to
+// $20 so a single autonomous execute run is far less likely to hit the cap
+// mid-task and strand the task at in-progress before it reaches review.
+const MAX_BUDGET_USD = 20.0;
 
 /** What the spawned agent should do with the task. */
 type Mode =
