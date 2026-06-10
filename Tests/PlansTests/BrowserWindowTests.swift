@@ -732,6 +732,87 @@ final class BrowserWindowTests: XCTestCase {
         XCTAssertEqual(total, viewport, accuracy: 0.001)
     }
 
+    // MARK: - evenRowHeights (uniform, viewport-divided row heights #045)
+
+    /// All rows get an IDENTICAL height: the viewport minus chrome divided evenly
+    /// across the rows, ignoring any per-row content height.
+    func testEvenRowHeightsAllRowsEqualAndFillViewport() {
+        let viewport: CGFloat = 600
+        let spacing: CGFloat = 10
+        let padding: CGFloat = 16
+        let result = BrowserWindow.evenRowHeights(
+            rowCount: 3,
+            viewportHeight: viewport,
+            spacing: spacing, padding: padding, minRowHeight: 160
+        )
+        let chrome: CGFloat = 2 * padding + 2 * spacing // 52
+        let expected: CGFloat = (viewport - chrome) / 3
+        XCTAssertEqual(result.count, 3)
+        for h in result { XCTAssertEqual(h, expected, accuracy: 0.001) }
+        // Explicitly assert all three entries are identical to one another.
+        XCTAssertEqual(result[0], result[1], accuracy: 0.0001)
+        XCTAssertEqual(result[1], result[2], accuracy: 0.0001)
+    }
+
+    /// A viewport whose even share comfortably clears the floor keeps every row
+    /// above the floor (no clamping).
+    func testEvenRowHeightsStaysAboveFloorWhenRoomy() {
+        let floor: CGFloat = 160
+        let result = BrowserWindow.evenRowHeights(
+            rowCount: 2,
+            viewportHeight: 1000,
+            spacing: 16, padding: 16, minRowHeight: floor
+        )
+        for h in result { XCTAssertGreaterThan(h, floor) }
+    }
+
+    /// CLAMP TO FLOOR: a small viewport spread across many rows yields an even
+    /// share below the floor, so every row is pinned to EXACTLY the floor and the
+    /// ScrollView absorbs the overflow.
+    func testEvenRowHeightsClampsAllRowsToFloorWhenTight() {
+        let floor: CGFloat = 160
+        let result = BrowserWindow.evenRowHeights(
+            rowCount: 5,
+            viewportHeight: 400,
+            spacing: 16, padding: 16, minRowHeight: floor
+        )
+        XCTAssertEqual(result, [floor, floor, floor, floor, floor])
+    }
+
+    /// No rows → no heights, never a divide-by-zero.
+    func testEvenRowHeightsZeroRowsIsEmpty() {
+        let result = BrowserWindow.evenRowHeights(
+            rowCount: 0,
+            viewportHeight: 800,
+            spacing: 16, padding: 16, minRowHeight: 160
+        )
+        XCTAssertTrue(result.isEmpty)
+    }
+
+    /// An unmeasured viewport (height 0) falls back to one floor height per row.
+    func testEvenRowHeightsUnmeasuredViewportReturnsFloorPerRow() {
+        let floor: CGFloat = 160
+        let result = BrowserWindow.evenRowHeights(
+            rowCount: 3,
+            viewportHeight: 0,
+            spacing: 16, padding: 16, minRowHeight: floor
+        )
+        XCTAssertEqual(result, [floor, floor, floor])
+    }
+
+    /// A single row fills the whole viewport minus its outer padding (no inter-row
+    /// gutters), floored.
+    func testEvenRowHeightsSingleRowFillsViewport() {
+        let viewport: CGFloat = 700
+        let result = BrowserWindow.evenRowHeights(
+            rowCount: 1,
+            viewportHeight: viewport,
+            spacing: 16, padding: 16, minRowHeight: 160
+        )
+        XCTAssertEqual(result.count, 1)
+        XCTAssertEqual(result[0], viewport - 2 * 16, accuracy: 0.001)
+    }
+
     // MARK: - applyManualOrder (manual override ordering)
 
     /// Projects are ordered exactly as the `order` array dictates when every

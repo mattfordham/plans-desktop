@@ -37,19 +37,19 @@ struct BrowserWindow: View {
 
     /// The measured available content height of the card grid's scroll viewport
     /// (#033), fed by the same `GeometryReader` probe that measures the width.
-    /// Drives the content-driven, viewport-filling row heights in fit-to-screen
-    /// mode (#039) so the rows stretch/shrink to fill the screen. `0` until the
-    /// first layout pass measures it (fit mode then falls back to the cards'
-    /// natural row heights via `fitRowHeights` returning them unchanged).
+    /// Drives the uniform, viewport-filling row heights in fit-to-screen mode
+    /// (#039/#045) so the rows divide the screen evenly. `0` until the first layout
+    /// pass measures it (fit mode then falls back to one `fitRowMinHeight` per row
+    /// via `evenRowHeights` for a sensible first paint).
     @State private var gridHeight: CGFloat = 0
 
     /// #039: each card's NATURAL (content-hugging) height, keyed by project path,
     /// measured by a zero-impact `GeometryReader` in each rendered cell's
     /// `.background` (so reading the height can't feed back into the cell's own
-    /// layout). Fit-to-screen mode groups these into per-row max heights and then
-    /// stretches/shrinks the rows to fill the viewport via `fitRowHeights`. Cards
-    /// not yet measured fall back to `fitRowMinHeight` so first paint is reasonable.
-    /// Empty in scroll mode (the measurement only runs on the fit path).
+    /// layout). Fit-to-screen rows are now uniform (#045: `evenRowHeights`), so
+    /// these no longer drive row sizing; they remain measured to feed #038 internal
+    /// card clipping (and any future use). Cards not yet measured fall back to
+    /// `fitRowMinHeight`. Empty in scroll mode (the measurement only runs on fit).
     @State private var cardNaturalHeights: [String: CGFloat] = [:]
 
     /// #017: the project path of the card currently being hovered as a drop
@@ -196,6 +196,41 @@ struct BrowserWindow: View {
                 floored[i] ? minRowHeight : naturalRowHeights[i] * factor
             }
         }
+    }
+
+    /// Even-height sibling of `fitRowHeights` (#045): every row gets the SAME
+    /// height — the viewport divided evenly across the rows — rather than each row
+    /// being proportional to its tallest card. It DELIBERATELY IGNORES per-row
+    /// natural heights; the result is uniform.
+    ///
+    /// Uses the same chrome formula as `fitRowHeights` (`2 * padding + (rowCount -
+    /// 1) * spacing`) and the same clamp-to-floor overflow contract: when the even
+    /// share would fall below `minRowHeight`, every row is pinned to the floor and
+    /// the leftover overflow is left to the surrounding `ScrollView`.
+    ///
+    /// Returns `[]` when there are no rows, and `minRowHeight` for every row when
+    /// `viewportHeight <= 0` (not yet measured — a sensible first-paint fallback).
+    ///
+    /// Pure and total (no view-state reads), so it is directly unit-testable.
+    static func evenRowHeights(
+        rowCount: Int,
+        viewportHeight: CGFloat,
+        spacing: CGFloat,
+        padding: CGFloat,
+        minRowHeight: CGFloat
+    ) -> [CGFloat] {
+        guard rowCount > 0 else { return [] }
+        guard viewportHeight > 0 else {
+            return Array(repeating: minRowHeight, count: rowCount)
+        }
+        let chrome = 2 * padding + CGFloat(rowCount - 1) * spacing
+        let share = (viewportHeight - chrome) / CGFloat(rowCount)
+        // Content overflows: pin every row to the floor and let the ScrollView
+        // absorb the rest (mirrors fitRowHeights' clamp-to-floor).
+        guard share >= minRowHeight else {
+            return Array(repeating: minRowHeight, count: rowCount)
+        }
+        return Array(repeating: share, count: rowCount)
     }
 
     /// The minimum per-row height in fit-to-screen mode (#033/#039). Below this a
@@ -372,20 +407,24 @@ struct BrowserWindow: View {
         )
         return ScrollViewReader { proxy in
             ScrollView {
-                // #039: fit-to-screen mode renders CONTENT-DRIVEN, viewport-filling
-                // variable-height rows (`fitCardGrid`): each row is as tall as its
-                // tallest card's natural height, then all rows are stretched (or
-                // shrunk toward a floor) to fill the viewport so a light row stays
-                // short and a heavy row stays tall while the grid still fills the
-                // screen. Scroll mode keeps the masonry `variableCardGrid` so short
-                // cards leave no gap below them. Both share the same width-driven
-                // `columns` count and the same per-card chrome via `cardCell(for:)`.
+                // #039/#045: fit-to-screen mode renders UNIFORM-HEIGHT rows
+                // (`fitCardGrid` via `evenRowHeights`): the viewport is split evenly
+                // across the rows so every row is the SAME height regardless of its
+                // cards' natural content, and an over-full card clips/scrolls
+                // internally (#038) rather than stretching its row. Scroll mode keeps
+                // the masonry `variableCardGrid` so short cards leave no gap below
+                // them. Both share the same width-driven `columns` count and the same
+                // per-card chrome via `cardCell(for:)`.
                 if effectiveMode == .fit {
                     fitCardGrid(columns: columns)
                 } else {
                     variableCardGrid(columns: columns)
                 }
             }
+            // #045: stop the empty overscroll bounce when the grid fits the window
+            // (fit mode); a genuinely overflowing grid (clamp-to-floor / scroll mode)
+            // still scrolls normally.
+            .scrollBounceBehavior(.basedOnSize)
             // #017 step 4: a revert affordance lives in the window toolbar so the
             // user can leave the manual card order and return to the automatic
             // recency sort. The control is ALWAYS present (persistent toolbar) so
@@ -452,14 +491,13 @@ struct BrowserWindow: View {
         }
     }
 
-    /// The fit-to-screen card grid (#039): an explicit `VStack` of `HStack` ROWS
-    /// (a `LazyVGrid` can't give per-row heights), each `columns` cards wide in
-    /// reading order. Each row is sized to a CONTENT-DRIVEN height — the tallest
-    /// card's measured natural height for that row, then stretched up (when content
-    /// fits) or shrunk toward `fitRowMinHeight` (when it overflows) by
-    /// `fitRowHeights` so the rows together fill the viewport. A light row stays
-    /// short and a heavy row stays tall while the grid still fills the screen; once
-    /// even the floor overflows, the surrounding `ScrollView` absorbs the rest.
+    /// The fit-to-screen card grid (#039/#045): an explicit `VStack` of `HStack`
+    /// ROWS (a `LazyVGrid` can't give per-row heights), each `columns` cards wide
+    /// in reading order. Every row is given the SAME height — the viewport divided
+    /// evenly across the rows by `evenRowHeights` — so the grid fills the screen
+    /// with uniform rows rather than rows proportional to their tallest card. Once
+    /// the even share would fall below `fitRowMinHeight` the rows clamp to the
+    /// floor and the surrounding `ScrollView` absorbs the overflow.
     ///
     /// Lazy-ness is unnecessary here: by definition fit mode keeps content on (or
     /// near) one screen. Cards report their natural heights via the hidden
@@ -475,17 +513,11 @@ struct BrowserWindow: View {
         // a stable snapshot a stale index would trap ("Index out of range").
         let projects = sortedProjects
         let rows = Self.rowIndices(count: projects.count, columns: columns)
-        let naturalRowHeights = rows.map { row in
-            // The row's natural height is its TALLEST card's measured height; an
-            // as-yet-unmeasured card contributes the floor so the row isn't degenerate.
-            // The `< projects.count` guard is belt-and-braces against a stale index.
-            row.map { $0 < projects.count
-                ? (cardNaturalHeights[projects[$0].projectPath] ?? Self.fitRowMinHeight)
-                : Self.fitRowMinHeight }
-                .max() ?? Self.fitRowMinHeight
-        }
-        let finalHeights = Self.fitRowHeights(
-            naturalRowHeights: naturalRowHeights,
+        // #045: uniform rows — the viewport divided evenly across the rows. We no
+        // longer derive per-row natural heights here; the measurement layer below
+        // still populates `cardNaturalHeights` for #038 internal card clipping.
+        let finalHeights = Self.evenRowHeights(
+            rowCount: rows.count,
             viewportHeight: gridHeight,
             spacing: Self.gridSpacing,
             padding: Self.gridPadding,
