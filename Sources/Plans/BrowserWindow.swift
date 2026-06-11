@@ -30,6 +30,14 @@ struct BrowserWindow: View {
     /// The padding around the grid content inside the scroll view.
     static let gridPadding: CGFloat = 16
 
+    /// Extra trailing inset (#046) added on top of `gridPadding` so the rightmost
+    /// cards — and their per-row action buttons (`RowActionGlyph`) — clear the
+    /// macOS overlay scroller, which floats over the trailing edge of the scroll
+    /// content and would otherwise sit on top of those buttons. ~15pt is the
+    /// nominal overlay-scroller width. Shared with `ProjectCard`'s inner fit-mode
+    /// scroll view so both scrollers clear the same chrome.
+    static let scrollerClearance: CGFloat = 15
+
     /// The measured available content width of the card grid's scroll viewport,
     /// fed by a `GeometryReader` width probe (see `cardGrid`). Drives the
     /// responsive column count. `0` until the first layout pass measures it.
@@ -553,6 +561,10 @@ struct BrowserWindow: View {
             }
         }
         .padding(Self.gridPadding)
+        // #046: extra trailing inset so the rightmost cards' action buttons clear
+        // the macOS overlay scroller. Applied on top of the symmetric gridPadding
+        // so only the trailing edge gains the extra space.
+        .padding(.trailing, Self.scrollerClearance)
         // #039: a hidden, parallel layout of the SAME cards at their NATURAL height
         // (no row-height frame), at the identical column widths, measuring each
         // card's content height into `cardNaturalHeights`. It lives in `.background`
@@ -674,6 +686,9 @@ struct BrowserWindow: View {
             }
         }
         .padding(Self.gridPadding)
+        // #046: match the fit grid — extra trailing inset so the rightmost cards'
+        // action buttons clear the macOS overlay scroller.
+        .padding(.trailing, Self.scrollerClearance)
     }
 
     /// The shared per-card chrome used by BOTH the fit (`fitCardGrid`) and the

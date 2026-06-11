@@ -140,6 +140,11 @@ struct ProjectCard: View {
                         scrollableContent
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)
+                    // #046: trailing inset so the per-row action buttons clear the
+                    // card-internal overlay scroller (this inner ScrollView only
+                    // exists in fit-to-screen mode). Reuses the shared clearance
+                    // constant so it tracks the outer grid's value.
+                    .padding(.trailing, BrowserWindow.scrollerClearance)
                 }
             } else {
                 scrollableContent
