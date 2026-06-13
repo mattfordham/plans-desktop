@@ -258,11 +258,19 @@ struct NewPlanModal: View {
         let trimmed = trimmedText
         guard !trimmed.isEmpty else { return }
         modalLog.notice("modal Capture submitted: project=\(self.projectPath, privacy: .public) execute=\(self.execute) elaborate=\(self.elaborate)")
+        // Snapshot the project's CURRENT task ids as the reconciliation baseline,
+        // so the run-finish hand-off (#051) can detect the genuinely-new id once
+        // plans-cc writes the captured plan and dismiss the spinner row in the
+        // same turn the new plan row appears. Empty when this project isn't loaded.
+        let knownTaskIDs = Set(
+            store.projects.first { $0.projectPath == projectPath }?.tasks.map(\.id) ?? []
+        )
         runner.capture(
             projectPath: projectPath,
             description: trimmed,
             execute: execute,
-            elaborate: elaborate
+            elaborate: elaborate,
+            knownTaskIDs: knownTaskIDs
         )
         store.clearDraft(for: projectPath)
         dismiss()

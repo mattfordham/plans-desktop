@@ -186,6 +186,36 @@ final class TaskRun {
     /// operate on an existing task id instead).
     let description: String?
 
+    /// The project path this run operates in. Set for description-driven capture
+    /// runs so `TaskRunner.reconcileFinishedCaptures(against:)` can locate the
+    /// matching `ProjectTasks` and detect whether a brand-new task id appeared in
+    /// that project since the run began. `nil` for existing-task runs (which are
+    /// keyed by a real task id and need no reconciliation).
+    let projectPath: String?
+
+    /// The set of task ids that already existed in `projectPath` at the moment
+    /// this capture run began. Reconciliation's matching anchor is "a NEW task id
+    /// appeared in this project since the run began" — i.e. a task id present now
+    /// but absent from this baseline — which is robust against back-to-back
+    /// captures and plans-cc rewriting a title (it does NOT match on
+    /// description/title strings). Empty for non-capture runs.
+    let baselineTaskIDs: Set<String>
+
+    /// Bounded fallback counter for reconciliation. A finished capture that never
+    /// observes a new task id (e.g. the underlying run failed, or plans-cc reused
+    /// an id) must not stay pinned forever. Each reconcile pass that fails to find
+    /// a match increments this; once it reaches `maxReconcileAttempts` the run is
+    /// dismissed anyway so the spinner row can't get stuck. Internal mutable
+    /// bookkeeping, not part of the observable UI surface.
+    var reconcileAttempts = 0
+
+    /// The bounded-fallback ceiling: after this many fruitless reconcile passes a
+    /// finished capture is dismissed even without a confirmed new task id. Small
+    /// by design — reconciliation runs once per run-finish (one extra pass per
+    /// subsequent finish), so a handful of attempts is enough to cover a slow
+    /// filesystem flush while still guaranteeing the row clears.
+    static let maxReconcileAttempts = 3
+
     /// True from the moment the run is accepted until the process terminates (or
     /// `stop()` is called). Drives the progress sheet and per-row inline status.
     private(set) var isRunning = false
@@ -219,10 +249,13 @@ final class TaskRun {
     /// drop it from its active map and trigger a store reload.
     private var onFinish: (() -> Void)?
 
-    init(taskID: String, mode: RunMode, description: String? = nil) {
+    init(taskID: String, mode: RunMode, description: String? = nil,
+         projectPath: String? = nil, baselineTaskIDs: Set<String> = []) {
         self.taskID = taskID
         self.mode = mode
         self.description = description
+        self.projectPath = projectPath
+        self.baselineTaskIDs = baselineTaskIDs
     }
 
     // MARK: - Lifecycle
@@ -563,16 +596,29 @@ final class TaskRunner {
     /// filters on `captureKey(projectPath:) + ":"` to gather a project's runs.
     nonisolated static func captureKey(projectPath: String) -> String { "capture:" + projectPath }
 
-    /// The running description-driven runs (capture / executeYolo) for
-    /// `projectPath`, in a stable order. Matches the per-run keys built by
-    /// `capture(...)` by filtering on the `captureKey(projectPath:) + ":"` prefix
-    /// — the trailing `:` separator ensures a different project whose path is a
-    /// string prefix of this one (e.g. `/a` vs `/ab`) is NOT matched. Sorted by
-    /// `taskID` so the render order is stable across polls.
+    /// The visible description-driven capture/executeYolo rows for `projectPath`,
+    /// in a stable order. Matches the per-run keys built by `capture(...)` by
+    /// filtering on the `captureKey(projectPath:) + ":"` prefix — the trailing `:`
+    /// separator ensures a different project whose path is a string prefix of this
+    /// one (e.g. `/a` vs `/ab`) is NOT matched. Sorted by `taskID` so the render
+    /// order is stable across polls.
+    ///
+    /// Hand-off visibility (task #051): this returns EVERY capture run still
+    /// present in `runs` for the project — both in-flight runs AND
+    /// finished-but-not-yet-reconciled ones — NOT just `isRunning` runs. The
+    /// spinner row must persist from process exit until reconciliation confirms
+    /// the new plan row has appeared and removes the run from `runs` via
+    /// `dismiss(taskID:)`. Because reconciliation (and the manual popover-dismiss
+    /// path) is what removes the run from the map, "row visible" is exactly "run
+    /// still in `runs`", so the spinner-out / plan-row-in transition is atomic.
+    /// An errored capture stays visible too, but never indefinitely: the bounded
+    /// reconcile fallback (`maxReconcileAttempts`) and the manual popover-dismiss
+    /// both clear it. The `captureRow` UI shows an unconditional `ProgressView`,
+    /// which reads as "still creating" for the brief hand-off window.
     func runningCaptures(projectPath: String) -> [TaskRun] {
         let prefix = Self.captureKey(projectPath: projectPath) + ":"
         return runs.values
-            .filter { $0.taskID.hasPrefix(prefix) && $0.isRunning }
+            .filter { $0.taskID.hasPrefix(prefix) }
             .sorted { $0.taskID < $1.taskID }
     }
 
@@ -592,10 +638,17 @@ final class TaskRunner {
     /// or serialized, so multiple can run back-to-back/concurrently for one
     /// project. Reuses the same start / finish reload path as `run(...)`, so each
     /// new task surfaces on the next store reload.
-    func capture(projectPath: String, description: String, execute: Bool = false, elaborate: Bool = false) {
+    /// `knownTaskIDs` is the set of task ids already present in `projectPath` at
+    /// submission time, captured by the caller from the current `store.projects`.
+    /// It becomes the run's reconciliation baseline so the hand-off can detect a
+    /// genuinely NEW task id once plans-cc writes the captured plan. Defaulted to
+    /// empty to keep existing call sites compiling; an empty baseline simply means
+    /// "any task id present at reconcile time counts as new".
+    func capture(projectPath: String, description: String, execute: Bool = false, elaborate: Bool = false, knownTaskIDs: Set<String> = []) {
         let key = Self.captureKey(projectPath: projectPath) + ":" + UUID().uuidString
         let mode = Self.captureMode(execute: execute, elaborate: elaborate)
-        let taskRun = TaskRun(taskID: key, mode: mode, description: description)
+        let taskRun = TaskRun(taskID: key, mode: mode, description: description,
+                              projectPath: projectPath, baselineTaskIDs: knownTaskIDs)
         runs[key] = taskRun
         taskRun.start(projectPath: projectPath) { [weak self] in
             self?.onAnyRunFinished?()
@@ -623,4 +676,88 @@ final class TaskRunner {
             runs[taskID] = nil
         }
     }
+
+    // MARK: - Hand-off reconciliation
+
+    /// The pure matching core behind `reconcileFinishedCaptures(against:)`,
+    /// extracted as a `static func` so the anchor + bounded-fallback logic is
+    /// unit-testable WITHOUT spawning a `node` process (the live `runs` map can
+    /// only be populated by `capture()`/`run()`, which spawn). Given the current
+    /// runs and the freshly-reloaded projects, it returns the set of run task ids
+    /// that should be dismissed — and mutates each examined finished capture's
+    /// `reconcileAttempts` so the caller's bounded fallback advances.
+    ///
+    /// Matching anchor (per task #051): a finished capture is resolved once its
+    /// project contains a task id that was NOT in the run's `baselineTaskIDs` (the
+    /// ids known when the run began) — i.e. a genuinely NEW id appeared. This is
+    /// deliberately id-based, not description/title-based: title matching is
+    /// race-prone for back-to-back captures and breaks when plans-cc rewrites the
+    /// captured title. Each capture carries its own per-run baseline, so two
+    /// back-to-back captures for one project each resolve against the ids they
+    /// individually started with and never cross-dismiss.
+    ///
+    /// Bounded fallback: a finished capture that finds no new id has its
+    /// `reconcileAttempts` incremented; once it reaches `maxReconcileAttempts` it
+    /// is dismissed anyway so the spinner row can never stay pinned forever (e.g.
+    /// the run failed before writing a plan, or the id set didn't change).
+    ///
+    /// Still-running runs and non-capture runs (no `projectPath`) are ignored.
+    static func taskIDsToDismiss(
+        runs: [String: TaskRun],
+        projects: [ProjectTasks]
+    ) -> Set<String> {
+        var toDismiss: Set<String> = []
+        // Index current task ids by project path for O(1) lookup per run.
+        var idsByProject: [String: Set<String>] = [:]
+        for project in projects {
+            idsByProject[project.projectPath] = Set(project.tasks.map(\.id))
+        }
+
+        for run in runs.values {
+            // Only finished description-driven capture runs participate; they are
+            // the ones whose spinner row we must hand off to a real plan row.
+            guard !run.isRunning, let projectPath = run.projectPath else { continue }
+
+            let currentIDs = idsByProject[projectPath] ?? []
+            let newIDs = currentIDs.subtracting(run.baselineTaskIDs)
+            if !newIDs.isEmpty {
+                // A genuinely new task id appeared — the captured plan is present.
+                toDismiss.insert(run.taskID)
+                continue
+            }
+
+            // No new id yet: advance the bounded fallback and dismiss once the
+            // ceiling is hit so the row can't get stuck.
+            run.reconcileAttempts += 1
+            if run.reconcileAttempts >= TaskRun.maxReconcileAttempts {
+                toDismiss.insert(run.taskID)
+            }
+        }
+        return toDismiss
+    }
+
+    /// Reconciles finished capture spinner rows against the freshly-reloaded
+    /// `projects`, dismissing each capture whose new plan has now appeared (or
+    /// whose bounded fallback has elapsed). Called from the run-finish hand-off
+    /// AFTER `store.reload()`, in the same main-actor turn, so SwiftUI paints one
+    /// atomic transition (spinner out, plan row in) instead of two frames.
+    /// `dismiss(taskID:)` stays idempotent — it only removes a finished, present
+    /// run — so a still-running or already-removed run is a safe no-op.
+    func reconcileFinishedCaptures(against projects: [ProjectTasks]) {
+        let toDismiss = Self.taskIDsToDismiss(runs: runs, projects: projects)
+        for taskID in toDismiss {
+            dismiss(taskID: taskID)
+        }
+    }
+
+    #if DEBUG
+    /// Test seam: inserts a pre-built `TaskRun` directly into the otherwise
+    /// `private(set)` `runs` map so reconciliation can be unit-tested without
+    /// spawning a `node` process. DEBUG-only; not part of the shipping API.
+    /// (The pure `taskIDsToDismiss(runs:projects:)` helper is the primary test
+    /// surface; this exists for tests that prefer to drive the instance method.)
+    func ingestRunForTesting(_ run: TaskRun) {
+        runs[run.taskID] = run
+    }
+    #endif
 }

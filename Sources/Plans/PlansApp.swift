@@ -26,8 +26,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NSApp.setActivationPolicy(.regular)
         store.startPolling()
         // Whenever any run finishes, reload so the worked task's new status
-        // surfaces immediately rather than waiting for the next 5s poll tick.
-        taskRunner.onAnyRunFinished = { [weak store] in store?.reload() }
+        // surfaces immediately rather than waiting for the next 5s poll tick,
+        // THEN reconcile finished capture spinners against the just-populated
+        // projects — in this same main-actor turn — so a "creating" spinner row
+        // hands off to the new plan row in one atomic SwiftUI transition instead
+        // of vanishing a frame before the plan appears (#051). Order matters:
+        // reload first, reconcile against the fresh `store.projects` second.
+        taskRunner.onAnyRunFinished = { [weak store, weak taskRunner] in
+            store?.reload()
+            if let store {
+                taskRunner?.reconcileFinishedCaptures(against: store.projects)
+            }
+        }
     }
 
     /// Guards quit when task spinners are still running (#044). AppKit calls this
