@@ -96,4 +96,16 @@ final class ProjectCardTests: XCTestCase {
     func testShouldNotScrollContentWhenHeightUnconstrained() {
         XCTAssertFalse(ProjectCard.shouldScrollContent(constrainedHeight: nil))
     }
+
+    // MARK: - finderURL (tap project name → reveal project in Finder, #047)
+
+    /// #047: tapping the project name reveals the project root in Finder via
+    /// `NSWorkspace.activateFileViewerSelecting`. The `finderURL(for:)` helper is
+    /// the pure, view-free seam that builds that URL from `project.projectPath`;
+    /// it must produce a file URL whose `path` round-trips the project path.
+    func testFinderURLBuildsFileURLForProjectPath() {
+        let url = ProjectCard.finderURL(for: "/tmp/example")
+        XCTAssertTrue(url.isFileURL)
+        XCTAssertEqual(url.path, "/tmp/example")
+    }
 }

@@ -1,4 +1,5 @@
 import SwiftUI
+import AppKit
 import OSLog
 
 private let cardLog = Logger(subsystem: "com.plans.desktop", category: "ProjectCard")
@@ -19,8 +20,9 @@ private let cardLog = Logger(subsystem: "com.plans.desktop", category: "ProjectC
 ///   `TaskStatusIndicator` (blocked takes precedence), the short 3-char task id,
 ///   an optional `[type.label]` tag (`TaskType.label`), and the title. Tapping a
 ///   row opens that plan's detail in a separate window (`openWindow(id:value:)`,
-///   §011) — it no longer sets a selection; the header/project is NOT a tap
-///   target. When there are no active plans the body shows a muted empty state.
+///   §011) — it no longer sets a selection. Tapping the header project name
+///   reveals the project root in Finder (#047). When there are no active plans
+///   the body shows a muted empty state.
 ///
 /// The card is strictly READ-ONLY (§2): it only reads from the injected
 /// `ProjectTasks` and opens a detail window on tap. It has NO toggles, status
@@ -116,6 +118,15 @@ struct ProjectCard: View {
         constrainedHeight != nil
     }
 
+    /// #047: the file URL to reveal when the project name is tapped — the project
+    /// root directory itself. A pure, view-free seam (mirroring
+    /// `PlanDetailView.taskFileURL`) so the URL construction is unit-tested as a
+    /// plain value, while the header's `onTapGesture` hands the result to
+    /// `NSWorkspace.activateFileViewerSelecting` to reveal it in Finder.
+    static func finderURL(for projectPath: String) -> URL {
+        URL(fileURLWithPath: projectPath)
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             header
@@ -206,13 +217,26 @@ struct ProjectCard: View {
     // MARK: - Header (project name + per-status count summary)
 
     /// The card header: the project name plus the per-status count summary.
-    /// Not a tap target — only the plan rows below are clickable.
+    /// Tapping the project name reveals the project root in Finder (#047);
+    /// otherwise only the plan rows below are clickable.
     private var header: some View {
         HStack(spacing: 8) {
             Text(project.projectName)
                 .font(.headline)
                 .lineLimit(1)
                 .layoutPriority(1)
+                // #047: tapping the project name reveals the project root in
+                // Finder. `contentShape(Rectangle())` makes the full text bounds
+                // hit-test (not just the glyph pixels); mirrors the
+                // `NSWorkspace.activateFileViewerSelecting` reveal pattern in
+                // `PlanDetailView`.
+                .contentShape(Rectangle())
+                .onTapGesture {
+                    NSWorkspace.shared.activateFileViewerSelecting(
+                        [Self.finderURL(for: project.projectPath)]
+                    )
+                }
+                .help("Open project in Finder")
 
             // Capture / execute control: placed immediately right of the project
             // name. "+" opens the popover and stays put so back-to-back captures
