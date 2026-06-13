@@ -142,6 +142,13 @@ struct NewPlanModal: View {
             refreshProjectsSnapshot()
             loadDraft(for: projectPath)
         }
+        // Flush any pending debounced draft write when the sheet goes away (#052)
+        // — e.g. Cancel — so the last keystroke before dismissal is persisted and
+        // restored on reopen. A no-op when nothing is pending (submit/clear
+        // already cancelled their pending writes), so this never double-writes.
+        .onDisappear {
+            store.flushPendingDraft()
+        }
         // Refresh the picker's snapshot ONLY when the SET of project paths changes
         // (project added/removed/linked), keyed on the value-equatable path list —
         // NOT the whole `[ProjectTasks]` array. Routine 5s re-parses that keep the
@@ -151,8 +158,11 @@ struct NewPlanModal: View {
         }
         .onChange(of: projectPath) { _, newPath in
             // Switching projects swaps to THAT project's saved draft rather than
-            // carrying the old fields over. Suppress the field-change persistence
-            // while the swap loads (see `isSwitchingProject`).
+            // carrying the old fields over. Flush any pending debounced write for
+            // the OUTGOING project first (#052) so an in-flight keystroke isn't
+            // lost, then load the new project's draft. Suppress the field-change
+            // persistence while the swap loads (see `isSwitchingProject`).
+            store.flushPendingDraft()
             loadDraft(for: newPath)
         }
         .onChange(of: text) { _, _ in persistDraft() }
@@ -233,10 +243,15 @@ struct NewPlanModal: View {
 
     /// Persists the current fields as `projectPath`'s draft, unless a project
     /// switch is mid-swap (in which case the change came from loading, not the
-    /// user, and must not overwrite the new project's draft).
+    /// user, and must not overwrite the new project's draft). Uses the DEBOUNCED
+    /// persistence path (#052) so rapid keystrokes coalesce into at most one
+    /// encode+write per typing pause instead of the per-character synchronous
+    /// UserDefaults write that caused the editor lag. Edge paths flush/cancel the
+    /// pending write: `submit`/`clear` via their `setDraft`/`clearDraft` calls,
+    /// project switch and dismissal via `flushPendingDraft`.
     private func persistDraft() {
         guard !isSwitchingProject else { return }
-        store.setDraft(
+        store.setDraftDebounced(
             PlansStore.CaptureDraft(text: text, execute: execute, elaborate: elaborate),
             for: projectPath
         )

@@ -186,6 +186,22 @@ final class PlansStore {
     /// `@ObservationIgnored` because the timer itself is not observable UI state.
     @ObservationIgnored private var pollTimer: Timer?
 
+    /// The in-flight, not-yet-persisted capture draft scheduled by
+    /// `setDraftDebounced`, as a `(projectPath, draft)` pair, or `nil` when no
+    /// debounced write is pending (#052). Holds the latest keystroke state so
+    /// `draft(for:)` reflects it before the debounce fires; committed to
+    /// `captureDrafts` (the single encode/write sink) when the timer fires or
+    /// `flushPendingDraft()` is called. `@ObservationIgnored` because it is a
+    /// transient persistence buffer, not observable UI state.
+    @ObservationIgnored private var pendingDraft: (path: String, draft: CaptureDraft)?
+
+    /// The cancellable work item that commits `pendingDraft` after the debounce
+    /// interval (#052), or `nil` when nothing is scheduled. Cancelled and
+    /// replaced on each `setDraftDebounced` call (the coalescing mechanism) and
+    /// cancelled outright by `flushPendingDraft`/`setDraft`/`clearDraft`.
+    /// `@ObservationIgnored` because the timer is not observable UI state.
+    @ObservationIgnored private var pendingDraftWorkItem: DispatchWorkItem?
+
     /// Defaults to the real readers/writer and `.standard` UserDefaults. Inject
     /// fixtures-backed readers/writer (all pointed at the same temp registry URL)
     /// and an isolated `UserDefaults(suiteName:)` in tests. The persisted
@@ -222,23 +238,88 @@ final class PlansStore {
         }
     }
 
-    /// Returns the saved capture draft for `projectPath`, or `nil` when none has
-    /// been persisted (#031). Pure read of the in-memory `captureDrafts` map.
+    /// Returns the latest capture draft for `projectPath`, or `nil` when none
+    /// exists (#031). Returns the in-flight `pendingDraft` (a debounced write not
+    /// yet committed, #052) when its path matches, so the New Plan sheet never
+    /// reads a stale value between a keystroke and the debounce fire; otherwise
+    /// reads the persisted in-memory `captureDrafts` map.
     func draft(for projectPath: String) -> CaptureDraft? {
-        captureDrafts[projectPath]
+        if let pending = pendingDraft, pending.path == projectPath {
+            return pending.draft
+        }
+        return captureDrafts[projectPath]
     }
 
     /// Stores `draft` as the capture draft for `projectPath` (#031), replacing
     /// any prior draft. Triggers persistence via the `captureDrafts` setter.
-    /// Never writes `.plans/` (§2) — UserDefaults is the only sink.
+    /// Cancels any pending debounced write (#052) so a stale in-flight write
+    /// can't later overwrite this authoritative value. Never writes `.plans/`
+    /// (§2) — UserDefaults is the only sink.
     func setDraft(_ draft: CaptureDraft, for projectPath: String) {
+        cancelPendingDraft()
         captureDrafts[projectPath] = draft
     }
 
+    /// Stores `draft` as `projectPath`'s capture draft via a debounced write
+    /// (#052): rapid successive calls within `interval` coalesce into at most one
+    /// encode+write per typing pause, instead of the per-keystroke synchronous
+    /// `JSONEncoder().encode` + UserDefaults write that caused the New Plan
+    /// editor typing lag. The latest value is buffered in `pendingDraft` (so
+    /// `draft(for:)` reflects it immediately) and a `DispatchWorkItem` scheduled
+    /// on the main run loop commits it to `captureDrafts` — the single
+    /// encode/write sink — when the pause elapses. Each call cancels and replaces
+    /// the prior scheduled work item. Never writes `.plans/` (§2).
+    func setDraftDebounced(
+        _ draft: CaptureDraft,
+        for projectPath: String,
+        interval: TimeInterval = 0.3
+    ) {
+        pendingDraftWorkItem?.cancel()
+        pendingDraft = (path: projectPath, draft: draft)
+        // `self` is captured strongly: the store is app-lifetime (same rationale
+        // as the poll timer) so there is no meaningful retain cycle to break.
+        let workItem = DispatchWorkItem { [self] in
+            commitPendingDraft()
+        }
+        pendingDraftWorkItem = workItem
+        DispatchQueue.main.asyncAfter(deadline: .now() + interval, execute: workItem)
+    }
+
+    /// Commits any pending debounced draft (#052) to `captureDrafts` immediately,
+    /// cancelling the scheduled timer. Call on the edges that must not lose an
+    /// in-flight keystroke: submit, sheet dismissal, and project switch. A no-op
+    /// when nothing is pending.
+    func flushPendingDraft() {
+        pendingDraftWorkItem?.cancel()
+        pendingDraftWorkItem = nil
+        commitPendingDraft()
+    }
+
+    /// Writes the buffered `pendingDraft` (if any) into `captureDrafts` — the
+    /// single encode/write sink — and clears the buffer (#052). Shared by the
+    /// debounce timer fire and `flushPendingDraft`.
+    private func commitPendingDraft() {
+        guard let pending = pendingDraft else { return }
+        pendingDraft = nil
+        captureDrafts[pending.path] = pending.draft
+    }
+
+    /// Cancels and discards any pending debounced draft without persisting it
+    /// (#052), so a stale in-flight write can't resurrect a cleared/overwritten
+    /// draft after its timer would have fired.
+    private func cancelPendingDraft() {
+        pendingDraftWorkItem?.cancel()
+        pendingDraftWorkItem = nil
+        pendingDraft = nil
+    }
+
     /// Removes the saved capture draft for `projectPath` (#031), if any. Called
-    /// after a successful submit or an explicit "Clear". Triggers persistence
-    /// via the `captureDrafts` setter; never writes `.plans/` (§2).
+    /// after a successful submit or an explicit "Clear". Cancels any pending
+    /// debounced write (#052) first so a stale in-flight write can't resurrect
+    /// the cleared draft. Triggers persistence via the `captureDrafts` setter;
+    /// never writes `.plans/` (§2).
     func clearDraft(for projectPath: String) {
+        cancelPendingDraft()
         captureDrafts.removeValue(forKey: projectPath)
     }
 
