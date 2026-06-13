@@ -258,21 +258,88 @@ struct PlanDetailView: View {
             if section.heading == "How" {
                 howChecklist(section.body)
             } else {
-                markdownBody(section.body)
+                markdownBlockView(section.body)
             }
         }
     }
 
-    /// Renders a section body as markdown, one paragraph at a time. The body is
-    /// split on blank lines; each paragraph is parsed with
-    /// `AttributedString(markdown:)`, falling back to plain `Text` when parsing
-    /// fails or yields nil. Performs no writes — purely presentational.
+    /// Renders a section body as block-level markdown: paragraphs, bullet /
+    /// numbered lists, fenced code, blockquotes, and sub-headings, in document
+    /// order. Block structure is recovered by the pure `MarkdownBlockRenderer`;
+    /// inline markdown within each block's text is still applied via
+    /// `markdownParagraph(_:)`. Purely presentational — performs no writes.
     @ViewBuilder
-    private func markdownBody(_ body: String) -> some View {
+    private func markdownBlockView(_ body: String) -> some View {
         VStack(alignment: .leading, spacing: 8) {
-            ForEach(Array(BrowserViewModel.paragraphs(body).enumerated()), id: \.offset) { _, paragraph in
-                markdownParagraph(paragraph)
+            ForEach(Array(MarkdownBlockRenderer.parse(body).enumerated()), id: \.offset) { _, block in
+                renderBlock(block)
             }
+        }
+    }
+
+    /// Renders a single parsed `MarkdownBlock` with restrained, readable styling.
+    @ViewBuilder
+    private func renderBlock(_ block: MarkdownBlock) -> some View {
+        switch block {
+        case let .paragraph(text):
+            markdownParagraph(text)
+
+        case let .heading(level, text):
+            Text(text)
+                .font(headingFont(forLevel: level))
+                .padding(.top, 2)
+
+        case let .bulletList(items):
+            VStack(alignment: .leading, spacing: 4) {
+                ForEach(Array(items.enumerated()), id: \.offset) { _, item in
+                    HStack(alignment: .firstTextBaseline, spacing: 6) {
+                        Text("•")
+                        markdownParagraph(item)
+                    }
+                    .padding(.leading, 4)
+                }
+            }
+
+        case let .numberedList(items):
+            VStack(alignment: .leading, spacing: 4) {
+                ForEach(Array(items.enumerated()), id: \.offset) { index, item in
+                    HStack(alignment: .firstTextBaseline, spacing: 6) {
+                        Text("\(index + 1).")
+                            .monospacedDigit()
+                        markdownParagraph(item)
+                    }
+                    .padding(.leading, 4)
+                }
+            }
+
+        case let .codeBlock(code):
+            Text(code)
+                .font(.system(.body, design: .monospaced))
+                .textSelection(.enabled)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(8)
+                .background(Color(nsColor: .textBackgroundColor))
+                .clipShape(RoundedRectangle(cornerRadius: 4))
+
+        case let .blockquote(text):
+            HStack(spacing: 8) {
+                Rectangle()
+                    .fill(.secondary)
+                    .frame(width: 3)
+                markdownParagraph(text)
+                    .foregroundStyle(.secondary)
+            }
+            .padding(.leading, 2)
+        }
+    }
+
+    /// The emphasized font for a sub-heading, scaling down with nesting depth:
+    /// level 1/2 read as section-ish, level 3+ as a smaller bold subhead.
+    private func headingFont(forLevel level: Int) -> Font {
+        switch level {
+        case 1: return .title3.bold()
+        case 2: return .headline
+        default: return .subheadline.bold()
         }
     }
 
