@@ -99,13 +99,15 @@ final class ProjectCardTests: XCTestCase {
 
     // MARK: - finderURL (tap project name → reveal project in Finder, #047)
 
-    /// #047: tapping the project name reveals the project root in Finder via
-    /// `NSWorkspace.activateFileViewerSelecting`. The `finderURL(for:)` helper is
-    /// the pure, view-free seam that builds that URL from `project.projectPath`;
-    /// it must produce a file URL whose `path` round-trips the project path.
-    func testFinderURLBuildsFileURLForProjectPath() {
+    /// #047: tapping the project name reveals the project's nested `.plans`
+    /// directory in Finder via `NSWorkspace.activateFileViewerSelecting`. The
+    /// `finderURL(for:)` helper is the pure, view-free seam that builds that URL
+    /// from `project.projectPath`; it must produce a file URL pointing at the
+    /// `.plans` subdirectory of the project path.
+    func testFinderURLBuildsFileURLForPlansDirectory() {
         let url = ProjectCard.finderURL(for: "/tmp/example")
         XCTAssertTrue(url.isFileURL)
-        XCTAssertEqual(url.path, "/tmp/example")
+        XCTAssertEqual(url.path, "/tmp/example/.plans")
+        XCTAssertEqual(url.lastPathComponent, ".plans")
     }
 }
