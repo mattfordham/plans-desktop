@@ -198,6 +198,19 @@ final class PlansStore {
     /// `@ObservationIgnored` because the timer itself is not observable UI state.
     @ObservationIgnored private var pollTimer: Timer?
 
+    /// Invoked at the END of every `reload()` (synchronous task-parse pass),
+    /// after `projects` has been repopulated — on BOTH the run-finish hand-off
+    /// path AND every 5s poll tick. The app wires this to
+    /// `TaskRunner.reconcileFinishedCaptures(against:)` so a finished capture's
+    /// spinner row is dismissed as soon as its new plan file appears in
+    /// `projects`, regardless of which reload surfaced it (#051). Without a
+    /// poll-driven reconcile, a capture whose plan lands AFTER the run-finish
+    /// reconcile pass (a filesystem-flush race) would be picked up by the next
+    /// poll for rendering but never reconciled, orphaning the spinner alongside
+    /// the real plan row. `@ObservationIgnored` — it is a wiring seam, not UI
+    /// state. Set once at injection; not part of the read contract.
+    @ObservationIgnored var onDidReload: (() -> Void)?
+
     /// The in-flight, not-yet-persisted capture draft scheduled by
     /// `setDraftDebounced`, as a `(projectPath, draft)` pair, or `nil` when no
     /// debounced write is pending (#052). Holds the latest keystroke state so
@@ -440,6 +453,14 @@ final class PlansStore {
                 unsafeSelf.applyGitInfo(results)
             }
         }
+
+        // Reconcile finished capture spinner rows against the just-repopulated
+        // `projects` on EVERY reload — poll tick included, not only the
+        // run-finish hand-off (#051). Fires after the synchronous task-parse
+        // pass above (the git second pass is async and irrelevant to
+        // reconciliation), so the moment a captured plan's file lands and a
+        // poll parses it, the orphaned spinner clears next tick.
+        onDidReload?()
     }
 
     /// A Sendable carrier for one project's git query results, used to ferry the

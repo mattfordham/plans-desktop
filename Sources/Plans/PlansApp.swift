@@ -24,19 +24,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.regular)
+        // Reconcile finished capture spinners against the freshly-parsed
+        // projects at the END of EVERY reload — both the run-finish hand-off and
+        // every 5s poll tick (#051). Wiring it to the store's post-reload hook
+        // (rather than only the run-finish path) closes a filesystem-flush race:
+        // if plans-cc writes the captured plan file AFTER the run-finish reconcile
+        // pass, the next poll both parses the new plan row AND dismisses the
+        // now-orphaned spinner, instead of leaving the spinner pinned beside the
+        // real row until the bounded fallback elapses. `store.projects` is fully
+        // repopulated by the synchronous task-parse pass before this fires.
+        store.onDidReload = { [weak store, weak taskRunner] in
+            guard let store else { return }
+            taskRunner?.reconcileFinishedCaptures(against: store.projects)
+        }
         store.startPolling()
-        // Whenever any run finishes, reload so the worked task's new status
-        // surfaces immediately rather than waiting for the next 5s poll tick,
-        // THEN reconcile finished capture spinners against the just-populated
-        // projects — in this same main-actor turn — so a "creating" spinner row
-        // hands off to the new plan row in one atomic SwiftUI transition instead
-        // of vanishing a frame before the plan appears (#051). Order matters:
-        // reload first, reconcile against the fresh `store.projects` second.
-        taskRunner.onAnyRunFinished = { [weak store, weak taskRunner] in
+        // Whenever any run finishes, reload immediately so the worked task's new
+        // status surfaces rather than waiting for the next 5s poll tick; the
+        // reload's post-reload hook (above) then reconciles in the same
+        // main-actor turn, so a "creating" spinner row hands off to the new plan
+        // row in one atomic SwiftUI transition.
+        taskRunner.onAnyRunFinished = { [weak store] in
             store?.reload()
-            if let store {
-                taskRunner?.reconcileFinishedCaptures(against: store.projects)
-            }
         }
     }
 

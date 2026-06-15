@@ -109,7 +109,9 @@ final class PlansStoreTests: XCTestCase {
 
         XCTAssertEqual(store.projects.count, 1)
         let project = try XCTUnwrap(store.projects.first)
-        XCTAssertEqual(project.projectName, "alpha")
+        // TaskParser titleizes the directory's last path component (see
+        // String+Titleize), so dir "alpha" surfaces as project name "Alpha".
+        XCTAssertEqual(project.projectName, "Alpha")
         XCTAssertEqual(project.counts[.pending], 1)
         XCTAssertEqual(project.counts[.inProgress], 1)
         XCTAssertEqual(project.counts[.completed], 1)
@@ -135,7 +137,7 @@ final class PlansStoreTests: XCTestCase {
         let store = PlansStore(registryReader: reader)
         store.reload()
 
-        XCTAssertEqual(store.projects.map(\.projectName), ["alpha", "beta"])
+        XCTAssertEqual(store.projects.map(\.projectName), ["Alpha", "Beta"])
     }
 
     func testReloadOnEmptyRegistryYieldsNoProjects() throws {
@@ -153,6 +155,49 @@ final class PlansStoreTests: XCTestCase {
         store.reload()
 
         XCTAssertEqual(store.projects.count, 0)
+    }
+
+    // MARK: - onDidReload hand-off hook (#051)
+
+    /// `reload()` must invoke `onDidReload` AFTER `projects` is repopulated, so
+    /// the app can reconcile finished capture spinners against the fresh parse.
+    /// Asserting `projects` is already populated inside the callback locks in the
+    /// ordering the hand-off depends on.
+    func testReloadInvokesOnDidReloadAfterProjectsPopulated() throws {
+        let projectDir = try makeProjectDir(name: "alpha")
+        try writeTaskFile(
+            projectDir: projectDir,
+            filename: "001-first.md",
+            text: "# First\n\n**Status:** pending",
+            in: "pending"
+        )
+
+        let reader = try makeReader(projectPaths: [projectDir.path])
+        let store = PlansStore(registryReader: reader)
+        var observedCount: Int?
+        store.onDidReload = { observedCount = store.projects.count }
+        store.reload()
+
+        XCTAssertEqual(observedCount, 1,
+                       "onDidReload should fire after projects is populated")
+    }
+
+    /// The regression guard for the orphaned-spinner bug: reconciliation must run
+    /// on EVERY reload — including a plain poll-tick `reload()` — not only the
+    /// run-finish path. A capture plan that lands after the run-finish reconcile
+    /// pass is otherwise parsed-but-never-reconciled, pinning the spinner row.
+    func testEveryReloadFiresOnDidReloadForPollDrivenReconcile() throws {
+        let reader = try makeReader(projectPaths: [])
+        let store = PlansStore(registryReader: reader)
+        var fireCount = 0
+        store.onDidReload = { fireCount += 1 }
+
+        store.reload()
+        store.reload()
+        store.reload()
+
+        XCTAssertEqual(fireCount, 3,
+                       "each reload (poll tick included) must reconcile")
     }
 
     // MARK: - startPolling() / stopPolling()
@@ -174,7 +219,7 @@ final class PlansStoreTests: XCTestCase {
 
         XCTAssertEqual(store.projects.count, 1)
         let project = try XCTUnwrap(store.projects.first)
-        XCTAssertEqual(project.projectName, "alpha")
+        XCTAssertEqual(project.projectName, "Alpha")
         XCTAssertEqual(project.counts[.pending], 1)
     }
 
@@ -255,7 +300,7 @@ final class PlansStoreTests: XCTestCase {
         try store.linkProject(at: projectDir.path)
 
         // The new project appears in the store immediately (reload happened).
-        XCTAssertEqual(store.projects.map(\.projectName), ["alpha"])
+        XCTAssertEqual(store.projects.map(\.projectName), ["Alpha"])
 
         // And it was persisted to the registry on disk.
         let persisted = reader.loadRegistry()
