@@ -44,10 +44,17 @@ struct NewPlanModal: View {
     /// Whether the "Elaborate" toggle is on (flesh the plan out after capture).
     @State private var elaborate = false
 
+    /// The PNG bytes of an image pasted/dropped into the editor (#048), or nil
+    /// when none is staged. Persisted in the per-project draft (UserDefaults only,
+    /// never `.plans/` §2); written to disk under Application Support and appended
+    /// to the description as a markdown reference only at submit time.
+    @State private var imageData: Data?
+
     /// Guards the project-switch draft swap: when a project change is loading the
-    /// new project's draft into the fields, the field `.onChange` handlers must
-    /// NOT persist back (that would overwrite the new project's draft with the
-    /// old project's text mid-swap). Set true around the swap.
+    /// new project's draft into the fields (text, toggles, AND the staged
+    /// `imageData`), the field `.onChange` handlers must NOT persist back (that
+    /// would overwrite the new project's draft with the old project's state
+    /// mid-swap). Set true around the swap.
     @State private var isSwitchingProject = false
 
     /// A local snapshot of the staleness-ordered project list driving the picker
@@ -111,6 +118,8 @@ struct NewPlanModal: View {
 
             editor
 
+            imagePreview
+
             HStack(spacing: 16) {
                 Toggle("Elaborate", isOn: $elaborate)
                     .toggleStyle(.checkbox)
@@ -168,6 +177,7 @@ struct NewPlanModal: View {
         .onChange(of: text) { _, _ in persistDraft() }
         .onChange(of: execute) { _, _ in persistDraft() }
         .onChange(of: elaborate) { _, _ in persistDraft() }
+        .onChange(of: imageData) { _, _ in persistDraft() }
     }
 
     // MARK: - Editor (auto-growing description box)
@@ -179,7 +189,12 @@ struct NewPlanModal: View {
     /// `TextEditor` scrolls internally once the content exceeds the visible box.
     private var editor: some View {
         ZStack(alignment: .topLeading) {
-            PlanTextEditor(text: $text, font: Self.editorFont, inset: Self.editorInset)
+            PlanTextEditor(
+                text: $text,
+                font: Self.editorFont,
+                inset: Self.editorInset,
+                onImagePasted: { imageData = $0 }
+            )
                 .frame(minHeight: Self.editorMinHeight, maxHeight: .infinity)
                 .background(
                     RoundedRectangle(cornerRadius: 8)
@@ -202,6 +217,41 @@ struct NewPlanModal: View {
                     .padding(.leading, Self.editorInset.width + 5)
                     .padding(.top, Self.editorInset.height)
                     .allowsHitTesting(false)
+            }
+        }
+    }
+
+    // MARK: - Image preview (#048)
+
+    /// A small thumbnail of the staged pasted/dropped image plus a Remove control,
+    /// shown only while an image is staged. When `imageData` is nil NOTHING is
+    /// rendered, so the editor/placeholder layout is unchanged for the common
+    /// no-image case. Remove drops the staged bytes and re-persists the draft
+    /// (text/toggles untouched); the on-disk write + description flattening happen
+    /// only at submit, never here.
+    @ViewBuilder
+    private var imagePreview: some View {
+        if let imageData, let nsImage = NSImage(data: imageData) {
+            HStack(spacing: 12) {
+                Image(nsImage: nsImage)
+                    .resizable()
+                    .scaledToFit()
+                    .frame(maxHeight: 80)
+                    .clipShape(RoundedRectangle(cornerRadius: 6))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 6)
+                            .stroke(Color.secondary.opacity(0.4), lineWidth: 1)
+                    )
+
+                Button {
+                    self.imageData = nil
+                    persistDraft()
+                } label: {
+                    Label("Remove", systemImage: "xmark.circle")
+                }
+                .help("Remove the staged image")
+
+                Spacer()
             }
         }
     }
@@ -231,10 +281,12 @@ struct NewPlanModal: View {
             text = draft.text
             execute = draft.execute
             elaborate = draft.elaborate
+            imageData = draft.imageData
         } else {
             text = ""
             execute = false
             elaborate = false
+            imageData = nil
         }
         // Clear the guard on the next runloop tick, after the field `.onChange`
         // notifications from the assignments above have drained.
@@ -252,7 +304,12 @@ struct NewPlanModal: View {
     private func persistDraft() {
         guard !isSwitchingProject else { return }
         store.setDraftDebounced(
-            PlansStore.CaptureDraft(text: text, execute: execute, elaborate: elaborate),
+            PlansStore.CaptureDraft(
+                text: text,
+                execute: execute,
+                elaborate: elaborate,
+                imageData: imageData
+            ),
             for: projectPath
         )
     }
@@ -262,6 +319,7 @@ struct NewPlanModal: View {
         text = ""
         execute = false
         elaborate = false
+        imageData = nil
         store.clearDraft(for: projectPath)
     }
 
@@ -280,13 +338,30 @@ struct NewPlanModal: View {
         let knownTaskIDs = Set(
             store.projects.first { $0.projectPath == projectPath }?.tasks.map(\.id) ?? []
         )
+
+        // If an image is staged, persist its PNG bytes under Application Support
+        // (NEVER `.plans/`, §2) and append a markdown reference to the description.
+        // A save failure is logged and falls back to the plain trimmed
+        // description — it must never crash or block the capture.
+        var description = trimmed
+        if let imageData {
+            do {
+                let imageURL = try CaptureImageStore().saveImage(imageData)
+                description = CaptureImageStore.flattenDescription(trimmed, imageURL: imageURL)
+            } catch {
+                modalLog.error("modal Capture: failed to save staged image, capturing plain description: \(error.localizedDescription, privacy: .public)")
+            }
+        }
+
         runner.capture(
             projectPath: projectPath,
-            description: trimmed,
+            description: description,
             execute: execute,
             elaborate: elaborate,
             knownTaskIDs: knownTaskIDs
         )
+        // Reset the staged image after capture.
+        imageData = nil
         store.clearDraft(for: projectPath)
         dismiss()
     }
@@ -304,12 +379,40 @@ private struct PlanTextEditor: NSViewRepresentable {
     let font: NSFont
     /// The text view's `textContainerInset`. The placeholder mirrors this value.
     let inset: CGSize
+    /// Invoked with PNG bytes when the user pastes or drops an image into the
+    /// editor (#048). The image is NOT inserted as text; the host view stages it
+    /// (see `NewPlanModal.imageData`) and references it from the description at
+    /// submit time. Plain-text paste is untouched.
+    var onImagePasted: (Data) -> Void
 
     func makeCoordinator() -> Coordinator { Coordinator(self) }
 
     func makeNSView(context: Context) -> NSScrollView {
-        let scrollView = NSTextView.scrollableTextView()
-        let textView = scrollView.documentView as! NSTextView
+        // Build a scroll view around our `PlanNSTextView` subclass rather than the
+        // stock `NSTextView.scrollableTextView()`, so paste/drop image capture is
+        // available while every other behaviour (insets, font, plain-text paste,
+        // the `textDidChange` delegate) is unchanged.
+        let scrollView = NSScrollView()
+        scrollView.hasVerticalScroller = true
+        scrollView.borderType = .noBorder
+
+        let contentSize = scrollView.contentSize
+        let textStorage = NSTextStorage()
+        let layoutManager = NSLayoutManager()
+        textStorage.addLayoutManager(layoutManager)
+        let textContainer = NSTextContainer(
+            containerSize: NSSize(width: contentSize.width, height: CGFloat.greatestFiniteMagnitude)
+        )
+        textContainer.widthTracksTextView = true
+        layoutManager.addTextContainer(textContainer)
+
+        let textView = PlanNSTextView(frame: .zero, textContainer: textContainer)
+        textView.onImagePasted = onImagePasted
+        textView.minSize = NSSize(width: 0, height: 0)
+        textView.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
+        textView.isVerticallyResizable = true
+        textView.isHorizontallyResizable = false
+        textView.autoresizingMask = [.width]
 
         textView.delegate = context.coordinator
         textView.font = font
@@ -322,6 +425,7 @@ private struct PlanTextEditor: NSViewRepresentable {
         textView.isAutomaticQuoteSubstitutionEnabled = false
         textView.isAutomaticDashSubstitutionEnabled = false
 
+        scrollView.documentView = textView
         scrollView.drawsBackground = false
         scrollView.backgroundColor = .clear
 
@@ -329,7 +433,8 @@ private struct PlanTextEditor: NSViewRepresentable {
     }
 
     func updateNSView(_ scrollView: NSScrollView, context: Context) {
-        guard let textView = scrollView.documentView as? NSTextView else { return }
+        guard let textView = scrollView.documentView as? PlanNSTextView else { return }
+        textView.onImagePasted = onImagePasted
         if textView.string != text {
             textView.string = text
         }
@@ -346,6 +451,93 @@ private struct PlanTextEditor: NSViewRepresentable {
             guard let textView = notification.object as? NSTextView else { return }
             parent.text = textView.string
         }
+    }
+}
+
+// MARK: - PlanNSTextView (image paste/drop capture)
+
+/// An `NSTextView` subclass that intercepts pasted and dropped images (#048),
+/// routing their PNG bytes to `onImagePasted` instead of letting raw image data
+/// land in the text. Plain-text paste and every other text-view behaviour fall
+/// through to `super` unchanged.
+private final class PlanNSTextView: NSTextView {
+    /// Set by `PlanTextEditor`; receives PNG bytes for a pasted/dropped image.
+    var onImagePasted: ((Data) -> Void)?
+
+    override init(frame frameRect: NSRect, textContainer container: NSTextContainer?) {
+        super.init(frame: frameRect, textContainer: container)
+        registerForDraggedTypes([.png, .tiff, .fileURL])
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    /// Intercept ⌘V. If the general pasteboard carries image data, capture it and
+    /// stop — otherwise defer to the standard plain-text paste.
+    override func paste(_ sender: Any?) {
+        if let data = Self.pngData(from: NSPasteboard.general) {
+            onImagePasted?(data)
+            return
+        }
+        super.paste(sender)
+    }
+
+    /// Belt-and-suspenders for services/`readSelection`-driven inserts: capture
+    /// image data the same way, otherwise fall through to `super`.
+    override func readSelection(from pasteboard: NSPasteboard) -> Bool {
+        if let data = Self.pngData(from: pasteboard) {
+            onImagePasted?(data)
+            return true
+        }
+        return super.readSelection(from: pasteboard)
+    }
+
+    // MARK: Drag-and-drop
+
+    override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation {
+        Self.hasImage(on: sender.draggingPasteboard) ? .copy : super.draggingEntered(sender)
+    }
+
+    override func draggingUpdated(_ sender: NSDraggingInfo) -> NSDragOperation {
+        Self.hasImage(on: sender.draggingPasteboard) ? .copy : super.draggingUpdated(sender)
+    }
+
+    override func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
+        if let data = Self.pngData(from: sender.draggingPasteboard) {
+            onImagePasted?(data)
+            return true
+        }
+        return super.performDragOperation(sender)
+    }
+
+    // MARK: Pasteboard → PNG
+
+    /// True if `pasteboard` carries image data we can extract as PNG.
+    private static func hasImage(on pasteboard: NSPasteboard) -> Bool {
+        pngData(from: pasteboard) != nil
+    }
+
+    /// Extracts PNG `Data` from `pasteboard`, or nil when no image is present.
+    /// Prefers a direct `.png`; otherwise re-encodes `.tiff` bitmap data (and, as
+    /// a fallback, an image file URL) into PNG via `NSBitmapImageRep`.
+    private static func pngData(from pasteboard: NSPasteboard) -> Data? {
+        if let png = pasteboard.data(forType: .png) {
+            return png
+        }
+        if let tiff = pasteboard.data(forType: .tiff),
+           let rep = NSBitmapImageRep(data: tiff) {
+            return rep.representation(using: .png, properties: [:])
+        }
+        // A dragged image file: read its bytes and re-encode to PNG.
+        if let urls = pasteboard.readObjects(forClasses: [NSURL.self], options: nil) as? [URL],
+           let url = urls.first,
+           let fileData = try? Data(contentsOf: url),
+           let rep = NSBitmapImageRep(data: fileData) {
+            return rep.representation(using: .png, properties: [:])
+        }
+        return nil
     }
 }
 

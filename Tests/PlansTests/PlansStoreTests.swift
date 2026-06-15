@@ -489,6 +489,94 @@ final class PlansStoreTests: XCTestCase {
         XCTAssertNil(afterClear.draft(for: "/proj"))
     }
 
+    // MARK: - Capture draft image data (#048)
+
+    func testCaptureDraftImageDataRoundTripsAcrossStoreInstances() throws {
+        let reader = try makeReader(projectPaths: [])
+        let defaults = makeDefaults()
+
+        // A small PNG magic-prefix byte sequence stands in for image bytes.
+        let pngBytes = Data([0x89, 0x50, 0x4E, 0x47])
+
+        let store = PlansStore(registryReader: reader, defaults: defaults)
+        let draft = PlansStore.CaptureDraft(
+            text: "hi",
+            execute: false,
+            elaborate: false,
+            imageData: pngBytes
+        )
+        store.setDraft(draft, for: "/proj")
+
+        // Visible immediately on the same store.
+        XCTAssertEqual(store.draft(for: "/proj")?.imageData, pngBytes)
+
+        // A fresh store over the SAME defaults restores the image bytes.
+        let reloaded = PlansStore(registryReader: reader, defaults: defaults)
+        let restored = try XCTUnwrap(reloaded.draft(for: "/proj"))
+        XCTAssertEqual(restored.imageData, pngBytes)
+    }
+
+    func testCaptureDraftNilImageDataRoundTripsAsNil() throws {
+        let reader = try makeReader(projectPaths: [])
+        let defaults = makeDefaults()
+
+        let store = PlansStore(registryReader: reader, defaults: defaults)
+        let draft = PlansStore.CaptureDraft(
+            text: "hi",
+            execute: false,
+            elaborate: false,
+            imageData: nil
+        )
+        store.setDraft(draft, for: "/proj")
+
+        XCTAssertNil(store.draft(for: "/proj")?.imageData)
+
+        let reloaded = PlansStore(registryReader: reader, defaults: defaults)
+        let restored = try XCTUnwrap(reloaded.draft(for: "/proj"))
+        XCTAssertNil(restored.imageData)
+    }
+
+    // MARK: - CaptureImageStore (image staging under Application Support, #048)
+
+    func testCaptureImageStoreSavesImageUnderInjectedAppSupportNeverPlans() throws {
+        // Inject a base directory under the per-test temp dir so the store writes
+        // there instead of the real Application Support container.
+        let appSupport = tempDir.appendingPathComponent("AppSupport")
+        let imageStore = CaptureImageStore(applicationSupportDirectory: appSupport)
+
+        let pngBytes = Data([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A])
+        let url = try imageStore.saveImage(pngBytes)
+
+        // The returned URL exists on disk and its contents match the bytes written.
+        XCTAssertTrue(FileManager.default.fileExists(atPath: url.path))
+        XCTAssertEqual(try Data(contentsOf: url), pngBytes)
+
+        // The path lives under the injected Application Support temp dir, and
+        // never inside any `.plans/` directory (§2 hard constraint).
+        XCTAssertTrue(url.path.hasPrefix(appSupport.path))
+        XCTAssertFalse(url.path.contains("/.plans/"))
+        XCTAssertFalse(url.pathComponents.contains(".plans"))
+    }
+
+    func testFlattenDescriptionAppendsMarkdownReferenceForImageURL() {
+        let imageURL = URL(fileURLWithPath: "/tmp/Plans/attachments/abc.png")
+        let result = CaptureImageStore.flattenDescription(
+            "Fix the login bug",
+            imageURL: imageURL
+        )
+
+        XCTAssertTrue(result.contains("Fix the login bug"))
+        XCTAssertTrue(result.contains("!["))
+        XCTAssertTrue(result.contains("file://\(imageURL.path)"))
+    }
+
+    func testFlattenDescriptionReturnsInputUnchangedForNilURL() {
+        let input = "Fix the login bug"
+        let result = CaptureImageStore.flattenDescription(input, imageURL: nil)
+
+        XCTAssertEqual(result, input)
+    }
+
     func testClearManualOrderRevertsFlagButKeepsOverride() throws {
         let reader = try makeReader(projectPaths: [])
         let defaults = makeDefaults()

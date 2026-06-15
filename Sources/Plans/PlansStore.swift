@@ -62,13 +62,25 @@ final class PlansStore {
         var execute: Bool
         /// Whether the "Elaborate" toggle is on (flesh the plan out after capture).
         var elaborate: Bool
+        /// The PNG bytes of an image pasted/dropped into the form (#048), or nil
+        /// when no image is staged. Held alongside the text so a dismissed-and-
+        /// reopened sheet (or an app relaunch) restores the staged image too.
+        /// NEVER written to `.plans/` (§2 read-only); the only persistence sink is
+        /// UserDefaults (this whole draft is JSON-encoded there). The image bytes
+        /// are written to disk under Application Support — outside `.plans/` — only
+        /// at submit time by `CaptureImageStore`.
+        var imageData: Data?
 
         /// Memberwise init (explicit so the type can be constructed across the
         /// module without relying on the synthesized internal initializer).
-        init(text: String, execute: Bool, elaborate: Bool) {
+        /// `imageData` defaults to nil so existing call sites and decoding of
+        /// older drafts (saved before #048, with no `imageData` key) still work —
+        /// the synthesized `Codable` decodes an absent `Data?` key as nil.
+        init(text: String, execute: Bool, elaborate: Bool, imageData: Data? = nil) {
             self.text = text
             self.execute = execute
             self.elaborate = elaborate
+            self.imageData = imageData
         }
     }
 
