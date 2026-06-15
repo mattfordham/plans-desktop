@@ -61,7 +61,7 @@ final class MarkdownBlockRendererTests: XCTestCase {
         let body = "```\nlet x = 1\n    indented\n```"
         XCTAssertEqual(
             MarkdownBlockRenderer.parse(body),
-            [.codeBlock("let x = 1\n    indented")]
+            [.codeBlock(language: nil, code: "let x = 1\n    indented")]
         )
     }
 
@@ -69,7 +69,17 @@ final class MarkdownBlockRendererTests: XCTestCase {
         let body = "```swift\nprint(\"hi\")\n```"
         XCTAssertEqual(
             MarkdownBlockRenderer.parse(body),
-            [.codeBlock("print(\"hi\")")]
+            [.codeBlock(language: "swift", code: "print(\"hi\")")]
+        )
+    }
+
+    func testFencedCodeBlockInfoStringTrimmedToLanguage() {
+        // A trailing info string after the language token is dropped; surrounding
+        // whitespace is trimmed.
+        let body = "```  swift  \nx\n```"
+        XCTAssertEqual(
+            MarkdownBlockRenderer.parse(body),
+            [.codeBlock(language: "swift", code: "x")]
         )
     }
 
@@ -134,7 +144,7 @@ final class MarkdownBlockRendererTests: XCTestCase {
                 .heading(level: 3, text: "A heading"),
                 .numberedList(["step one", "step two"]),
                 .blockquote("a quote"),
-                .codeBlock("code here"),
+                .codeBlock(language: nil, code: "code here"),
                 .paragraph("Closing paragraph."),
             ]
         )
@@ -160,7 +170,7 @@ final class MarkdownBlockRendererTests: XCTestCase {
         let body = "```\nunterminated\nmore code"
         XCTAssertEqual(
             MarkdownBlockRenderer.parse(body),
-            [.codeBlock("unterminated\nmore code")]
+            [.codeBlock(language: nil, code: "unterminated\nmore code")]
         )
     }
 
@@ -168,7 +178,7 @@ final class MarkdownBlockRendererTests: XCTestCase {
         let body = "before\n```\ncode\n```"
         XCTAssertEqual(
             MarkdownBlockRenderer.parse(body),
-            [.paragraph("before"), .codeBlock("code")]
+            [.paragraph("before"), .codeBlock(language: nil, code: "code")]
         )
     }
 }

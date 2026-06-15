@@ -14,11 +14,12 @@ enum MarkdownBlock: Equatable {
     case bulletList([String])
     /// Consecutive `N. ` lines, markers stripped.
     case numberedList([String])
-    /// The verbatim inner lines of a fenced (```` ``` ````) code block, joined
-    /// by `\n`. The fences and any info string are dropped.
-    case blockquote(String)
     /// Consecutive `> ` lines, marker stripped, joined by `\n`.
-    case codeBlock(String)
+    case blockquote(String)
+    /// A fenced (```` ``` ````) code block. `language` is the trimmed info-string
+    /// language hint after the opening fence (nil when absent); `code` is the
+    /// verbatim inner lines joined by `\n`. The fences are dropped.
+    case codeBlock(language: String?, code: String)
     /// An ATX heading (`#`+ followed by a space); `level` is the count of
     /// leading `#`, `text` is the remainder.
     case heading(level: Int, text: String)
@@ -69,6 +70,7 @@ enum MarkdownBlockRenderer {
             // input, in which case we still emit a code block).
             if trimmed.hasPrefix("```") {
                 flush()
+                let language = Self.parseFenceLanguage(trimmed)
                 var codeLines: [String] = []
                 index += 1
                 while index < lines.count {
@@ -80,7 +82,7 @@ enum MarkdownBlockRenderer {
                     codeLines.append(candidate)
                     index += 1
                 }
-                blocks.append(.codeBlock(codeLines.joined(separator: "\n")))
+                blocks.append(.codeBlock(language: language, code: codeLines.joined(separator: "\n")))
                 continue
             }
 
@@ -140,6 +142,16 @@ enum MarkdownBlockRenderer {
 
         flush()
         return blocks
+    }
+
+    /// Extracts the language hint from an opening fence line (already trimmed).
+    /// Drops the leading ```` ``` ````, trims, and takes the first whitespace-
+    /// delimited token. Returns `nil` when no language is present.
+    private static func parseFenceLanguage(_ trimmed: String) -> String? {
+        let info = String(trimmed.dropFirst(3)).trimmingCharacters(in: .whitespaces)
+        guard !info.isEmpty else { return nil }
+        let token = info.split(whereSeparator: { $0 == " " || $0 == "\t" }).first
+        return token.map(String.init)
     }
 
     /// Parses an ATX heading from an already-trimmed line, or returns `nil`.

@@ -1,6 +1,24 @@
 import SwiftUI
 import AppKit
 
+/// Editorial typography for the plan-detail markdown surface: a larger,
+/// airier scale than the system defaults so plan bodies read like a document
+/// rather than a dense form. Centralized here so the body, lists, quotes, and
+/// code blocks share one rhythm — change the feel in one place.
+private enum PlanType {
+    /// Base reading size for body text, list items, and code — larger than the
+    /// system `.body` (~13pt) for a roomier, editorial measure.
+    static let bodySize: CGFloat = 16
+    /// Extra leading added between wrapped lines within a paragraph.
+    static let lineSpacing: CGFloat = 6
+    /// Vertical gap between sibling blocks in a section body.
+    static let blockSpacing: CGFloat = 16
+    /// Vertical gap between rows of a list.
+    static let listSpacing: CGFloat = 8
+    /// Gap between a section heading and its body / between sections' blocks.
+    static let sectionSpacing: CGFloat = 12
+}
+
 /// A standalone renderer for a single plan's detail body (§011). This is the
 /// reusable surface shown both inside the browser window's detail pane and in a
 /// dedicated plan-detail window: the title, the owning project + status line,
@@ -45,14 +63,14 @@ struct PlanDetailView: View {
         Group {
             if let row {
                 ScrollView {
-                    VStack(alignment: .leading, spacing: 16) {
+                    VStack(alignment: .leading, spacing: 28) {
                         detailHeader(row)
                         ForEach(Array(row.task.sections.enumerated()), id: \.offset) { _, section in
                             sectionView(section)
                         }
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(20)
+                    .padding(28)
                 }
                 .textSelection(.enabled)
             } else {
@@ -251,9 +269,9 @@ struct PlanDetailView: View {
     /// their body as markdown paragraphs.
     @ViewBuilder
     private func sectionView(_ section: TaskSection) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
+        VStack(alignment: .leading, spacing: PlanType.sectionSpacing) {
             Text(section.heading)
-                .font(.headline)
+                .font(.title.weight(.bold))
 
             if section.heading == "How" {
                 howChecklist(section.body)
@@ -270,7 +288,7 @@ struct PlanDetailView: View {
     /// `markdownParagraph(_:)`. Purely presentational — performs no writes.
     @ViewBuilder
     private func markdownBlockView(_ body: String) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
+        VStack(alignment: .leading, spacing: PlanType.blockSpacing) {
             ForEach(Array(MarkdownBlockRenderer.parse(body).enumerated()), id: \.offset) { _, block in
                 renderBlock(block)
             }
@@ -283,53 +301,79 @@ struct PlanDetailView: View {
         switch block {
         case let .paragraph(text):
             markdownParagraph(text)
+                .lineSpacing(PlanType.lineSpacing)
+                .fixedSize(horizontal: false, vertical: true)
 
         case let .heading(level, text):
             Text(text)
                 .font(headingFont(forLevel: level))
-                .padding(.top, 2)
+                .foregroundStyle(headingColor(forLevel: level))
+                .padding(.top, 6)
 
         case let .bulletList(items):
-            VStack(alignment: .leading, spacing: 4) {
+            VStack(alignment: .leading, spacing: PlanType.listSpacing) {
                 ForEach(Array(items.enumerated()), id: \.offset) { _, item in
-                    HStack(alignment: .firstTextBaseline, spacing: 6) {
+                    HStack(alignment: .firstTextBaseline, spacing: 10) {
                         Text("•")
+                            .font(.system(size: PlanType.bodySize))
+                            .foregroundStyle(.secondary)
                         markdownParagraph(item)
+                            .lineSpacing(PlanType.lineSpacing)
+                            .fixedSize(horizontal: false, vertical: true)
                     }
                     .padding(.leading, 4)
                 }
             }
 
         case let .numberedList(items):
-            VStack(alignment: .leading, spacing: 4) {
+            VStack(alignment: .leading, spacing: PlanType.listSpacing) {
                 ForEach(Array(items.enumerated()), id: \.offset) { index, item in
-                    HStack(alignment: .firstTextBaseline, spacing: 6) {
+                    HStack(alignment: .firstTextBaseline, spacing: 10) {
                         Text("\(index + 1).")
+                            .font(.system(size: PlanType.bodySize))
                             .monospacedDigit()
+                            .foregroundStyle(.secondary)
                         markdownParagraph(item)
+                            .lineSpacing(PlanType.lineSpacing)
+                            .fixedSize(horizontal: false, vertical: true)
                     }
                     .padding(.leading, 4)
                 }
             }
 
-        case let .codeBlock(code):
-            Text(code)
-                .font(.system(.body, design: .monospaced))
+        case let .codeBlock(language, code):
+            Text(CodeHighlighter.highlight(code, language: language))
+                .font(.system(size: PlanType.bodySize - 1, design: .monospaced))
+                .lineSpacing(PlanType.lineSpacing - 1)
                 .textSelection(.enabled)
                 .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(8)
-                .background(Color(nsColor: .textBackgroundColor))
-                .clipShape(RoundedRectangle(cornerRadius: 4))
+                .padding(14)
+                .background(
+                    RoundedRectangle(cornerRadius: 8)
+                        .fill(Color(nsColor: .textBackgroundColor))
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 8)
+                                .strokeBorder(Color.primary.opacity(0.08), lineWidth: 1)
+                        )
+                )
 
         case let .blockquote(text):
-            HStack(spacing: 8) {
-                Rectangle()
-                    .fill(.secondary)
+            HStack(spacing: 12) {
+                RoundedRectangle(cornerRadius: 2)
+                    .fill(Color.accentColor.opacity(0.65))
                     .frame(width: 3)
                 markdownParagraph(text)
                     .foregroundStyle(.secondary)
+                    .lineSpacing(PlanType.lineSpacing)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .frame(maxWidth: .infinity, alignment: .leading)
             }
-            .padding(.leading, 2)
+            .padding(.vertical, 10)
+            .padding(.horizontal, 12)
+            .background(
+                RoundedRectangle(cornerRadius: 8)
+                    .fill(Color.accentColor.opacity(0.06))
+            )
         }
     }
 
@@ -337,9 +381,20 @@ struct PlanDetailView: View {
     /// level 1/2 read as section-ish, level 3+ as a smaller bold subhead.
     private func headingFont(forLevel level: Int) -> Font {
         switch level {
-        case 1: return .title3.bold()
-        case 2: return .headline
-        default: return .subheadline.bold()
+        case 1: return .largeTitle.bold()
+        case 2: return .title.bold()
+        default: return .title2.bold()
+        }
+    }
+
+    /// Tints sub-headings by depth so the hierarchy reads through color as well
+    /// as size: the biggest headings take the accent, the next level a cooler
+    /// teal, and deeper levels settle to primary so it never becomes a rainbow.
+    private func headingColor(forLevel level: Int) -> Color {
+        switch level {
+        case 1: return .accentColor
+        case 2: return .teal
+        default: return .primary
         }
     }
 
@@ -350,10 +405,23 @@ struct PlanDetailView: View {
         let options = AttributedString.MarkdownParsingOptions(
             interpretedSyntax: .inlineOnlyPreservingWhitespace
         )
-        if let attributed = try? AttributedString(markdown: paragraph, options: options) {
+        if var attributed = try? AttributedString(markdown: paragraph, options: options) {
+            attributed.font = .system(size: PlanType.bodySize)
+            styleInlineCode(&attributed)
             return Text(attributed)
         }
-        return Text(paragraph)
+        return Text(paragraph).font(.system(size: PlanType.bodySize))
+    }
+
+    /// Gives inline `` `code` `` runs a monospaced font and a subtle tinted
+    /// "chip" foreground so they stand apart from surrounding prose. Detected via
+    /// the `.code` inline presentation intent the markdown parser assigns.
+    private func styleInlineCode(_ attributed: inout AttributedString) {
+        for run in attributed.runs {
+            guard let intent = run.inlinePresentationIntent, intent.contains(.code) else { continue }
+            attributed[run.range].font = .system(size: PlanType.bodySize, design: .monospaced)
+            attributed[run.range].foregroundColor = .accentColor
+        }
     }
 
     /// Renders the `## How` body as a READ-ONLY checklist. Lines matching
@@ -363,9 +431,18 @@ struct PlanDetailView: View {
     /// no writes.
     @ViewBuilder
     private func howChecklist(_ body: String) -> some View {
-        VStack(alignment: .leading, spacing: 6) {
+        VStack(alignment: .leading, spacing: PlanType.listSpacing) {
             ForEach(Array(BrowserViewModel.howSteps(body).enumerated()), id: \.offset) { _, step in
-                Label(step.text, systemImage: step.done ? "checkmark.square" : "square")
+                HStack(alignment: .firstTextBaseline, spacing: 10) {
+                    Image(systemName: step.done ? "checkmark.square.fill" : "square")
+                        .font(.system(size: PlanType.bodySize))
+                        .foregroundStyle(step.done ? Color.accentColor : Color.secondary)
+                    Text(step.text)
+                        .font(.system(size: PlanType.bodySize))
+                        .lineSpacing(PlanType.lineSpacing)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .foregroundStyle(step.done ? .secondary : .primary)
+                }
             }
         }
     }
