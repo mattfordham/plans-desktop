@@ -375,6 +375,238 @@ final class TaskRunnerTests: XCTestCase {
         XCTAssertFalse(RunMode.elaborate.usesDescription)
     }
 
+    // MARK: - Hand-off reconciliation (task #051)
+
+    /// Builds a bare `Task` fixture (only `id` matters for reconciliation, which
+    /// matches on task ids appearing in a project).
+    private func makeTask(id: String) -> Task {
+        Task(
+            id: id,
+            title: nil,
+            type: nil,
+            status: nil,
+            created: nil,
+            branch: nil,
+            blockedBy: [],
+            sections: [],
+            howProgress: (done: 0, total: 0),
+            isBlocked: false,
+            isCompletedDir: false
+        )
+    }
+
+    /// Builds a `ProjectTasks` fixture with the given task ids for `projectPath`.
+    private func makeProject(path: String, taskIDs: [String]) -> ProjectTasks {
+        ProjectTasks(
+            projectPath: path,
+            projectName: (path as NSString).lastPathComponent,
+            lastSeen: "",
+            tasks: taskIDs.map { makeTask(id: $0) },
+            counts: [:],
+            activeTasks: [],
+            gitBranch: nil,
+            gitIsDirty: nil
+        )
+    }
+
+    /// Builds a FINISHED (not running) capture run for `projectPath` with the
+    /// given reconciliation baseline. A fresh `TaskRun` has `isRunning == false`
+    /// (it only flips true inside `start()`, which spawns a process), so this is
+    /// exactly the "finished capture awaiting its plan row" state reconciliation
+    /// participates in — without spawning `node`.
+    @MainActor
+    private func makeFinishedCapture(
+        path: String,
+        baseline: Set<String>,
+        id: String = "capture:/p:" + UUID().uuidString
+    ) -> TaskRun {
+        TaskRun(taskID: id, mode: .capture, description: "Add a thing",
+                projectPath: path, baselineTaskIDs: baseline)
+    }
+
+    /// (Step 6.1) A finished capture is marked for dismissal once a task id that
+    /// was NOT in its baseline appears in the project — the captured plan is now
+    /// present, so the spinner row hands off to the real plan row.
+    @MainActor
+    func testFinishedCaptureDismissedWhenNewTaskIDAppears() {
+        let run = makeFinishedCapture(path: "/p", baseline: ["001", "002"])
+        let projects = [makeProject(path: "/p", taskIDs: ["001", "002", "003"])]
+
+        let toDismiss = TaskRunner.taskIDsToDismiss(
+            runs: [run.taskID: run], projects: projects
+        )
+        XCTAssertTrue(toDismiss.contains(run.taskID))
+    }
+
+    /// (Step 6.1, instance-method seam) Driving the full
+    /// `ingestRunForTesting` → `reconcileFinishedCaptures` path removes the
+    /// finished capture from `runs` once the new plan appears, so
+    /// `runningCaptures(projectPath:)` (step 4) no longer returns it.
+    @MainActor
+    func testReconcileRemovesFinishedCaptureWhenNewPlanAppears() {
+        let runner = TaskRunner()
+        let run = makeFinishedCapture(path: "/p", baseline: ["001"])
+        runner.ingestRunForTesting(run)
+
+        // Before reconciliation the row is visible (step-4 behavior: a
+        // finished-but-not-yet-reconciled capture is still returned).
+        XCTAssertEqual(runner.runningCaptures(projectPath: "/p").map(\.taskID),
+                       [run.taskID])
+
+        runner.reconcileFinishedCaptures(
+            against: [makeProject(path: "/p", taskIDs: ["001", "002"])]
+        )
+
+        // The new id (002) appeared → the run was dismissed → the row is gone.
+        XCTAssertTrue(runner.runningCaptures(projectPath: "/p").isEmpty)
+        XCTAssertNil(runner.run(for: run.taskID))
+    }
+
+    /// (Step 6.2) Only FINISHED capture runs participate. `isRunning` cannot be
+    /// forced true in a unit test (it flips only inside `start()`, which spawns a
+    /// `node` process — deliberately avoided here, mirroring the file's other
+    /// limitation notes). We instead assert the documented contract from the
+    /// other side: a run that is `isRunning == false` but whose project shows NO
+    /// new id is NOT dismissed on the first pass (so a still-creating row would
+    /// likewise survive), and the pure helper's `guard !run.isRunning` is the
+    /// only gate — verified by the new-id case above firing and this no-new-id
+    /// case not firing. A run still in flight (were one constructible) would hit
+    /// the `guard !run.isRunning` continue and be excluded identically.
+    @MainActor
+    func testNoNewTaskIDIsNotDismissedOnFirstPass() {
+        let run = makeFinishedCapture(path: "/p", baseline: ["001", "002"])
+        // Project is unchanged from the baseline — no new id appeared yet.
+        let projects = [makeProject(path: "/p", taskIDs: ["001", "002"])]
+
+        let toDismiss = TaskRunner.taskIDsToDismiss(
+            runs: [run.taskID: run], projects: projects
+        )
+        XCTAssertFalse(toDismiss.contains(run.taskID))
+        // One fruitless pass advanced the bounded-fallback counter (documented
+        // side effect of the pure helper).
+        XCTAssertEqual(run.reconcileAttempts, 1)
+    }
+
+    /// (Step 6.3) Back-to-back captures for ONE project resolve independently.
+    /// Two finished captures with DIFFERENT baselines: runA started when only
+    /// "001" existed; runB started after "002" was already captured. When "002"
+    /// appears in the project, ONLY runA (whose baseline lacks "002") is
+    /// dismissed — runB, whose baseline already contained "002", sees no NEW id
+    /// and is left alone (no cross-dismiss). Per-run isolation comes from each
+    /// carrying its own baseline.
+    @MainActor
+    func testBackToBackCapturesResolveIndependently() {
+        let runA = makeFinishedCapture(path: "/p", baseline: ["001"],
+                                       id: "capture:/p:A")
+        let runB = makeFinishedCapture(path: "/p", baseline: ["001", "002"],
+                                       id: "capture:/p:B")
+        let projects = [makeProject(path: "/p", taskIDs: ["001", "002"])]
+
+        let toDismiss = TaskRunner.taskIDsToDismiss(
+            runs: [runA.taskID: runA, runB.taskID: runB], projects: projects
+        )
+
+        // runA's plan ("002") landed → dismissed; runB still awaits its own new id.
+        XCTAssertTrue(toDismiss.contains(runA.taskID))
+        XCTAssertFalse(toDismiss.contains(runB.taskID))
+    }
+
+    /// (Step 6.4) A finished capture that never observes a new id is NOT
+    /// dismissed prematurely (passes 1 and 2 leave it pinned), but the bounded
+    /// fallback DOES eventually clear it on the `maxReconcileAttempts`-th pass so
+    /// the spinner row can never get stuck forever (e.g. the run failed before
+    /// writing a plan).
+    @MainActor
+    func testBoundedFallbackDismissesAfterMaxAttempts() {
+        let run = makeFinishedCapture(path: "/p", baseline: ["001"])
+        // Project NEVER gains a new id.
+        let projects = [makeProject(path: "/p", taskIDs: ["001"])]
+        let runs = [run.taskID: run]
+
+        // Passes before the ceiling: not dismissed, counter advancing.
+        for pass in 1..<TaskRun.maxReconcileAttempts {
+            let toDismiss = TaskRunner.taskIDsToDismiss(runs: runs, projects: projects)
+            XCTAssertFalse(toDismiss.contains(run.taskID),
+                           "should not dismiss before the ceiling (pass \(pass))")
+            XCTAssertEqual(run.reconcileAttempts, pass)
+        }
+
+        // The ceiling pass dismisses it anyway.
+        let final = TaskRunner.taskIDsToDismiss(runs: runs, projects: projects)
+        XCTAssertEqual(run.reconcileAttempts, TaskRun.maxReconcileAttempts)
+        XCTAssertTrue(final.contains(run.taskID))
+    }
+
+    /// (Step 6.4, instance-method seam) The same bounded fallback driven through
+    /// `reconcileFinishedCaptures` actually removes the run from `runs` once the
+    /// ceiling is hit, so a never-resolving spinner row eventually clears.
+    @MainActor
+    func testReconcileBoundedFallbackClearsRowAfterMaxAttempts() {
+        let runner = TaskRunner()
+        let run = makeFinishedCapture(path: "/p", baseline: ["001"])
+        runner.ingestRunForTesting(run)
+        let projects = [makeProject(path: "/p", taskIDs: ["001"])]
+
+        for _ in 0..<TaskRun.maxReconcileAttempts {
+            runner.reconcileFinishedCaptures(against: projects)
+        }
+        XCTAssertTrue(runner.runningCaptures(projectPath: "/p").isEmpty)
+        XCTAssertNil(runner.run(for: run.taskID))
+    }
+
+    /// (Step 6.5) Step-4 visibility: a finished-but-not-yet-dismissed capture is
+    /// returned by `runningCaptures(projectPath:)` (so the spinner row persists
+    /// across the hand-off window), and disappears exactly when `dismiss` removes
+    /// it from `runs`. Uses the `ingestRunForTesting` seam to place a finished
+    /// run without spawning `node`.
+    @MainActor
+    func testRunningCapturesReturnsFinishedRunUntilDismissed() {
+        let runner = TaskRunner()
+        let run = makeFinishedCapture(path: "/p", baseline: ["001"],
+                                      id: "capture:/p:" + UUID().uuidString)
+        runner.ingestRunForTesting(run)
+
+        // Finished (isRunning == false) but still in the map → still visible.
+        XCTAssertFalse(run.isRunning)
+        XCTAssertEqual(runner.runningCaptures(projectPath: "/p").map(\.taskID),
+                       [run.taskID])
+
+        // dismiss removes it (it is finished + present) → row gone.
+        runner.dismiss(taskID: run.taskID)
+        XCTAssertTrue(runner.runningCaptures(projectPath: "/p").isEmpty)
+    }
+
+    /// (Step 5) The manual popover-dismiss path and reconciliation do not fight:
+    /// `dismiss(taskID:)` is idempotent. (a) Reconciliation dismissing first,
+    /// then a later manual `dismiss` (popover `onDisappear`) is a safe no-op —
+    /// the run is already gone. (b) A manual dismiss BEFORE reconciliation simply
+    /// removes the run early, and the next reconcile pass finds nothing to do.
+    @MainActor
+    func testManualDismissAndReconcileAreIdempotent() {
+        // (a) reconcile-then-manual: second dismiss is a no-op.
+        let runnerA = TaskRunner()
+        let runA = makeFinishedCapture(path: "/p", baseline: ["001"])
+        runnerA.ingestRunForTesting(runA)
+        runnerA.reconcileFinishedCaptures(
+            against: [makeProject(path: "/p", taskIDs: ["001", "002"])]
+        )
+        XCTAssertNil(runnerA.run(for: runA.taskID))
+        runnerA.dismiss(taskID: runA.taskID)  // manual popover close, already gone
+        XCTAssertNil(runnerA.run(for: runA.taskID))
+
+        // (b) manual-then-reconcile: early manual dismiss leaves nothing to do.
+        let runnerB = TaskRunner()
+        let runB = makeFinishedCapture(path: "/p", baseline: ["001"])
+        runnerB.ingestRunForTesting(runB)
+        runnerB.dismiss(taskID: runB.taskID)  // user closes popover first
+        XCTAssertNil(runnerB.run(for: runB.taskID))
+        // Next reconcile pass: the run is gone, so it is a clean no-op.
+        runnerB.reconcileFinishedCaptures(
+            against: [makeProject(path: "/p", taskIDs: ["001", "002"])]
+        )
+        XCTAssertNil(runnerB.run(for: runB.taskID))
+    }
+
     // The Node-side `--description` arg shape (capture / executeYolo runs pass
     // `--description <text>` and omit `--task-id`) is verified by inspection of
     // `TaskRun.spawn` / `run-task.ts`; it is not exercised here because that
