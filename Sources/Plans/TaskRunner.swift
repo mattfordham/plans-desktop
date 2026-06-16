@@ -234,6 +234,33 @@ final class TaskRun {
     /// Populated from the terminal `done` event: the run's cost and turn count.
     private(set) var summary: (costUsd: Double, turns: Int)?
 
+    /// The raw `done` stop reason, retained for the durable `RunOutcome` record.
+    /// Previously the stop reason was consumed by `handle(_:)` (mapped to a
+    /// truncation error) and then dropped; keeping it lets the finish path log
+    /// exactly WHY a run ended (e.g. `error_max_budget_usd`) — the field that
+    /// answers "why did this task strand at in-progress?" after the sheet closes.
+    private(set) var lastStopReason: String?
+
+    /// Set in `handleTermination` when the process exited nonzero without any
+    /// terminal `done`/`error` line — the "crashed" signal for the outcome log.
+    private var exitedNonzeroWithoutTerminal = false
+
+    /// The project path passed to `start(projectPath:)`, captured for the outcome
+    /// record. The stored `projectPath` property is only set for description-
+    /// driven capture runs (its reconciliation needs it); execute/elaborate runs
+    /// leave it `nil` and carry the path through `start` instead, so we stash it
+    /// here so the outcome log records the project for EVERY run kind.
+    private var outcomeProjectPath: String?
+
+    /// The durable run-outcome writer, invoked once from `finish(...)`. Injectable
+    /// so tests can point it at a temp file (and so a test build with no writable
+    /// home still works). Defaults to `~/.claude/plans-cc/run-outcomes.log`.
+    private let outcomeLog: RunOutcomeLog
+
+    /// Stamps the `RunOutcome.timestamp`. Injectable so tests get a deterministic
+    /// value; defaults to the current time as an ISO-8601 string.
+    private let now: () -> String
+
     /// A human-readable error: a missing-node / missing-script precondition, a
     /// `done`-less nonzero exit, or a streamed `error` event's message.
     private(set) var error: String?
@@ -250,12 +277,16 @@ final class TaskRun {
     private var onFinish: (() -> Void)?
 
     init(taskID: String, mode: RunMode, description: String? = nil,
-         projectPath: String? = nil, baselineTaskIDs: Set<String> = []) {
+         projectPath: String? = nil, baselineTaskIDs: Set<String> = [],
+         outcomeLog: RunOutcomeLog = RunOutcomeLog(),
+         now: @escaping () -> String = { ISO8601DateFormatter().string(from: Date()) }) {
         self.taskID = taskID
         self.mode = mode
         self.description = description
         self.projectPath = projectPath
         self.baselineTaskIDs = baselineTaskIDs
+        self.outcomeLog = outcomeLog
+        self.now = now
     }
 
     // MARK: - Lifecycle
@@ -267,6 +298,7 @@ final class TaskRun {
     func start(projectPath: String, onFinish: @escaping () -> Void) {
         guard !isRunning else { return }
         self.onFinish = onFinish
+        self.outcomeProjectPath = projectPath
         runnerLog.notice("start: task=\(self.taskID, privacy: .public) mode=\(self.mode.rawValue, privacy: .public) project=\(projectPath, privacy: .public)")
 
         lines = []
@@ -427,6 +459,7 @@ final class TaskRun {
             // above the summary — the task was stranded at in-progress and the
             // user must re-run to finish it.
             summary = (costUsd: costUsd, turns: turns)
+            lastStopReason = stopReason
             if let truncation = Self.truncationError(for: stopReason), error == nil {
                 error = truncation
             }
@@ -445,6 +478,16 @@ final class TaskRun {
     func ingestForTesting(_ ndjson: String) {
         ingest(Data(ndjson.utf8))
     }
+
+    /// Test seam: drives the single termination point (`finish`) directly so the
+    /// durable `RunOutcome` write can be verified without spawning a `Process`.
+    /// `nonzeroCrash` simulates the `handleTermination` nonzero-exit-without-
+    /// terminal path (the "crashed" classification). DEBUG-only.
+    func finishForTesting(projectPath: String? = nil, error: String? = nil, nonzeroCrash: Bool = false) {
+        if let projectPath { outcomeProjectPath = projectPath }
+        if nonzeroCrash { exitedNonzeroWithoutTerminal = true }
+        finish(error: error)
+    }
     #endif
 
     /// Finalizes a run when the process exits. Surfaces a generic error only if
@@ -462,6 +505,7 @@ final class TaskRun {
         var generic: String?
         if status != 0 && summary == nil && error == nil {
             generic = "Work-task process exited unexpectedly (code \(status))."
+            exitedNonzeroWithoutTerminal = true
         }
         process = nil
         finish(error: generic)
@@ -473,9 +517,38 @@ final class TaskRun {
         if let error, self.error == nil { self.error = error }
         phase = nil
         isRunning = false
+        writeOutcome()
         let cb = onFinish
         onFinish = nil
         cb?()
+    }
+
+    /// Writes the durable `RunOutcome` for this run exactly once, from the single
+    /// termination point. Captures the cost/turns summary, the raw stop reason,
+    /// the final error, and the derived classification so a stranded task can be
+    /// diagnosed long after the progress sheet has closed. Best-effort — the
+    /// writer swallows IO errors so logging never disturbs the finish path.
+    /// `projectPath` is `nil` for existing-task runs that never spawned (a
+    /// missing-precondition error before `start`'s project was threaded through);
+    /// in that case we record an empty string rather than skip the record.
+    private func writeOutcome() {
+        let classification = RunOutcome.classify(
+            stopReason: lastStopReason,
+            errorMessage: error,
+            exitedNonzeroWithoutTerminal: exitedNonzeroWithoutTerminal
+        )
+        let outcome = RunOutcome(
+            timestamp: now(),
+            taskID: taskID,
+            mode: mode.rawValue,
+            projectPath: projectPath ?? outcomeProjectPath ?? "",
+            costUsd: summary?.costUsd ?? 0,
+            turns: summary?.turns ?? 0,
+            stopReason: lastStopReason,
+            errorMessage: error,
+            classification: classification
+        )
+        outcomeLog.append(outcome)
     }
 
     // MARK: - Resolution helpers

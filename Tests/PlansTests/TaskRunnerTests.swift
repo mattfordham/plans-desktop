@@ -172,6 +172,82 @@ final class TaskRunnerTests: XCTestCase {
         XCTAssertEqual(cleanRun.summary?.turns, 7)
     }
 
+    // MARK: - Durable run-outcome logging
+
+    /// On finish, a run writes exactly one `RunOutcome` line to its injected log
+    /// capturing the stop reason, cost/turns, and the derived classification —
+    /// the durable answer to "why did this task strand?" that survives the
+    /// progress sheet closing. A budget-cap done is classified `truncated`.
+    @MainActor
+    func testFinishWritesTruncatedOutcomeFromBudgetCap() throws {
+        let tmp = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString)
+            .appendingPathComponent("run-outcomes.log")
+        let run = TaskRun(
+            taskID: "410", mode: .execute,
+            outcomeLog: RunOutcomeLog(fileURL: tmp),
+            now: { "2026-06-16T11:06:46Z" }
+        )
+        run.ingestForTesting(
+            #"{"kind":"done","costUsd":19.9,"turns":58,"stopReason":"error_max_budget_usd"}"# + "\n"
+        )
+        run.finishForTesting(projectPath: "/proj")
+
+        let contents = try String(contentsOf: tmp, encoding: .utf8)
+        let lines = contents.split(separator: "\n", omittingEmptySubsequences: true)
+        XCTAssertEqual(lines.count, 1)
+        let outcome = try JSONDecoder().decode(RunOutcome.self, from: Data(lines[0].utf8))
+        XCTAssertEqual(outcome.taskID, "410")
+        XCTAssertEqual(outcome.mode, "execute")
+        XCTAssertEqual(outcome.projectPath, "/proj")
+        XCTAssertEqual(outcome.stopReason, "error_max_budget_usd")
+        XCTAssertEqual(outcome.turns, 58)
+        XCTAssertEqual(outcome.classification, .truncated)
+    }
+
+    /// A clean `end_turn` done is classified `completed`.
+    @MainActor
+    func testFinishWritesCompletedOutcomeForCleanRun() throws {
+        let tmp = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString)
+            .appendingPathComponent("run-outcomes.log")
+        let run = TaskRun(
+            taskID: "411", mode: .execute,
+            outcomeLog: RunOutcomeLog(fileURL: tmp), now: { "t" }
+        )
+        run.ingestForTesting(
+            #"{"kind":"done","costUsd":0.4,"turns":7,"stopReason":"end_turn"}"# + "\n"
+        )
+        run.finishForTesting(projectPath: "/proj")
+
+        let outcome = try JSONDecoder().decode(
+            RunOutcome.self,
+            from: Data(try String(contentsOf: tmp, encoding: .utf8).split(separator: "\n")[0].utf8)
+        )
+        XCTAssertEqual(outcome.classification, .completed)
+        XCTAssertNil(outcome.errorMessage)
+    }
+
+    /// A nonzero exit with no terminal line is classified `crashed`.
+    @MainActor
+    func testFinishWritesCrashedOutcome() throws {
+        let tmp = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString)
+            .appendingPathComponent("run-outcomes.log")
+        let run = TaskRun(
+            taskID: "412", mode: .execute,
+            outcomeLog: RunOutcomeLog(fileURL: tmp), now: { "t" }
+        )
+        run.finishForTesting(projectPath: "/proj", error: "exited unexpectedly", nonzeroCrash: true)
+
+        let outcome = try JSONDecoder().decode(
+            RunOutcome.self,
+            from: Data(try String(contentsOf: tmp, encoding: .utf8).split(separator: "\n")[0].utf8)
+        )
+        XCTAssertEqual(outcome.classification, .crashed)
+        XCTAssertEqual(outcome.errorMessage, "exited unexpectedly")
+    }
+
     // MARK: - "Work this task" button gating (segment 3)
 
     /// `PlanDetailView.canWork` is the pure predicate behind the Execute action's
