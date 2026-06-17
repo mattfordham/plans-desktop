@@ -813,6 +813,58 @@ final class BrowserWindowTests: XCTestCase {
         XCTAssertEqual(result[0], viewport - 2 * 16, accuracy: 0.001)
     }
 
+    // MARK: - naturalRowHeights (per-row tallest-card aggregation #049)
+
+    /// Each row maps to the TALLEST measured card height among its indices: an
+    /// uneven 2-row grid (row 0 = 200 & 150, row 1 = 120 & 90) resolves to its
+    /// per-row maxima [200, 120].
+    func testNaturalRowHeightsTallestPerRow() {
+        let result = BrowserWindow.naturalRowHeights(
+            rows: [[0, 1], [2, 3]],
+            projectPaths: ["/a", "/b", "/c", "/d"],
+            measured: ["/a": 200, "/b": 150, "/c": 120, "/d": 90],
+            minRowHeight: 160
+        )
+        XCTAssertEqual(result, [200, 120])
+    }
+
+    /// A row whose cards are ALL unmeasured falls back to the `minRowHeight`
+    /// floor; a sibling row with measurements still resolves to its tallest card.
+    func testNaturalRowHeightsAllUnmeasuredRowFallsBackToFloor() {
+        let result = BrowserWindow.naturalRowHeights(
+            rows: [[0, 1], [2, 3]],
+            projectPaths: ["/a", "/b", "/c", "/d"],
+            measured: ["/c": 240, "/d": 180],
+            minRowHeight: 160
+        )
+        XCTAssertEqual(result, [160, 240])
+    }
+
+    /// A short final row (fewer indices than the full width) takes the tallest of
+    /// its present cards; ignored/unmeasured siblings don't drag it down.
+    func testNaturalRowHeightsShortFinalRow() {
+        let result = BrowserWindow.naturalRowHeights(
+            rows: [[0, 1], [2]],
+            projectPaths: ["/a", "/b", "/c"],
+            measured: ["/a": 200, "/b": 150, "/c": 175],
+            minRowHeight: 160
+        )
+        XCTAssertEqual(result, [200, 175])
+    }
+
+    /// Stale indices beyond `projectPaths.count` (a mid-render shrink of the
+    /// snapshot) are skipped; a row left with no in-bounds measured card falls
+    /// back to the floor.
+    func testNaturalRowHeightsSkipsStaleIndices() {
+        let result = BrowserWindow.naturalRowHeights(
+            rows: [[0, 5]],
+            projectPaths: ["/a", "/b"],
+            measured: ["/a": 210],
+            minRowHeight: 160
+        )
+        XCTAssertEqual(result, [210])
+    }
+
     // MARK: - applyManualOrder (manual override ordering)
 
     /// Projects are ordered exactly as the `order` array dictates when every
