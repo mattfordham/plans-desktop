@@ -683,6 +683,128 @@ final class TaskRunnerTests: XCTestCase {
         XCTAssertNil(runnerB.run(for: runB.taskID))
     }
 
+    // MARK: - Hand-off re-key (task #053)
+
+    /// Builds a RUNNING capture run for `projectPath` with the given baseline.
+    /// Mirrors `makeFinishedCapture` but flips the run live via the DEBUG
+    /// `markRunningForTesting()` seam so the re-key path (which only fires for a
+    /// STILL-RUNNING capture) is exercised without spawning `node`.
+    @MainActor
+    private func makeRunningCapture(
+        path: String,
+        baseline: Set<String>,
+        id: String = "capture:/p:" + UUID().uuidString
+    ) -> TaskRun {
+        let run = TaskRun(taskID: id, mode: .capture, description: "Add a thing",
+                          projectPath: path, baselineTaskIDs: baseline)
+        run.markRunningForTesting()
+        return run
+    }
+
+    /// A still-running capture whose project gained a new task id is RE-KEYED
+    /// (not dismissed): the live run moves from its synthetic key to the real
+    /// task id so the spinner hands off to the real plan row while the process
+    /// keeps running.
+    @MainActor
+    func testRunningCaptureRekeysToNewTaskID() {
+        let run = makeRunningCapture(path: "/p", baseline: ["001"])
+        let projects = [makeProject(path: "/p", taskIDs: ["001", "002"])]
+
+        let decision = TaskRunner.reconcile(
+            runs: [run.taskID: run], projects: projects
+        )
+        XCTAssertEqual(decision.toRekey, [run.taskID: "002"])
+        XCTAssertTrue(decision.toDismiss.isEmpty)
+    }
+
+    /// Driving the instance-method path re-keys the live run IN PLACE: the same
+    /// object instance is now reachable under the real id, `isRunning(taskID:)`
+    /// is true for the real id, the synthetic capture row is gone, the live
+    /// process still counts toward `runningRunCount`, and the synthetic key no
+    /// longer resolves.
+    @MainActor
+    func testReconcileRekeysRunningCaptureInMap() {
+        let runner = TaskRunner()
+        let run = makeRunningCapture(path: "/p", baseline: ["001"])
+        let syntheticKey = run.taskID
+        runner.ingestRunForTesting(run)
+
+        runner.reconcileFinishedCaptures(
+            against: [makeProject(path: "/p", taskIDs: ["001", "002"])]
+        )
+
+        XCTAssertTrue(runner.run(for: "002") === run)
+        XCTAssertTrue(runner.isRunning(taskID: "002"))
+        XCTAssertTrue(runner.runningCaptures(projectPath: "/p").isEmpty)
+        XCTAssertEqual(runner.runningRunCount, 1)
+        XCTAssertNil(runner.run(for: syntheticKey))
+    }
+
+    /// A still-running capture whose project gained NO new id is neither
+    /// re-keyed nor dismissed, and (unlike a finished run) its bounded-fallback
+    /// counter does NOT advance — a live run must never be force-dismissed.
+    @MainActor
+    func testRunningCaptureNotRekeyedWithoutNewID() {
+        let run = makeRunningCapture(path: "/p", baseline: ["001"])
+        let projects = [makeProject(path: "/p", taskIDs: ["001"])]
+
+        let decision = TaskRunner.reconcile(
+            runs: [run.taskID: run], projects: projects
+        )
+        XCTAssertTrue(decision.toRekey.isEmpty)
+        XCTAssertTrue(decision.toDismiss.isEmpty)
+        XCTAssertEqual(run.reconcileAttempts, 0)
+    }
+
+    /// When TWO running captures exist for one project, a single new id cannot be
+    /// attributed to a specific run, so neither is re-keyed (the re-key only
+    /// fires when exactly one running capture exists for the project).
+    @MainActor
+    func testConcurrentRunningCapturesAreNotRekeyed() {
+        let runA = makeRunningCapture(path: "/p", baseline: ["001"],
+                                      id: "capture:/p:A")
+        let runB = makeRunningCapture(path: "/p", baseline: ["001"],
+                                      id: "capture:/p:B")
+        let projects = [makeProject(path: "/p", taskIDs: ["001", "002"])]
+
+        let decision = TaskRunner.reconcile(
+            runs: [runA.taskID: runA, runB.taskID: runB], projects: projects
+        )
+        XCTAssertTrue(decision.toRekey.isEmpty)
+    }
+
+    /// After a re-key the live process stays tracked, so the quit guard still
+    /// sees a running run under the real id.
+    @MainActor
+    func testRekeyedRunStillCountsForQuitGuard() {
+        let runner = TaskRunner()
+        let run = makeRunningCapture(path: "/p", baseline: ["001"])
+        runner.ingestRunForTesting(run)
+
+        runner.reconcileFinishedCaptures(
+            against: [makeProject(path: "/p", taskIDs: ["001", "002"])]
+        )
+
+        XCTAssertTrue(runner.hasRunningRuns)
+        XCTAssertEqual(runner.runningRunCount, 1)
+    }
+
+    /// `rekey(to:)` changes ONLY the run's identity; mode, description,
+    /// baseline, and projectPath are intact (the live process and all other
+    /// state ride along unchanged).
+    @MainActor
+    func testRekeyChangesIdentityOnly() {
+        let run = makeRunningCapture(path: "/p", baseline: ["001"],
+                                     id: "capture:/p:X")
+        run.rekey(to: "002")
+
+        XCTAssertEqual(run.taskID, "002")
+        XCTAssertEqual(run.mode, .capture)
+        XCTAssertEqual(run.description, "Add a thing")
+        XCTAssertEqual(run.baselineTaskIDs, ["001"])
+        XCTAssertEqual(run.projectPath, "/p")
+    }
+
     // The Node-side `--description` arg shape (capture / executeYolo runs pass
     // `--description <text>` and omit `--task-id`) is verified by inspection of
     // `TaskRun.spawn` / `run-task.ts`; it is not exercised here because that

@@ -174,8 +174,11 @@ struct LoggedEvent: Identifiable, Equatable {
 @MainActor
 @Observable
 final class TaskRun {
-    /// The task id this run is working — also the run's identity.
-    let taskID: String
+    /// The task id this run is working — also the run's identity. Mutable ONLY
+    /// via `rekey(to:)` for the #053 hand-off (a still-running capture being
+    /// re-keyed from its synthetic key to the real task id once plans-cc writes
+    /// the plan); everything else treats it as fixed.
+    private(set) var taskID: String
 
     /// The mode of this run (`.execute` / `.elaborate` / `.capture`), so the UI
     /// can label it ("Executing #019" vs "Elaborating #019").
@@ -353,6 +356,18 @@ final class TaskRun {
         finish(error: nil)
     }
 
+    /// Re-keys this run's identity in place (the #053 hand-off mutator). When a
+    /// still-running capture's project gains the real task id (plans-cc has
+    /// written the plan while the long `.captureElaborate`/`.executeYolo` process
+    /// keeps running), reconciliation moves the live run from its synthetic
+    /// `capture:<path>:<UUID>` key to `newID`. This changes ONLY the identity —
+    /// the live `Process`, decoded `lines`, `isRunning`/`phase`, `onFinish`
+    /// callback, and reconciliation baseline all ride along unchanged — so the
+    /// spinner hands off to the real plan row while the process is still tracked.
+    func rekey(to newID: String) {
+        taskID = newID
+    }
+
     // MARK: - Spawning
 
     private func spawn(nodePath: String, scriptURL: URL,
@@ -487,6 +502,14 @@ final class TaskRun {
         if let projectPath { outcomeProjectPath = projectPath }
         if nonzeroCrash { exitedNonzeroWithoutTerminal = true }
         finish(error: error)
+    }
+
+    /// Test seam: flips the run into the live `.running` state (`isRunning ==
+    /// true`) WITHOUT spawning a `Process`, so the #053 re-key path — which only
+    /// fires for a still-running capture — is unit-testable. DEBUG-only.
+    func markRunningForTesting() {
+        isRunning = true
+        phase = .running
     }
     #endif
 
@@ -779,23 +802,82 @@ final class TaskRunner {
         runs: [String: TaskRun],
         projects: [ProjectTasks]
     ) -> Set<String> {
+        return reconcile(runs: runs, projects: projects).toDismiss
+    }
+
+    /// The outcome of one reconciliation pass: which finished captures to dismiss
+    /// (their spinner row hands off by removal) and which still-running captures
+    /// to re-key (their live run hands off by moving to the real task id —
+    /// `[syntheticKey: realID]`). Both surfaces are derived in one pass so the
+    /// finished-path and running-path decisions can't disagree about which ids
+    /// are already claimed.
+    struct CaptureReconciliation: Equatable {
         var toDismiss: Set<String> = []
+        var toRekey: [String: String] = [:]
+    }
+
+    /// The pure matching core behind `reconcileFinishedCaptures(against:)`,
+    /// extended for the #053 hand-off. Returns BOTH the finished-capture
+    /// dismissals (identical to the prior `taskIDsToDismiss` behavior) and the
+    /// still-running-capture re-keys.
+    ///
+    /// A still-running capture re-keys (rather than dismisses) so its long
+    /// `.captureElaborate`/`.executeYolo` process — which writes the plan file
+    /// early but keeps running for minutes — moves to the real task id the moment
+    /// that id appears, eliminating the double row (synthetic spinner beside the
+    /// real plan row). A re-key only fires when EXACTLY one running capture exists
+    /// for the project AND exactly one new id appeared, so a single new id is
+    /// never mis-attributed among concurrent captures. A live run never advances
+    /// the bounded-fallback counter and is never force-dismissed.
+    static func reconcile(
+        runs: [String: TaskRun],
+        projects: [ProjectTasks]
+    ) -> CaptureReconciliation {
+        var result = CaptureReconciliation()
         // Index current task ids by project path for O(1) lookup per run.
         var idsByProject: [String: Set<String>] = [:]
         for project in projects {
             idsByProject[project.projectPath] = Set(project.tasks.map(\.id))
         }
 
+        // Ids already used as run keys aren't claimable as a "new" plan id this
+        // pass (e.g. a prior re-key's real id, or an existing-task run's id).
+        var claimed = Set(runs.keys)
+
+        // How many RUNNING captures exist per project — a re-key only fires when
+        // exactly one running capture is in flight for the project, so a single
+        // new id can be attributed to it unambiguously.
+        var runningCapturesByProject: [String: Int] = [:]
+        for run in runs.values where run.isRunning {
+            if let projectPath = run.projectPath {
+                runningCapturesByProject[projectPath, default: 0] += 1
+            }
+        }
+
         for run in runs.values {
-            // Only finished description-driven capture runs participate; they are
-            // the ones whose spinner row we must hand off to a real plan row.
-            guard !run.isRunning, let projectPath = run.projectPath else { continue }
+            // Only description-driven capture runs (those carrying a projectPath)
+            // participate; existing-task runs are keyed by a real id already.
+            guard let projectPath = run.projectPath else { continue }
 
             let currentIDs = idsByProject[projectPath] ?? []
-            let newIDs = currentIDs.subtracting(run.baselineTaskIDs)
+            let newIDs = currentIDs.subtracting(run.baselineTaskIDs).subtracting(claimed)
+
+            if run.isRunning {
+                // Hand off a live capture by re-keying to the real id — but only
+                // when it can be attributed unambiguously (one running capture
+                // for the project, one new id). Never touch the bounded fallback
+                // for a live run.
+                if runningCapturesByProject[projectPath] == 1, newIDs.count == 1,
+                   let realID = newIDs.first {
+                    result.toRekey[run.taskID] = realID
+                    claimed.insert(realID)
+                }
+                continue
+            }
+
             if !newIDs.isEmpty {
                 // A genuinely new task id appeared — the captured plan is present.
-                toDismiss.insert(run.taskID)
+                result.toDismiss.insert(run.taskID)
                 continue
             }
 
@@ -803,10 +885,10 @@ final class TaskRunner {
             // ceiling is hit so the row can't get stuck.
             run.reconcileAttempts += 1
             if run.reconcileAttempts >= TaskRun.maxReconcileAttempts {
-                toDismiss.insert(run.taskID)
+                result.toDismiss.insert(run.taskID)
             }
         }
-        return toDismiss
+        return result
     }
 
     /// Reconciles finished capture spinner rows against the freshly-reloaded
@@ -817,8 +899,19 @@ final class TaskRunner {
     /// `dismiss(taskID:)` stays idempotent — it only removes a finished, present
     /// run — so a still-running or already-removed run is a safe no-op.
     func reconcileFinishedCaptures(against projects: [ProjectTasks]) {
-        let toDismiss = Self.taskIDsToDismiss(runs: runs, projects: projects)
-        for taskID in toDismiss {
+        let decision = Self.reconcile(runs: runs, projects: projects)
+
+        // Apply re-keys FIRST and atomically: move each still-running capture's
+        // live run from its synthetic key to the real task id, so the spinner
+        // hands off to the real plan row while the process stays tracked.
+        for (syntheticKey, realID) in decision.toRekey {
+            guard let run = runs[syntheticKey], runs[realID] == nil else { continue }
+            run.rekey(to: realID)
+            runs[realID] = run
+            runs[syntheticKey] = nil
+        }
+
+        for taskID in decision.toDismiss {
             dismiss(taskID: taskID)
         }
     }
