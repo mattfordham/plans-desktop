@@ -651,22 +651,95 @@ final class BrowserWindowTests: XCTestCase {
         XCTAssertTrue(result.isEmpty)
     }
 
-    /// STRETCH: rows whose natural total is shorter than the viewport scale UP so
-    /// they (plus gutters + padding) fill the viewport exactly, and their relative
-    /// proportions are preserved (the 2:1 ratio survives the stretch).
-    func testFitRowHeightsStretchesToFillPreservingProportions() {
-        let naturals: [CGFloat] = [200, 100] // 2:1, sums to 300
+    /// STRETCH (water-fill): rows whose natural total is shorter than the viewport
+    /// fill the viewport exactly, but instead of preserving proportions the SHORTER
+    /// rows are levelled UP toward the taller one — the gap between rows shrinks and
+    /// the shorter row gains more absolute height than the taller row.
+    func testFitRowHeightsStretchLevelsShorterRowsUp() {
+        let naturals: [CGFloat] = [200, 100] // sums to 300
         let viewport: CGFloat = 1000
         let result = BrowserWindow.fitRowHeights(
             naturalRowHeights: naturals,
             viewportHeight: viewport,
             spacing: 16, padding: 16, minRowHeight: 160
         )
-        // Rows + chrome fill the viewport.
+        // Rows + chrome fill the viewport exactly.
         let total = result.reduce(0, +) + chrome(rowCount: 2, spacing: 16, padding: 16)
         XCTAssertEqual(total, viewport, accuracy: 0.001)
-        // Relative proportion preserved.
-        XCTAssertEqual(result[0] / result[1], 2.0, accuracy: 0.001)
+        // No row drops below its natural height.
+        XCTAssertGreaterThanOrEqual(result[0], naturals[0] - 0.001)
+        XCTAssertGreaterThanOrEqual(result[1], naturals[1] - 0.001)
+        // The gap between the rows shrinks vs natural (was 100).
+        XCTAssertLessThan(result[0] - result[1], naturals[0] - naturals[1])
+        // The shorter row gains more absolute height than the taller row.
+        XCTAssertGreaterThan(result[1] - naturals[1], result[0] - naturals[0])
+    }
+
+    /// STRETCH (water-fill): when the slack is small enough that it can't lift the
+    /// short row all the way to the tall row's height, ALL the slack goes to the
+    /// short row and the tall row stays at its natural height.
+    func testFitRowHeightsStretchSlackGoesToShortRowFirst() {
+        let naturals: [CGFloat] = [300, 100] // sums to 400; gap of 200
+        // availableForRows just enough to lift the short row partway, not past 300.
+        // chrome = 48; pick available = 450 → viewport = 498.
+        let viewport: CGFloat = 498
+        let result = BrowserWindow.fitRowHeights(
+            naturalRowHeights: naturals,
+            viewportHeight: viewport,
+            spacing: 16, padding: 16, minRowHeight: 160
+        )
+        let total = result.reduce(0, +) + chrome(rowCount: 2, spacing: 16, padding: 16)
+        XCTAssertEqual(total, viewport, accuracy: 0.001)
+        // available 450 - tall natural 300 = 150 < 200 gap, so short rises to 150,
+        // tall stays at 300.
+        XCTAssertEqual(result[0], 300, accuracy: 0.001)
+        XCTAssertEqual(result[1], 150, accuracy: 0.001)
+    }
+
+    /// STRETCH (water-fill): with surplus beyond the gap both rows rise above the
+    /// taller natural to a COMMON level, still filling the viewport exactly.
+    func testFitRowHeightsStretchSurplusBeyondGapLevelsAllRows() {
+        let naturals: [CGFloat] = [300, 100] // sums to 400; gap of 200
+        // available large enough that both rise above 300. chrome = 48.
+        // available = 800 → each row = 400 (> 300). viewport = 848.
+        let viewport: CGFloat = 848
+        let result = BrowserWindow.fitRowHeights(
+            naturalRowHeights: naturals,
+            viewportHeight: viewport,
+            spacing: 16, padding: 16, minRowHeight: 160
+        )
+        let total = result.reduce(0, +) + chrome(rowCount: 2, spacing: 16, padding: 16)
+        XCTAssertEqual(total, viewport, accuracy: 0.001)
+        // Both above the taller natural, equal at a common level.
+        XCTAssertEqual(result[0], result[1], accuracy: 0.001)
+        XCTAssertGreaterThan(result[0], naturals[0])
+    }
+
+    /// STRETCH (water-fill): the rows + chrome fill the viewport exactly across a
+    /// range of naturals/viewports, and no stretch result ever falls below its
+    /// natural height.
+    func testFitRowHeightsStretchFillsViewportAndNeverBelowNatural() {
+        let cases: [(naturals: [CGFloat], viewport: CGFloat)] = [
+            ([200, 100], 1000),
+            ([300, 100, 50], 1200),
+            ([120, 120, 120], 900),
+            ([400, 50, 50, 50], 1100),
+        ]
+        for c in cases {
+            let result = BrowserWindow.fitRowHeights(
+                naturalRowHeights: c.naturals,
+                viewportHeight: c.viewport,
+                spacing: 16, padding: 16, minRowHeight: 160
+            )
+            let total = result.reduce(0, +)
+                + chrome(rowCount: c.naturals.count, spacing: 16, padding: 16)
+            XCTAssertEqual(total, c.viewport, accuracy: 0.001,
+                           "naturals \(c.naturals) viewport \(c.viewport)")
+            for (r, n) in zip(result, c.naturals) {
+                XCTAssertGreaterThanOrEqual(r, n - 0.001,
+                    "stretch result \(r) below natural \(n) for \(c.naturals)")
+            }
+        }
     }
 
     /// EXACT FIT: rows whose natural total already equals the available space are

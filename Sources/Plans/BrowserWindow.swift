@@ -100,10 +100,11 @@ struct BrowserWindow: View {
     ///
     /// - **Stretch (content fits):** when the rows' natural total plus the chrome
     ///   (`2*padding` + inter-row `spacing` gutters) is at most the measured
-    ///   `viewportHeight`, every row is scaled up by a single factor so the rows
-    ///   together exactly fill the available height — no empty gap at the bottom —
-    ///   while keeping their RELATIVE proportions (a light row stays shorter than a
-    ///   heavy one).
+    ///   `viewportHeight`, the SHORTER rows are leveled UP to a common water level
+    ///   so the rows together exactly fill the available height — no empty gap at the
+    ///   bottom. The shortest rows rise first; the tallest row stays at its natural
+    ///   height until the shorter rows catch up to it, so the tall row isn't
+    ///   exaggerated.
     /// - **Shrink (content overflows):** when the natural total overflows, rows are
     ///   scaled DOWN by the same kind of single factor toward fitting, but never
     ///   below `minRowHeight`. If even all rows at the floor still overflow, every
@@ -145,9 +146,21 @@ struct BrowserWindow: View {
             return naturalRowHeights.map { _ in minRowHeight }
         }
 
-        // Stretch (factor > 1) or shrink (factor < 1) every row by one factor so the
-        // rows together fill the available height, preserving relative proportions.
         let factor = availableForRows / naturalTotal
+
+        // Stretch path (content fits): level the SHORTER rows up to a common water
+        // level rather than scaling every row by the same factor, so the tallest row
+        // isn't exaggerated. No per-row floor concern — the stretch path only grows
+        // rows.
+        if factor >= 1 {
+            return Self.stretchShorterRows(
+                naturalRowHeights: naturalRowHeights,
+                availableForRows: availableForRows
+            )
+        }
+
+        // Shrink path (content overflows): scale every row DOWN by one factor,
+        // preserving relative proportions, toward fitting.
         var heights = naturalRowHeights.map { $0 * factor }
 
         // Enforce the per-row floor. Any row pinned UP to the floor steals budget
@@ -161,6 +174,58 @@ struct BrowserWindow: View {
             )
         }
         return heights
+    }
+
+    /// Water-fill ("level-up") distribution of the stretch slack across rows
+    /// (#055). Given each row's NATURAL height and the `availableForRows` budget
+    /// (already net of chrome), raises the SHORTEST rows to a common level `L` until
+    /// the budget is exactly filled, so no row ever drops below its natural height
+    /// and the tallest row stays at natural until the shorter rows catch up. The
+    /// level `L` is the largest value satisfying `sum(max(natural_i, L)) ==
+    /// availableForRows`; each result is `max(natural_i, L)`.
+    ///
+    /// Returns the naturals UNCHANGED when there is no slack (`availableForRows <=
+    /// naturalTotal`) and `[]` for empty input. Pure helper; the caller establishes
+    /// that this is the stretch path (slack exists). Mirrors `distributeWithFloor`
+    /// as the stretch-side sibling.
+    static func stretchShorterRows(
+        naturalRowHeights: [CGFloat],
+        availableForRows: CGFloat
+    ) -> [CGFloat] {
+        guard !naturalRowHeights.isEmpty else { return [] }
+
+        let naturalTotal = naturalRowHeights.reduce(0, +)
+        // No slack to distribute: leave the rows at their natural heights.
+        guard availableForRows > naturalTotal else { return naturalRowHeights }
+
+        // Sort ascending, tracking original indices so we can map the result back.
+        let sorted = naturalRowHeights.enumerated()
+            .sorted { $0.element < $1.element }
+        let s = sorted.map { $0.element }
+        let n = s.count
+
+        // Suffix sums: suffix[k] = sum of s[k..<n] (the rows kept at natural when the
+        // k smallest are raised to L). suffix[n] = 0.
+        var suffix = Array(repeating: CGFloat(0), count: n + 1)
+        for k in stride(from: n - 1, through: 0, by: -1) {
+            suffix[k] = suffix[k + 1] + s[k]
+        }
+
+        // Find the bracket: assume the k smallest rows are raised to L and the rest
+        // stay natural, so A = k*L + suffix[k] ⇒ L = (A - suffix[k]) / k. The valid
+        // bracket is the k where s[k-1] <= L <= s[k] (with s[-1] = -inf, s[n] = +inf).
+        var level = availableForRows / CGFloat(n) // k == n fallback (all below L)
+        for k in 1...n {
+            let candidate = (availableForRows - suffix[k]) / CGFloat(k)
+            let lowerOK = candidate >= s[k - 1]
+            let upperOK = (k == n) || candidate <= s[k]
+            if lowerOK && upperOK {
+                level = candidate
+                break
+            }
+        }
+
+        return naturalRowHeights.map { max($0, level) }
     }
 
     /// Resolves the per-row heights when one or more rows would fall below
