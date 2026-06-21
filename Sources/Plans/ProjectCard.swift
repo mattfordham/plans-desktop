@@ -459,11 +459,25 @@ struct ProjectCard: View {
                 .padding(.trailing, 8)
                 .modifier(OpenDetailOnTap(row: row, openWindow: openWindow))
 
+            // The title is the row's flexible column: it should claim ALL the
+            // width left after the fixed status/id/type cells and only wrap when
+            // that genuinely runs out. A bare wrapping `Text` doesn't do that
+            // inside a `Grid`: the Grid sizes a flexible column to its content's
+            // IDEAL width, and a multi-line `Text`'s ideal width is roughly its
+            // longest unbreakable word — so the column collapses to a few
+            // characters and the title wraps into a sliver while the rest of the
+            // row sits empty (the reported narrow-title / ballooned-row bug).
+            //
+            // Pinning a large `idealWidth` makes the Grid allocate this column the
+            // remaining width (it's the only column asking for a wide ideal), so
+            // the title fills the row; `maxWidth: .infinity` still lets it stretch
+            // to the real available width, and it only wraps once the card is
+            // narrower than that — exactly the intended table behavior.
             Text(row.title ?? "(untitled)")
                 .font(.body)
                 .fixedSize(horizontal: false, vertical: true)
                 .gridColumnAlignment(.leading)
-                .frame(maxWidth: .infinity, alignment: .leading)
+                .frame(idealWidth: 1_000_000, maxWidth: .infinity, alignment: .leading)
                 .modifier(OpenDetailOnTap(row: row, openWindow: openWindow))
 
             // Trailing per-row action: the single status-relevant Elaborate /
