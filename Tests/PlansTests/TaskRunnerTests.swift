@@ -340,6 +340,27 @@ final class TaskRunnerTests: XCTestCase {
         XCTAssertFalse(PlanDetailView.canElaborate(status: .pending, isBlocked: true))
     }
 
+    /// `PlanDetailView.canReElaborate` is the pure predicate behind the
+    /// Re-elaborate action's availability. Available only for an already-elaborated,
+    /// non-blocked task — re-elaboration refines an existing How checklist, so it
+    /// applies once a first elaboration produced one and not after work started.
+    @MainActor
+    func testCanReElaborateGating() {
+        // Elaborated, not blocked → available.
+        XCTAssertTrue(PlanDetailView.canReElaborate(status: .elaborated, isBlocked: false))
+
+        // Non-elaborated statuses → unavailable.
+        XCTAssertFalse(PlanDetailView.canReElaborate(status: .pending, isBlocked: false))
+        XCTAssertFalse(PlanDetailView.canReElaborate(status: .inProgress, isBlocked: false))
+        XCTAssertFalse(PlanDetailView.canReElaborate(status: .review, isBlocked: false))
+        XCTAssertFalse(PlanDetailView.canReElaborate(status: .inReview, isBlocked: false))
+        XCTAssertFalse(PlanDetailView.canReElaborate(status: .completed, isBlocked: false))
+        XCTAssertFalse(PlanDetailView.canReElaborate(status: nil, isBlocked: false))
+
+        // Blocked → unavailable even when elaborated.
+        XCTAssertFalse(PlanDetailView.canReElaborate(status: .elaborated, isBlocked: true))
+    }
+
     /// The coordinator tracks runs per task id: `isRunning(taskID:)` is false for
     /// an unknown task, and a freshly created `TaskRun` carries the right
     /// identity + mode before it is started.
@@ -494,9 +515,53 @@ final class TaskRunnerTests: XCTestCase {
         XCTAssertTrue(RunMode.capture.usesDescription)
         XCTAssertTrue(RunMode.captureElaborate.usesDescription)
         XCTAssertTrue(RunMode.executeYolo.usesDescription)
+        // reElaborate is the hybrid: it carries a description alongside its id.
+        XCTAssertTrue(RunMode.reElaborate.usesDescription)
 
         XCTAssertFalse(RunMode.execute.usesDescription)
         XCTAssertFalse(RunMode.elaborate.usesDescription)
+    }
+
+    /// `RunMode.usesTaskID` is the pure flag `TaskRun.spawn` consults to pass
+    /// `--task-id <id>`: true for the existing-task modes (`.execute`,
+    /// `.elaborate`, `.reElaborate`), false for the description-driven modes
+    /// (`.capture`, `.captureElaborate`, `.executeYolo`) whose task does not exist
+    /// yet. Asserting it directly verifies the arg-shape split without spawning a
+    /// real `node` process.
+    func testRunModeUsesTaskIDFlag() {
+        XCTAssertTrue(RunMode.execute.usesTaskID)
+        XCTAssertTrue(RunMode.elaborate.usesTaskID)
+        XCTAssertTrue(RunMode.reElaborate.usesTaskID)
+
+        XCTAssertFalse(RunMode.capture.usesTaskID)
+        XCTAssertFalse(RunMode.captureElaborate.usesTaskID)
+        XCTAssertFalse(RunMode.executeYolo.usesTaskID)
+    }
+
+    /// `.reElaborate` is the ONE mode where both arg flags are true: it refines an
+    /// EXISTING already-elaborated task (so `spawn` emits `--task-id`) using the
+    /// user's free-text guidance (so `spawn` also emits `--description`). The two
+    /// flags are independent — this is the hybrid that proves they are not an
+    /// either/or. It round-trips its raw value (the `--mode` flag) too.
+    func testReElaborateModeUsesBothTaskIDAndDescription() {
+        XCTAssertEqual(RunMode.reElaborate.rawValue, "reElaborate")
+        XCTAssertEqual(RunMode(rawValue: "reElaborate"), .reElaborate)
+
+        XCTAssertTrue(RunMode.reElaborate.usesTaskID)
+        XCTAssertTrue(RunMode.reElaborate.usesDescription)
+    }
+
+    /// A `.reElaborate` run carries BOTH an existing task id and the free-text
+    /// refinement `description` (threaded to the runner's `--description` flag),
+    /// so `TaskRun.spawn` can emit `--task-id <id>` and `--description <text>`
+    /// together. It is not running until started.
+    @MainActor
+    func testReElaborateRunCarriesTaskIDAndDescription() {
+        let run = TaskRun(taskID: "056", mode: .reElaborate, description: "Cover the offline case")
+        XCTAssertEqual(run.taskID, "056")
+        XCTAssertEqual(run.mode, .reElaborate)
+        XCTAssertEqual(run.description, "Cover the offline case")
+        XCTAssertFalse(run.isRunning)
     }
 
     // MARK: - Hand-off reconciliation (task #051)

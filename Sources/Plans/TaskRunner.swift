@@ -126,22 +126,51 @@ enum RunEvent: Codable, Equatable {
 /// `elaborated` (it does NOT execute); `executeYolo` runs
 /// `plan-execute "<description>" yolo` to auto-capture, auto-elaborate, and
 /// autonomously execute a new task from a free-text description (no existing
-/// task id), leaving it in `review`.
+/// task id), leaving it in `review`; `reElaborate` runs `plan-elaborate` in
+/// Path-C further-elaboration mode on an EXISTING already-elaborated task,
+/// folding a free-text `--description` in as the user's refinement guidance —
+/// the only mode that carries BOTH an existing task id AND a description.
 enum RunMode: String {
     case execute
     case elaborate
     case capture
     case captureElaborate
     case executeYolo
+    case reElaborate
 
-    /// Whether this mode is description-driven: the run has no existing task id,
-    /// so `TaskRun.spawn` passes `--description <text>` and omits `--task-id`.
-    /// True for `.capture` / `.captureElaborate` / `.executeYolo`; false for the
-    /// existing-task modes `.execute` / `.elaborate`. Pure flag (no I/O) so the
-    /// arg-shape contract is unit-testable without spawning a `node` process.
+    /// Whether this mode operates on an EXISTING task, so `TaskRun.spawn` passes
+    /// `--task-id <id>`. True for the existing-task modes `.execute` /
+    /// `.elaborate` / `.reElaborate`; false for the description-driven modes
+    /// (`.capture` / `.captureElaborate` / `.executeYolo`), whose task does not
+    /// exist yet. Pure flag (no I/O) so the arg-shape contract is unit-testable
+    /// without spawning a `node` process.
+    ///
+    /// This is INDEPENDENT of `usesDescription`: `.reElaborate` is the one mode
+    /// where both are true (it refines an existing task using free-text
+    /// guidance), so `spawn` emits `--task-id` AND `--description` for it.
+    var usesTaskID: Bool {
+        switch self {
+        case .execute, .elaborate, .reElaborate:
+            return true
+        case .capture, .captureElaborate, .executeYolo:
+            return false
+        }
+    }
+
+    /// Whether this mode carries a free-text `--description`, so `TaskRun.spawn`
+    /// passes `--description <text>`. True for the description-driven modes
+    /// (`.capture` / `.captureElaborate` / `.executeYolo`) AND for `.reElaborate`
+    /// (which folds the user's refinement guidance in alongside its `--task-id`).
+    /// False for the plain existing-task modes `.execute` / `.elaborate`. Pure
+    /// flag (no I/O) so the arg-shape contract is unit-testable without spawning a
+    /// `node` process.
+    ///
+    /// This is INDEPENDENT of `usesTaskID`: a mode can need both (`.reElaborate`)
+    /// or just one — they are not an either/or, so `spawn` consults each flag on
+    /// its own.
     var usesDescription: Bool {
         switch self {
-        case .capture, .captureElaborate, .executeYolo:
+        case .capture, .captureElaborate, .executeYolo, .reElaborate:
             return true
         case .execute, .elaborate:
             return false
@@ -379,17 +408,18 @@ final class TaskRun {
             scriptURL.path,
             "--project-root", projectPath,
         ]
-        // Capture / captureElaborate / executeYolo runs have no real task id
-        // (the task does not exist yet); they carry a free-text `--description`
-        // instead. execute/elaborate operate on an existing task and pass
-        // `--task-id`. The set is centralized in `RunMode.usesDescription` so the
-        // arg-shape contract is unit-testable without spawning a process.
-        if mode.usesDescription {
-            if let description, !description.isEmpty {
-                arguments += ["--description", description]
-            }
-        } else {
+        // The two arg flags are INDEPENDENT, not either/or. Existing-task modes
+        // (execute / elaborate / reElaborate) pass `--task-id`; description-driven
+        // modes (capture / captureElaborate / executeYolo) pass `--description`.
+        // reElaborate is the one hybrid that passes BOTH (it refines an existing
+        // task using free-text guidance). The two flag sets are centralized in
+        // `RunMode.usesTaskID` / `RunMode.usesDescription` so the arg-shape
+        // contract is unit-testable without spawning a process.
+        if mode.usesTaskID {
             arguments += ["--task-id", taskID]
+        }
+        if mode.usesDescription, let description, !description.isEmpty {
+            arguments += ["--description", description]
         }
         arguments += ["--mode", mode.rawValue]
         proc.arguments = arguments
@@ -688,13 +718,18 @@ final class TaskRunner {
 
     /// Launches a run for `taskID` in `projectPath` with `mode`. If a run for
     /// this task is already in flight, this is a no-op; otherwise it replaces any
-    /// prior finished run for the task and starts a fresh one.
-    func run(projectPath: String, taskID: String, mode: RunMode = .execute) {
+    /// prior finished run for the task and starts a fresh one. `description` is
+    /// the free-text guidance threaded to the runner's `--description` flag for a
+    /// `.reElaborate` refinement of an existing task; it defaults to `nil` so the
+    /// plain existing-task modes (`.execute` / `.elaborate`) and all existing call
+    /// sites compile unchanged.
+    func run(projectPath: String, taskID: String, mode: RunMode = .execute,
+             description: String? = nil) {
         if let existing = runs[taskID], existing.isRunning {
             runnerLog.notice("run ignored: task \(taskID, privacy: .public) is already running")
             return
         }
-        let taskRun = TaskRun(taskID: taskID, mode: mode)
+        let taskRun = TaskRun(taskID: taskID, mode: mode, description: description)
         runs[taskID] = taskRun
         taskRun.start(projectPath: projectPath) { [weak self] in
             self?.onAnyRunFinished?()

@@ -52,6 +52,12 @@ struct PlanDetailView: View {
     /// dismissing the sheet is decoupled from the run's lifecycle.
     @State private var showProgress = false
 
+    /// Whether the "Refine Plan" sheet (#056) is presented. Raised by the
+    /// "Refine" header action (only shown for an elaborated, non-blocked task)
+    /// and lowered by the sheet's own Cancel/Refine. Drives the
+    /// `ReElaborateModal` for THIS view's task.
+    @State private var showReElaborate = false
+
     /// The resolved row for `rowID` across all projects' active rows, or `nil`
     /// when absent. Re-derived from the live store on each render.
     private var row: TaskRow? {
@@ -109,6 +115,15 @@ struct PlanDetailView: View {
                     if let id = row?.task.id { runner.dismiss(taskID: id) }
                     store.reload()
                 }
+        }
+        // The "Refine Plan" sheet (#056). Presented only when a row is resolved
+        // (the Refine action that raises this only renders inside the `if let
+        // row` header), so the unwrap is safe; if the row vanished mid-sheet we
+        // render nothing rather than crash.
+        .sheet(isPresented: $showReElaborate) {
+            if let row {
+                ReElaborateModal(taskID: row.task.id, projectPath: row.projectPath)
+            }
         }
         // NOTE: closing the detail window deliberately does NOT stop the run.
         // Runs are independent of any window now (they can be launched straight
@@ -168,6 +183,20 @@ struct PlanDetailView: View {
                                        taskID: row.task.id, mode: .elaborate)
                         } label: {
                             Label("Elaborate", systemImage: "sparkles")
+                        }
+                    }
+
+                    // "Refine" — reopens an already-elaborated plan in
+                    // `plan-elaborate` Path C with the user's guidance to refine
+                    // its How checklist (#056). Available only for an elaborated,
+                    // non-blocked task — so an elaborated plan shows BOTH Refine
+                    // and Execute (intended). Uses `pencil.and.outline` to read
+                    // distinctly from the pending Elaborate's `sparkles`.
+                    if Self.canReElaborate(status: row.task.status, isBlocked: row.task.isBlocked) {
+                        Button {
+                            showReElaborate = true
+                        } label: {
+                            Label("Refine", systemImage: "pencil.and.outline")
                         }
                     }
 
@@ -234,6 +263,16 @@ struct PlanDetailView: View {
     static func canElaborate(status: TaskStatus?, isBlocked: Bool) -> Bool {
         guard !isBlocked else { return false }
         return status == .pending
+    }
+
+    /// Pure predicate for the "Re-elaborate" action's availability. Available only
+    /// for an already-`elaborated` task that is not blocked — re-elaboration
+    /// refines the existing How checklist before an Execute run, so it only makes
+    /// sense once a first elaboration has produced one (and not after work has
+    /// started or completed).
+    static func canReElaborate(status: TaskStatus?, isBlocked: Bool) -> Bool {
+        guard !isBlocked else { return false }
+        return status == .elaborated
     }
 
     /// Resolves the on-disk markdown file for a task, so the read-only
@@ -501,6 +540,7 @@ struct RunProgressSheet: View {
     private var modeVerb: String {
         switch run?.mode {
         case .elaborate: return "Elaborating"
+        case .reElaborate: return "Refining"
         case .capture: return "Capturing"
         case .captureElaborate: return "Capturing & elaborating"
         case .executeYolo: return "Capturing & executing"

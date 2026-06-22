@@ -68,6 +68,14 @@ struct ProjectCard: View {
     /// on each row's spinner.
     @State private var progressPopoverTaskID: String? = nil
 
+    /// The pending "Refine Plan" request (#056), or `nil` when no Refine sheet is
+    /// open. Set by a row's Refine glyph (elaborated, non-blocked tasks only) to
+    /// that row's task id + project path; an `.sheet(item:)` keyed on it presents
+    /// the `ReElaborateModal` for exactly that task. An `Identifiable` struct
+    /// (rather than a bare bool + separate id) so the sheet always targets the
+    /// right row even if several elaborated rows are present.
+    @State private var reElaborateRequest: ReElaborateRequest? = nil
+
     /// A per-task `Binding<Bool>` for the run-progress popover: it reads `true`
     /// only when `progressPopoverTaskID` is this `taskID`, and on set assigns the
     /// id when raised / clears it when lowered — so opening one row's popover (or
@@ -200,6 +208,13 @@ struct ProjectCard: View {
             RoundedRectangle(cornerRadius: 12)
                 .stroke(.separator, lineWidth: 1)
         )
+        // The "Refine Plan" sheet (#056), keyed on the requesting row's task so
+        // the modal targets exactly the row whose Refine glyph was tapped. The
+        // `ReElaborateModal` hands the user's guidance to the runner in
+        // `.reElaborate` mode (the sole `.plans/` writer, §2).
+        .sheet(item: $reElaborateRequest) { request in
+            ReElaborateModal(taskID: request.taskID, projectPath: request.projectPath)
+        }
     }
 
     /// The growable middle content of the card: the in-flight capture rows and
@@ -551,9 +566,27 @@ struct ProjectCard: View {
                 }
             } else if PlanDetailView.canWork(status: row.task.status,
                                              isBlocked: row.task.isBlocked) {
-                RowActionGlyph(systemImage: "play.fill", help: "Execute this plan") {
-                    cardLog.notice("card Execute clicked: task=\(row.task.id, privacy: .public)")
-                    runner.run(projectPath: row.projectPath, taskID: row.task.id, mode: .execute)
+                // An elaborated, non-blocked task surfaces BOTH Refine and Execute
+                // (#056). The two glyphs sit in a tight, zero-spacing HStack — each
+                // `RowActionGlyph` is its own 22pt-tall cell with built-in leading
+                // padding, so the pair stays within the row's pinned 22pt height
+                // and the row's vertical metrics match its single-glyph neighbours.
+                // Refine opens the `ReElaborateModal` via the card's
+                // `.sheet(item:)`; Execute launches the run as before. `canWork`
+                // and `canReElaborate` share the same elaborated+non-blocked gate,
+                // so Refine appears exactly when Execute does.
+                HStack(spacing: 0) {
+                    RowActionGlyph(systemImage: "pencil.and.outline", help: "Refine this plan") {
+                        cardLog.notice("card Refine clicked: task=\(row.task.id, privacy: .public)")
+                        reElaborateRequest = ReElaborateRequest(
+                            taskID: row.task.id,
+                            projectPath: row.projectPath
+                        )
+                    }
+                    RowActionGlyph(systemImage: "play.fill", help: "Execute this plan") {
+                        cardLog.notice("card Execute clicked: task=\(row.task.id, privacy: .public)")
+                        runner.run(projectPath: row.projectPath, taskID: row.task.id, mode: .execute)
+                    }
                 }
             } else {
                 // No action for this status: an empty spacer of the same height
@@ -586,6 +619,15 @@ struct ProjectCard: View {
             }
         }
     }
+}
+
+/// A pending "Refine Plan" request (#056): the task + project a tapped Refine
+/// glyph targets, driving the card's `.sheet(item:)`. `Identifiable` on the task
+/// id so SwiftUI presents (and re-targets) the sheet for the right row.
+private struct ReElaborateRequest: Identifiable {
+    let taskID: String
+    let projectPath: String
+    var id: String { taskID }
 }
 
 /// The project star/unstar glyph (#035). A `Button` with `.buttonStyle(.plain)`

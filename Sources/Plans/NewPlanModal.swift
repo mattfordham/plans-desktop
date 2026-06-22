@@ -374,7 +374,12 @@ struct NewPlanModal: View {
 /// makes a ZStack placeholder overlay drift away from the real caret as the font
 /// changes. Driving the `NSTextView` directly lets the placeholder be positioned
 /// against the exact same inset (see `NewPlanModal.editor`), so they always align.
-private struct PlanTextEditor: NSViewRepresentable {
+///
+/// Declared at module visibility (not `private`) so the single-field
+/// `ReElaborateModal` (#056) can reuse this exact editor — and its
+/// inset/placeholder-alignment contract — rather than duplicating the
+/// `NSTextView` subclass.
+struct PlanTextEditor: NSViewRepresentable {
     @Binding var text: String
     let font: NSFont
     /// The text view's `textContainerInset`. The placeholder mirrors this value.

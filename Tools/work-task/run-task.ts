@@ -7,6 +7,10 @@
  *                always in `worktree` isolation, leaving it in `review`.
  *   - `elaborate`: drives `plan-elaborate` to research/flesh out a pending
  *                task autonomously (no interactive prompts).
+ *   - `reElaborate`: drives `plan-elaborate` (Path C, further elaboration) on an
+ *                already-elaborated task, folding in user-provided `--description`
+ *                guidance to refine/add to the plan, leaving it `elaborated`. This
+ *                is the only mode that needs BOTH `--task-id` AND `--description`.
  *   - `capture`: drives `plan-capture` to record a new task from a free-text
  *                `--description`, leaving it in `pending` (no chaining).
  *   - `captureElaborate`: drives `plan-capture` then chains into
@@ -54,16 +58,17 @@ const truncatingStopReasons = new Set([
 type Mode =
   | "execute"
   | "elaborate"
+  | "reElaborate"
   | "capture"
   | "captureElaborate"
   | "executeYolo";
 
 interface Args {
   projectRoot: string;
-  /** Required for execute/elaborate; undefined for capture/captureElaborate/executeYolo (no task exists yet). */
+  /** Required for execute/elaborate/reElaborate; undefined for capture/captureElaborate/executeYolo (no task exists yet). */
   taskId?: string;
   mode: Mode;
-  /** Required for capture/captureElaborate/executeYolo: the free-text description to act on. */
+  /** Required for capture/captureElaborate/executeYolo AND reElaborate: the free-text description/guidance to act on. */
   description?: string;
 }
 
@@ -96,6 +101,7 @@ function parseArgs(argv: string[]): Args | null {
       if (
         value !== "execute" &&
         value !== "elaborate" &&
+        value !== "reElaborate" &&
         value !== "capture" &&
         value !== "captureElaborate" &&
         value !== "executeYolo"
@@ -121,6 +127,15 @@ function parseArgs(argv: string[]): Args | null {
       return null;
     }
     return { projectRoot, mode, description };
+  }
+
+  if (mode === "reElaborate") {
+    // reElaborate operates on an EXISTING task AND carries free-text guidance:
+    // it is the only mode that requires both a task id and a description.
+    if (!taskId || !description) {
+      return null;
+    }
+    return { projectRoot, taskId, mode, description };
   }
 
   // execute / elaborate operate on an existing task.
@@ -202,6 +217,46 @@ function buildElaboratePrompt(taskId: string): string {
     "2. Research the codebase as needed and produce a complete How checklist,",
     "   Verification criteria, and Impact Scope per the skill's conventions.",
     "3. Leave the task in the `elaborated` state when done.",
+    "",
+    "Work autonomously to completion. Do not ask for confirmation.",
+  ].join("\n");
+}
+
+/**
+ * Build the prompt for a `reElaborate` run. This is plan-elaborate's Path C
+ * ("further elaboration" of an already-elaborated task): we drive
+ * `/plan-elaborate <id>` again on the existing task, but fold in user-provided
+ * guidance text (the `description`) as the direction for what to add, refine, or
+ * clarify. Like the other hand-offs this is unattended, so the agent must work
+ * autonomously and record reasonable assumptions instead of asking. The task
+ * stays in the `elaborated` state.
+ */
+function buildReElaboratePrompt(taskId: string, description: string): string {
+  return [
+    `Use the \`plan-elaborate\` skill to FURTHER elaborate (Path C) the existing,`,
+    `already-elaborated plans-cc task with id ${taskId}:`,
+    "",
+    `/plan-elaborate ${taskId}`,
+    "",
+    `The user has provided the following guidance for what to add, refine, or`,
+    `clarify in this further elaboration — fold it into the plan as the direction`,
+    `for this pass:`,
+    "",
+    `"""`,
+    description,
+    `"""`,
+    "",
+    "Requirements:",
+    "1. Treat this as further elaboration of an ALREADY-elaborated task. Use the",
+    "   guidance above to drive what changes — add the missing constraints, cases,",
+    "   or redirection it describes, refining the How checklist, Verification",
+    "   criteria, and Impact Scope accordingly.",
+    "2. Work fully autonomously. Do NOT ask the user any questions — there is no",
+    "   interactive UI to answer them. Where the skill would prompt for a design",
+    "   decision, make the most reasonable choice yourself and record it in the",
+    "   task's Assumptions section (flagged as a discovered assumption).",
+    "3. Research the codebase as needed to keep the plan accurate.",
+    "4. Leave the task in the `elaborated` state when done. Do NOT execute it.",
     "",
     "Work autonomously to completion. Do not ask for confirmation.",
   ].join("\n");
@@ -316,6 +371,9 @@ function buildPrompt(args: Args): string {
   if (args.mode === "executeYolo") {
     return buildExecuteYoloPrompt(args.description ?? "");
   }
+  if (args.mode === "reElaborate") {
+    return buildReElaboratePrompt(args.taskId ?? "", args.description ?? "");
+  }
   if (args.mode === "elaborate") {
     return buildElaboratePrompt(args.taskId ?? "");
   }
@@ -378,7 +436,7 @@ async function main(): Promise<void> {
   const args = parseArgs(process.argv.slice(2));
   if (!args) {
     emitError(
-      "Missing or invalid arguments. Usage: run-task.js --project-root <abs path> [--mode execute|elaborate|capture|captureElaborate|executeYolo] (--task-id <NNN> for execute/elaborate; --description <text> for capture/captureElaborate/executeYolo)",
+      "Missing or invalid arguments. Usage: run-task.js --project-root <abs path> [--mode execute|elaborate|reElaborate|capture|captureElaborate|executeYolo] (--task-id <NNN> for execute/elaborate; --description <text> for capture/captureElaborate/executeYolo; BOTH --task-id <NNN> and --description <text> for reElaborate)",
     );
     process.exit(1);
     return;
