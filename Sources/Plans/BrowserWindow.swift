@@ -98,13 +98,17 @@ struct BrowserWindow: View {
     /// (#039). Given each row's NATURAL height (the tallest card in that row, as
     /// measured) in display order, returns the FINAL height for each row so that:
     ///
-    /// - **Stretch (content fits):** when the rows' natural total plus the chrome
-    ///   (`2*padding` + inter-row `spacing` gutters) is at most the measured
-    ///   `viewportHeight`, the SHORTER rows are leveled UP to a common water level
-    ///   so the rows together exactly fill the available height — no empty gap at the
-    ///   bottom. The shortest rows rise first; the tallest row stays at its natural
-    ///   height until the shorter rows catch up to it, so the tall row isn't
-    ///   exaggerated.
+    /// - **Stretch (content fits, #057):** when the rows' natural total plus the
+    ///   chrome (`2*padding` + inter-row `spacing` gutters) is at most the measured
+    ///   `viewportHeight`, every SHORT row is lifted to the even per-row share of the
+    ///   budget (`fillShorterRows`, `height_i = max(natural_i, share)`) — killing the
+    ///   empty band that used to sit beneath a short bottom row. A short row grows up
+    ///   to `share` even PAST a tall row's natural height; a row already above `share`
+    ///   stays at its natural height. This is DELIBERATELY not exact-fill: when a tall
+    ///   row stays above `share` the rows may sum to MORE than the available height,
+    ///   and the surrounding `ScrollView` absorbs the surplus (only when every row is
+    ///   below `share` does it fill exactly). Trading the exact-fill invariant for a
+    ///   visibly lifted short row is the point of the fix.
     /// - **Shrink (content overflows):** when the natural total overflows, rows are
     ///   scaled DOWN by the same kind of single factor toward fitting, but never
     ///   below `minRowHeight`. If even all rows at the floor still overflow, every
@@ -148,12 +152,14 @@ struct BrowserWindow: View {
 
         let factor = availableForRows / naturalTotal
 
-        // Stretch path (content fits): level the SHORTER rows up to a common water
-        // level rather than scaling every row by the same factor, so the tallest row
-        // isn't exaggerated. No per-row floor concern — the stretch path only grows
-        // rows.
+        // Stretch path (content fits, #057): lift every SHORT row to the even per-row
+        // share (max(natural_i, share)) — short rows may rise PAST a tall row's natural
+        // height to kill the empty band beneath them; tall rows already above the share
+        // stay at natural. This may OVER-FILL (sum > availableForRows); the ScrollView
+        // absorbs the surplus. At exact fit (factor == 1) fillShorterRows returns the
+        // naturals unchanged. No per-row floor concern: the stretch path only grows rows.
         if factor >= 1 {
-            return Self.stretchShorterRows(
+            return Self.fillShorterRows(
                 naturalRowHeights: naturalRowHeights,
                 availableForRows: availableForRows
             )
@@ -176,56 +182,49 @@ struct BrowserWindow: View {
         return heights
     }
 
-    /// Water-fill ("level-up") distribution of the stretch slack across rows
-    /// (#055). Given each row's NATURAL height and the `availableForRows` budget
-    /// (already net of chrome), raises the SHORTEST rows to a common level `L` until
-    /// the budget is exactly filled, so no row ever drops below its natural height
-    /// and the tallest row stays at natural until the shorter rows catch up. The
-    /// level `L` is the largest value satisfying `sum(max(natural_i, L)) ==
-    /// availableForRows`; each result is `max(natural_i, L)`.
+    /// Over-fill distribution of the stretch slack across rows (#057). Given each
+    /// row's NATURAL height and the `availableForRows` budget (already net of chrome),
+    /// lifts every SHORT row up to the even per-row share of the budget while leaving
+    /// TALL rows at their natural height:
     ///
-    /// Returns the naturals UNCHANGED when there is no slack (`availableForRows <=
-    /// naturalTotal`) and `[]` for empty input. Pure helper; the caller establishes
-    /// that this is the stretch path (slack exists). Mirrors `distributeWithFloor`
-    /// as the stretch-side sibling.
-    static func stretchShorterRows(
+    ///     height_i = max(natural_i, share)   where share = availableForRows / rowCount
+    ///
+    /// A short row grows up to `share` even PAST a tall row's natural height — this is
+    /// what kills the empty band that used to sit beneath a short bottom row. A row
+    /// whose natural height already exceeds `share` stays at its natural height (this
+    /// is a stretch-only path; rows never shrink).
+    ///
+    /// DELIBERATELY NOT exact-fill: because tall rows stay at their (larger than
+    /// `share`) natural height while short rows are lifted to `share`, the result may
+    /// sum to MORE than `availableForRows`. That surplus is intended — the surrounding
+    /// `ScrollView` absorbs it. Abandoning the exact-fill invariant on the stretch
+    /// path is the whole point of the #057 fix: it is what visibly lifts the short row
+    /// instead of leaving a dead band. (Only when every row is below `share`, e.g.
+    /// all-equal rows or a single short row, does the result happen to fill exactly.)
+    ///
+    /// Guarantees: (a) no row ever drops below its natural height (`max(natural_i, …)`),
+    /// (b) every row reaches at least `share` unless its natural already exceeds it,
+    /// (c) the naturals are returned UNCHANGED when there is no slack
+    /// (`availableForRows <= naturalTotal`) — mostly defensive, the caller routes here
+    /// only on the slack/stretch path — and (d) `[]` is returned for empty input.
+    /// `max(natural_i, share)` is monotonic and trivially total. Pure helper.
+    static func fillShorterRows(
         naturalRowHeights: [CGFloat],
         availableForRows: CGFloat
     ) -> [CGFloat] {
         guard !naturalRowHeights.isEmpty else { return [] }
 
         let naturalTotal = naturalRowHeights.reduce(0, +)
-        // No slack to distribute: leave the rows at their natural heights.
+        // No real slack to distribute: leave the rows at their natural heights. This
+        // also preserves the exact-fit boundary (factor == 1) when routed here — at
+        // exact fit `share == naturalTotal / rowCount`, and over-filling uneven rows
+        // there would wrongly inflate the short rows.
         guard availableForRows > naturalTotal else { return naturalRowHeights }
 
-        // Sort ascending, tracking original indices so we can map the result back.
-        let sorted = naturalRowHeights.enumerated()
-            .sorted { $0.element < $1.element }
-        let s = sorted.map { $0.element }
-        let n = s.count
-
-        // Suffix sums: suffix[k] = sum of s[k..<n] (the rows kept at natural when the
-        // k smallest are raised to L). suffix[n] = 0.
-        var suffix = Array(repeating: CGFloat(0), count: n + 1)
-        for k in stride(from: n - 1, through: 0, by: -1) {
-            suffix[k] = suffix[k + 1] + s[k]
-        }
-
-        // Find the bracket: assume the k smallest rows are raised to L and the rest
-        // stay natural, so A = k*L + suffix[k] ⇒ L = (A - suffix[k]) / k. The valid
-        // bracket is the k where s[k-1] <= L <= s[k] (with s[-1] = -inf, s[n] = +inf).
-        var level = availableForRows / CGFloat(n) // k == n fallback (all below L)
-        for k in 1...n {
-            let candidate = (availableForRows - suffix[k]) / CGFloat(k)
-            let lowerOK = candidate >= s[k - 1]
-            let upperOK = (k == n) || candidate <= s[k]
-            if lowerOK && upperOK {
-                level = candidate
-                break
-            }
-        }
-
-        return naturalRowHeights.map { max($0, level) }
+        // The even per-row share. Short rows rise to it; tall rows (already above it)
+        // stay at natural. The total may exceed the budget — the ScrollView absorbs it.
+        let share = availableForRows / CGFloat(naturalRowHeights.count)
+        return naturalRowHeights.map { max($0, share) }
     }
 
     /// Resolves the per-row heights when one or more rows would fall below

@@ -663,41 +663,44 @@ final class BrowserWindowTests: XCTestCase {
             viewportHeight: viewport,
             spacing: 16, padding: 16, minRowHeight: 160
         )
-        // Rows + chrome fill the viewport exactly.
+        // chrome = 48, available = 952, share = 476. Both naturals (200, 100) are
+        // below share so both rise to 476 → the rows happen to fill exactly here.
         let total = result.reduce(0, +) + chrome(rowCount: 2, spacing: 16, padding: 16)
         XCTAssertEqual(total, viewport, accuracy: 0.001)
+        XCTAssertEqual(result[0], 476, accuracy: 0.001)
+        XCTAssertEqual(result[1], 476, accuracy: 0.001)
         // No row drops below its natural height.
         XCTAssertGreaterThanOrEqual(result[0], naturals[0] - 0.001)
         XCTAssertGreaterThanOrEqual(result[1], naturals[1] - 0.001)
-        // The gap between the rows shrinks vs natural (was 100).
+        // The gap between the rows shrinks vs natural (was 100, now 0).
         XCTAssertLessThan(result[0] - result[1], naturals[0] - naturals[1])
         // The shorter row gains more absolute height than the taller row.
         XCTAssertGreaterThan(result[1] - naturals[1], result[0] - naturals[0])
     }
 
-    /// STRETCH (water-fill): when the slack is small enough that it can't lift the
-    /// short row all the way to the tall row's height, ALL the slack goes to the
-    /// short row and the tall row stays at its natural height.
+    /// STRETCH (over-fill): the short row grows to the per-row share even when that
+    /// pushes the total past the budget; the tall row (already above share) stays at
+    /// its natural height and the ScrollView absorbs the surplus.
     func testFitRowHeightsStretchSlackGoesToShortRowFirst() {
         let naturals: [CGFloat] = [300, 100] // sums to 400; gap of 200
-        // availableForRows just enough to lift the short row partway, not past 300.
-        // chrome = 48; pick available = 450 → viewport = 498.
+        // chrome = 48; pick available = 450 → viewport = 498. share = 225.
         let viewport: CGFloat = 498
         let result = BrowserWindow.fitRowHeights(
             naturalRowHeights: naturals,
             viewportHeight: viewport,
             spacing: 16, padding: 16, minRowHeight: 160
         )
-        let total = result.reduce(0, +) + chrome(rowCount: 2, spacing: 16, padding: 16)
-        XCTAssertEqual(total, viewport, accuracy: 0.001)
-        // available 450 - tall natural 300 = 150 < 200 gap, so short rises to 150,
-        // tall stays at 300.
+        // max(300, 225) = 300 (tall stays natural) ; max(100, 225) = 225 (short rises
+        // to the share). Total 525 > 450 → over-fills; ScrollView scrolls.
         XCTAssertEqual(result[0], 300, accuracy: 0.001)
-        XCTAssertEqual(result[1], 150, accuracy: 0.001)
+        XCTAssertEqual(result[1], 225, accuracy: 0.001)
+        let total = result.reduce(0, +) + chrome(rowCount: 2, spacing: 16, padding: 16)
+        XCTAssertGreaterThan(total, viewport)
     }
 
-    /// STRETCH (water-fill): with surplus beyond the gap both rows rise above the
-    /// taller natural to a COMMON level, still filling the viewport exactly.
+    /// STRETCH (over-fill): with surplus beyond the gap both rows rise above the
+    /// taller natural to a COMMON level (the per-row share); here that level happens
+    /// to fill the viewport exactly.
     func testFitRowHeightsStretchSurplusBeyondGapLevelsAllRows() {
         let naturals: [CGFloat] = [300, 100] // sums to 400; gap of 200
         // available large enough that both rise above 300. chrome = 48.
@@ -715,9 +718,11 @@ final class BrowserWindowTests: XCTestCase {
         XCTAssertGreaterThan(result[0], naturals[0])
     }
 
-    /// STRETCH (water-fill): the rows + chrome fill the viewport exactly across a
-    /// range of naturals/viewports, and no stretch result ever falls below its
-    /// natural height.
+    /// STRETCH (over-fill): the genuinely-still-true invariants. No stretch result
+    /// ever falls below its natural height, and the rows + chrome at least fill the
+    /// viewport (they may EXCEED it — the over-fill policy lets a short row rise to
+    /// the per-row share past the exact-fit point, with the ScrollView absorbing any
+    /// surplus). The "fills exactly" invariant is deliberately gone on this path.
     func testFitRowHeightsStretchFillsViewportAndNeverBelowNatural() {
         let cases: [(naturals: [CGFloat], viewport: CGFloat)] = [
             ([200, 100], 1000),
@@ -733,7 +738,9 @@ final class BrowserWindowTests: XCTestCase {
             )
             let total = result.reduce(0, +)
                 + chrome(rowCount: c.naturals.count, spacing: 16, padding: 16)
-            XCTAssertEqual(total, c.viewport, accuracy: 0.001,
+            // Over-fill never leaves an empty band: the content at least fills the
+            // viewport (and may exceed it, which the ScrollView handles).
+            XCTAssertGreaterThanOrEqual(total, c.viewport - 0.001,
                            "naturals \(c.naturals) viewport \(c.viewport)")
             for (r, n) in zip(result, c.naturals) {
                 XCTAssertGreaterThanOrEqual(r, n - 0.001,
@@ -803,6 +810,169 @@ final class BrowserWindowTests: XCTestCase {
         XCTAssertEqual(result.count, 1)
         let total = result[0] + chrome(rowCount: 1, spacing: 16, padding: 16)
         XCTAssertEqual(total, viewport, accuracy: 0.001)
+    }
+
+    // MARK: - fillShorterRows (over-fill to per-row share #057)
+
+    /// #057 over-fill policy: each row's final height is `max(natural_i, share)`
+    /// where `share = availableForRows / rowCount`. The short row grows up to the
+    /// per-row share — even PAST the tall row's natural height — killing the empty
+    /// band beneath it. Here `[350, 180]@800`, share = 400, so BOTH rows reach 400
+    /// (the short row's natural 180 and the tall row's natural 350 are both below
+    /// share), and the total happens to fill the budget exactly.
+    func testFillShorterRowsScreenshotShortRowAbsorbsSlack() {
+        let naturals: [CGFloat] = [350, 180] // tall row, short bottom row
+        let available: CGFloat = 800 // share = 400; both naturals below it
+        let result = BrowserWindow.fillShorterRows(
+            naturalRowHeights: naturals,
+            availableForRows: available
+        )
+        let share = available / CGFloat(naturals.count) // 400
+        // max(350, 400) = 400 ; max(180, 400) = 400.
+        XCTAssertEqual(result[0], 400, accuracy: 0.001)
+        XCTAssertEqual(result[1], 400, accuracy: 0.001)
+        // Never below natural.
+        XCTAssertGreaterThanOrEqual(result[0], naturals[0] - 0.001)
+        XCTAssertGreaterThanOrEqual(result[1], naturals[1] - 0.001)
+        // The short row rises to AT LEAST the tall row's natural height — the band
+        // beneath it is gone (the whole point of #057).
+        XCTAssertGreaterThanOrEqual(result[1], naturals[0] - 0.001)
+        // The short row gains MORE absolute height than the tall row (it was lower
+        // so it has farther to climb to the common share).
+        XCTAssertGreaterThan(result[1] - naturals[1], result[0] - naturals[0])
+        // No row exceeds the per-row share (here both equal it).
+        for h in result { XCTAssertLessThanOrEqual(h, share + 0.001) }
+        // This case happens to fill the budget exactly (both naturals < share).
+        XCTAssertEqual(result.reduce(0, +), available, accuracy: 0.001)
+    }
+
+    /// #057 over-fill, band-killing surplus regime: `[350, 180]@600`, share = 300.
+    /// The short row grows to 300 (NOT 180, NOT clamped down to make the total fit),
+    /// the tall row stays at its natural 350 (already above share), and the total
+    /// 650 EXCEEDS the 600 budget — the surrounding ScrollView absorbs the surplus.
+    /// This is the deliberate abandonment of exact-fill that kills the empty band.
+    func testFillShorterRowsOverFillsPastBudgetToKillBand() {
+        let naturals: [CGFloat] = [350, 180]
+        let available: CGFloat = 600 // share = 300
+        let result = BrowserWindow.fillShorterRows(
+            naturalRowHeights: naturals,
+            availableForRows: available
+        )
+        // max(350, 300) = 350 (tall stays natural) ; max(180, 300) = 300.
+        XCTAssertEqual(result[0], 350, accuracy: 0.001)
+        XCTAssertEqual(result[1], 300, accuracy: 0.001)
+        // The short row grew to the share (300), NOT clamped to fit the budget.
+        XCTAssertEqual(result[1], 300, accuracy: 0.001)
+        // Total deliberately exceeds the budget; the ScrollView scrolls.
+        XCTAssertEqual(result.reduce(0, +), 650, accuracy: 0.001)
+        XCTAssertGreaterThan(result.reduce(0, +), available)
+    }
+
+    /// #057 over-fill, multi-row: ONE tall row + TWO short rows. Each short row rises
+    /// to the per-row share; the tall row stays at its natural height (already above
+    /// share). `[350, 150, 130]@900`, share = 300 → `[350, 300, 300]`, total 950 > 900
+    /// so the ScrollView absorbs the surplus.
+    func testFillShorterRowsTwoShortRowsRiseTallStaysNatural() {
+        let naturals: [CGFloat] = [350, 150, 130]
+        let available: CGFloat = 900 // share = 300; tall (350) > share
+        let result = BrowserWindow.fillShorterRows(
+            naturalRowHeights: naturals,
+            availableForRows: available
+        )
+        // Tall row stays at its natural height (already exceeds the per-row share).
+        XCTAssertEqual(result[0], 350, accuracy: 0.001)
+        // The two short rows each rise to the per-row share of 300.
+        XCTAssertEqual(result[1], 300, accuracy: 0.001)
+        XCTAssertEqual(result[2], 300, accuracy: 0.001)
+        // Each short row gained height; neither dropped below natural.
+        XCTAssertGreaterThan(result[1], naturals[1])
+        XCTAssertGreaterThan(result[2], naturals[2])
+        // Total over-fills the budget (350 + 300 + 300 = 950 > 900).
+        XCTAssertEqual(result.reduce(0, +), 950, accuracy: 0.001)
+        XCTAssertGreaterThan(result.reduce(0, +), available)
+    }
+
+    /// No slack (`availableForRows <= naturalTotal`) leaves the rows at their
+    /// natural heights unchanged.
+    func testFillShorterRowsNoSlackReturnsNaturals() {
+        let naturals: [CGFloat] = [350, 180]
+        let result = BrowserWindow.fillShorterRows(
+            naturalRowHeights: naturals,
+            availableForRows: 530 // == natural total, no slack
+        )
+        XCTAssertEqual(result, naturals)
+        // Strictly less than the total also returns naturals.
+        let result2 = BrowserWindow.fillShorterRows(
+            naturalRowHeights: naturals,
+            availableForRows: 400
+        )
+        XCTAssertEqual(result2, naturals)
+    }
+
+    /// Empty input yields an empty result (no divide-by-zero).
+    func testFillShorterRowsEmptyInputIsEmpty() {
+        XCTAssertTrue(
+            BrowserWindow.fillShorterRows(naturalRowHeights: [], availableForRows: 800).isEmpty
+        )
+    }
+
+    /// A single row with slack takes the whole budget (its share == the budget).
+    func testFillShorterRowsSingleRowTakesWholeBudget() {
+        let result = BrowserWindow.fillShorterRows(
+            naturalRowHeights: [200],
+            availableForRows: 700
+        )
+        XCTAssertEqual(result, [700])
+    }
+
+    /// All-equal rows with slack rise together to the common per-row share.
+    func testFillShorterRowsAllEqualRowsRiseTogether() {
+        let result = BrowserWindow.fillShorterRows(
+            naturalRowHeights: [120, 120, 120],
+            availableForRows: 900
+        )
+        for h in result { XCTAssertEqual(h, 300, accuracy: 0.001) } // 900 / 3
+        XCTAssertEqual(result.reduce(0, +), 900, accuracy: 0.001)
+    }
+
+    /// #057 through `fitRowHeights`: the over-fill policy wired into the public entry
+    /// point. `[350, 180]@848`, chrome = 48, available = 800, share = 400 → both rows
+    /// reach 400 (`max(350,400)`, `max(180,400)`), the short bottom row lifts to fill
+    /// the band, and here the rows happen to fill the viewport exactly.
+    func testFitRowHeightsScreenshotLiftsShortRowToFillBand() {
+        let naturals: [CGFloat] = [350, 180]
+        // chrome (2 rows) = 48; pick available = 800 → viewport = 848.
+        let viewport: CGFloat = 848
+        let result = BrowserWindow.fitRowHeights(
+            naturalRowHeights: naturals,
+            viewportHeight: viewport,
+            spacing: 16, padding: 16, minRowHeight: 160
+        )
+        // share = 800 / 2 = 400; both naturals below it so both reach 400.
+        XCTAssertEqual(result[0], 400, accuracy: 0.001)
+        XCTAssertEqual(result[1], 400, accuracy: 0.001)
+        let total = result.reduce(0, +) + chrome(rowCount: 2, spacing: 16, padding: 16)
+        XCTAssertEqual(total, viewport, accuracy: 0.001)
+        XCTAssertGreaterThanOrEqual(result[1], naturals[0] - 0.001)
+        XCTAssertGreaterThan(result[1] - naturals[1], result[0] - naturals[0])
+    }
+
+    /// #057 through `fitRowHeights`, over-fill surplus regime: `[350, 180]@viewport648`
+    /// (chrome 48 → available 600, share 300) → `[350, 300]`, total 650 + chrome 48 =
+    /// 698 > 648, so the surrounding ScrollView absorbs the surplus and the short row
+    /// still visibly grows to the share rather than collapsing to a band.
+    func testFitRowHeightsScreenshotOverFillsViewport() {
+        let naturals: [CGFloat] = [350, 180]
+        let viewport: CGFloat = 648 // chrome 48 → available 600
+        let result = BrowserWindow.fitRowHeights(
+            naturalRowHeights: naturals,
+            viewportHeight: viewport,
+            spacing: 16, padding: 16, minRowHeight: 160
+        )
+        XCTAssertEqual(result[0], 350, accuracy: 0.001)
+        XCTAssertEqual(result[1], 300, accuracy: 0.001)
+        let total = result.reduce(0, +) + chrome(rowCount: 2, spacing: 16, padding: 16)
+        XCTAssertGreaterThan(total, viewport) // ScrollView absorbs the surplus
     }
 
     // MARK: - evenRowHeights (uniform, viewport-divided row heights #045)
