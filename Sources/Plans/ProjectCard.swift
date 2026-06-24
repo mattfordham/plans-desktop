@@ -567,16 +567,19 @@ struct ProjectCard: View {
             } else if PlanDetailView.canWork(status: row.task.status,
                                              isBlocked: row.task.isBlocked) {
                 // An elaborated, non-blocked task surfaces BOTH Refine and Execute
-                // (#056). The two glyphs sit in a tight, zero-spacing HStack — each
-                // `RowActionGlyph` is its own 22pt-tall cell with built-in leading
-                // padding, so the pair stays within the row's pinned 22pt height
-                // and the row's vertical metrics match its single-glyph neighbours.
-                // Refine opens the `ReElaborateModal` via the card's
-                // `.sheet(item:)`; Execute launches the run as before. `canWork`
-                // and `canReElaborate` share the same elaborated+non-blocked gate,
-                // so Refine appears exactly when Execute does.
-                HStack(spacing: 0) {
-                    RowActionGlyph(systemImage: "pencil.and.outline", help: "Refine this plan") {
+                // (#056). The two glyphs sit in a tight HStack — each
+                // `RowActionGlyph` is its own 22pt-tall cell with built-in 8pt
+                // leading padding, so the pair stays within the row's pinned 22pt
+                // height and the row's vertical metrics match its single-glyph
+                // neighbours. A negative `spacing` trims the gap between the two
+                // adjacent glyphs (each already carries 8pt leading padding) so
+                // they read as a tight pair. Refine opens the `ReElaborateModal`
+                // via the card's `.sheet(item:)`; Execute launches the run as
+                // before. `canWork` and `canReElaborate` share the same
+                // elaborated+non-blocked gate, so Refine appears exactly when
+                // Execute does.
+                HStack(spacing: -4) {
+                    RowActionGlyph(systemImage: "sparkles", help: "Refine this plan") {
                         cardLog.notice("card Refine clicked: task=\(row.task.id, privacy: .public)")
                         reElaborateRequest = ReElaborateRequest(
                             taskID: row.task.id,

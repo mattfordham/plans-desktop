@@ -166,7 +166,7 @@ struct PlanDetailView: View {
             .font(.body)
             .foregroundStyle(.secondary)
 
-            HStack(spacing: 8) {
+            HStack(spacing: 4) {
                 if runner.isRunning(taskID: row.task.id) {
                     // This task is being worked: show live status + a way back
                     // into the progress sheet (the run is independent of this
@@ -190,13 +190,13 @@ struct PlanDetailView: View {
                     // `plan-elaborate` Path C with the user's guidance to refine
                     // its How checklist (#056). Available only for an elaborated,
                     // non-blocked task — so an elaborated plan shows BOTH Refine
-                    // and Execute (intended). Uses `pencil.and.outline` to read
-                    // distinctly from the pending Elaborate's `sparkles`.
+                    // and Execute (intended). Shares the pending Elaborate's
+                    // `sparkles` glyph since both drive `plan-elaborate`.
                     if Self.canReElaborate(status: row.task.status, isBlocked: row.task.isBlocked) {
                         Button {
                             showReElaborate = true
                         } label: {
-                            Label("Refine", systemImage: "pencil.and.outline")
+                            Label("Refine", systemImage: "sparkles")
                         }
                     }
 
