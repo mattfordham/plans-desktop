@@ -67,6 +67,41 @@ final class RunOutcomeLogTests: XCTestCase {
         XCTAssertEqual(c, .truncated)
     }
 
+    func testClassifyStrandedAtInProgress() {
+        // A clean finish (no cap, no error, no crash) whose task never reached
+        // review is the #058 stranded case — distinct from `.completed`. The
+        // launcher emits the stranded stop reason; `classify` must map it to
+        // `.stranded`, NOT mistake it for `.completed`.
+        let c = RunOutcome.classify(
+            stopReason: TaskRun.strandedStopReason,
+            errorMessage: nil,
+            exitedNonzeroWithoutTerminal: false
+        )
+        XCTAssertEqual(c, .stranded)
+        XCTAssertNotEqual(c, .completed)
+    }
+
+    func testStrandedOutcomeRoundTrips() throws {
+        // A `.stranded` outcome (stopReason "stranded_at_in_progress") survives
+        // the append/encode/decode cycle just like the other classifications.
+        let url = tempDir.appendingPathComponent("run-outcomes.log")
+        let log = RunOutcomeLog(fileURL: url)
+        log.append(RunOutcome(
+            timestamp: "2026-06-24T09:00:00Z", taskID: "058", mode: "execute",
+            projectPath: "/proj", costUsd: 3.1, turns: 22,
+            stopReason: TaskRun.strandedStopReason, errorMessage: nil,
+            classification: .stranded
+        ))
+
+        let contents = try String(contentsOf: url, encoding: .utf8)
+        let lines = contents.split(separator: "\n", omittingEmptySubsequences: true)
+        XCTAssertEqual(lines.count, 1)
+        let decoded = try JSONDecoder().decode(RunOutcome.self, from: Data(lines[0].utf8))
+        XCTAssertEqual(decoded.taskID, "058")
+        XCTAssertEqual(decoded.classification, .stranded)
+        XCTAssertEqual(decoded.stopReason, "stranded_at_in_progress")
+    }
+
     // MARK: - Writing (append-only, JSON-per-line)
 
     func testAppendsOneJSONLinePerOutcome() throws {

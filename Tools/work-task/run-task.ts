@@ -32,12 +32,23 @@
  */
 
 import { query } from "@anthropic-ai/claude-agent-sdk";
+import * as fs from "node:fs";
+import * as path from "node:path";
 
 // Hard ceiling on spend. Under subscription (claude login) auth the real bound
 // is the plan; this ceiling is the safety net for API-key fallback. Raised to
 // $20 so a single autonomous execute run is far less likely to hit the cap
 // mid-task and strand the task at in-progress before it reaches review.
 const MAX_BUDGET_USD = 20.0;
+
+// Stop reasons that mean the run was cut short by a cap (budget/turn limit)
+// rather than finishing. These truncation reasons are the more actionable cause
+// and are handled downstream — the stranded-at-in-progress guard must NOT
+// override them.
+const truncatingStopReasons = new Set([
+  "error_max_budget_usd",
+  "error_max_turns",
+]);
 
 /** What the spawned agent should do with the task. */
 type Mode =
@@ -311,6 +322,58 @@ function buildPrompt(args: Args): string {
   return buildExecutePrompt(args.taskId ?? "");
 }
 
+/**
+ * Reads the current `**Status:**` of an execute task from its `.plans` file.
+ *
+ * Boundary-bug guard (task #058): an `execute` run streams its SDK `result`
+ * and we faithfully report `done` — but `plan-execute` can stop one layer too
+ * early and leave the task frozen at `in-progress` instead of advancing it to
+ * `review`. Reporting a clean success then masks a stranded task. So after the
+ * result arrives we re-read the task's status from disk to confirm it reached a
+ * terminal state.
+ *
+ * Searches the three status folders (`pending`, `review`, `completed`) for a
+ * file matching `${taskId}-*.md`. Returns the lowercased status string, or
+ * `undefined` if the file cannot be found or read — in that case the caller
+ * MUST NOT emit the stranded signal (a false positive masking a real success is
+ * worse than a missed strand).
+ */
+function readTaskStatus(
+  projectRoot: string,
+  taskId: string,
+): string | undefined {
+  try {
+    const folders = ["pending", "review", "completed"];
+    for (const folder of folders) {
+      const dir = path.join(projectRoot, ".plans", folder);
+      let entries: string[];
+      try {
+        entries = fs.readdirSync(dir);
+      } catch {
+        continue;
+      }
+      const match = entries.find(
+        (name) => name.startsWith(`${taskId}-`) && name.endsWith(".md"),
+      );
+      if (!match) {
+        continue;
+      }
+      const contents = fs.readFileSync(path.join(dir, match), "utf8");
+      const m = contents.match(/^\*\*Status:\*\*\s*([a-z-]+)/im);
+      if (m) {
+        return m[1].toLowerCase();
+      }
+    }
+  } catch {
+    // Any unexpected failure: treat status as unknown so we never emit a false
+    // stranded signal.
+  }
+  return undefined;
+}
+
+/** Terminal states an execute task must reach so the run counts as finished. */
+const TERMINAL_TASK_STATUSES = new Set(["review", "in-review"]);
+
 async function main(): Promise<void> {
   const args = parseArgs(process.argv.slice(2));
   if (!args) {
@@ -343,6 +406,14 @@ async function main(): Promise<void> {
           "Glob",
           "Grep",
           "TodoWrite",
+          // Read-only Figma verification tools. des-build's self-verification
+          // visual diff was hard-denied under `permissionMode: "acceptEdits"`
+          // because MCP tools are not auto-approved and these weren't
+          // allowlisted (task #051 root cause), which stranded the run. These
+          // two are READ-ONLY verification tools (screenshot + metadata), so
+          // they are safe to allow. Do NOT add any Figma write/edit tools here.
+          "mcp__figma-dev-mode-mcp-server__get_screenshot",
+          "mcp__figma-dev-mode-mcp-server__get_metadata",
         ],
       },
     });
@@ -373,11 +444,52 @@ async function main(): Promise<void> {
           // `subtype` is "success" or an error discriminator
           // (error_max_turns, error_max_budget_usd, …). Prefer the model's
           // stop_reason when present, otherwise fall back to subtype.
+          let stopReason = message.stop_reason ?? message.subtype ?? "unknown";
+
+          // Boundary-bug guard (task #058): for execute runs ONLY, the SDK
+          // reporting `result` does NOT prove the task reached a terminal
+          // state. `plan-execute` can stop one layer too early and leave the
+          // task frozen at `in-progress`, in which case a vanilla success
+          // `done` line would mask a stranded task. So when the run otherwise
+          // finished cleanly (an end_turn/success stopReason — NOT a
+          // budget/turn-cap error, whose truncation reason is more actionable
+          // and is already handled downstream), re-read the task's status from
+          // disk and, if it never reached `review`/`in-review`, override the
+          // stopReason with a distinct `stranded_at_in_progress` signal.
+          //
+          // capture/elaborate/captureElaborate/executeYolo are excluded: those
+          // modes have no single terminal `review` contract here and defer
+          // their terminal-state handling to the Swift side.
+          //
+          // Specifically for the NEW-TASK modes (`captureElaborate` /
+          // `executeYolo`): they are intentionally NOT terminal-state checked
+          // here because the new task's id is not known at parse time (the task
+          // does not yet exist when the launcher starts), so `readTaskStatus`
+          // has nothing to look up. Their terminal-state reconciliation is
+          // deferred to the Swift `reconcileFinishedCaptures` path (#051/#053),
+          // which detects the newly-created task id after `store.reload()` and
+          // hands the spinner row off to the real plan row. This deferral is the
+          // accepted first-cut fallback for #058 — no launcher-side
+          // timestamp-scanning is done for these modes.
+          if (
+            args.mode === "execute" &&
+            args.taskId &&
+            !truncatingStopReasons.has(stopReason)
+          ) {
+            const status = readTaskStatus(args.projectRoot, args.taskId);
+            // Only override on a known, non-terminal status. An unknown status
+            // (file missing/unreadable) falls through to the normal `done` —
+            // never emit a false stranded signal that masks a real success.
+            if (status !== undefined && !TERMINAL_TASK_STATUSES.has(status)) {
+              stopReason = "stranded_at_in_progress";
+            }
+          }
+
           emit({
             kind: "done",
             costUsd: message.total_cost_usd ?? 0,
             turns: message.num_turns ?? 0,
-            stopReason: message.stop_reason ?? message.subtype ?? "unknown",
+            stopReason,
           });
           break;
         }

@@ -59,6 +59,10 @@ struct RunOutcome: Codable, Equatable {
         /// Cut short by a budget/turn cap — the task was left mid-flight (the
         /// strand-at-in-progress case the $20 cap was raised to mitigate).
         case truncated
+        /// The run finished cleanly (SDK `result`, no cap) but the task never
+        /// reached review — it was left stranded at in-progress because
+        /// `plan-execute` stopped one layer too early (task #058).
+        case stranded
         /// A streamed `error` line ended the run.
         case error
         /// The process exited nonzero without any terminal `done`/`error` line.
@@ -71,11 +75,15 @@ struct RunOutcome: Codable, Equatable {
     /// pattern). Precedence, highest first:
     ///   1. `truncated` — a budget/turn cap is the actionable cause even if the
     ///      process also exited nonzero.
-    ///   2. `crashed` — a nonzero exit with no terminal `done`/`error` line. This
+    ///   2. `stranded` — the run finished cleanly but the task never reached
+    ///      review (the `stranded_at_in_progress` signal, task #058). Ranked
+    ///      just below `truncated`; in practice they are mutually exclusive
+    ///      (the launcher only emits the stranded reason when NOT a cap reason).
+    ///   3. `crashed` — a nonzero exit with no terminal `done`/`error` line. This
     ///      outranks `error` because the crash path always carries a generic
     ///      error message; the distinguishing signal is the abnormal exit.
-    ///   3. `error` — a streamed error message (with a clean exit).
-    ///   4. `completed` — everything else (incl. a missing stop reason).
+    ///   4. `error` — a streamed error message (with a clean exit).
+    ///   5. `completed` — everything else (incl. a missing stop reason).
     static func classify(
         stopReason: String?,
         errorMessage: String?,
@@ -83,6 +91,9 @@ struct RunOutcome: Codable, Equatable {
     ) -> Classification {
         if let stopReason, TaskRun.truncatingStopReasons.contains(stopReason) {
             return .truncated
+        }
+        if stopReason == TaskRun.strandedStopReason {
+            return .stranded
         }
         if exitedNonzeroWithoutTerminal {
             return .crashed

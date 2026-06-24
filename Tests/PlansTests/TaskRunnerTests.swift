@@ -141,6 +141,19 @@ final class TaskRunnerTests: XCTestCase {
         XCTAssertNil(TaskRun.truncationError(for: "unknown"))
     }
 
+    /// `TaskRun.truncationError(for:)` also maps the #058 stranded stop reason
+    /// (`stranded_at_in_progress`) to a non-nil, stranded-specific message so the
+    /// red banner fires when an execute run finished cleanly but left the task at
+    /// in-progress. The existing clean/missing/unknown reasons still map to nil.
+    func testTruncationErrorMapsStrandedReason() {
+        XCTAssertNotNil(TaskRun.truncationError(for: TaskRun.strandedStopReason))
+
+        // Unchanged: a clean finish (and an unrelated reason) surfaces no error.
+        XCTAssertNil(TaskRun.truncationError(for: "end_turn"))
+        XCTAssertNil(TaskRun.truncationError(for: nil))
+        XCTAssertNil(TaskRun.truncationError(for: "unknown"))
+    }
+
     /// Driving a `done` event whose `stopReason` is a truncating cap value
     /// through the run's ingest path sets BOTH `summary` (cost/turns, as today)
     /// AND `error` (so `PlanDetailView` shows the red banner above the summary).
@@ -203,6 +216,41 @@ final class TaskRunnerTests: XCTestCase {
         XCTAssertEqual(outcome.stopReason, "error_max_budget_usd")
         XCTAssertEqual(outcome.turns, 58)
         XCTAssertEqual(outcome.classification, .truncated)
+    }
+
+    /// Driving a `done` event whose `stopReason` is the #058 stranded signal
+    /// through the run's ingest path (a) surfaces a non-nil `error` (so the run
+    /// reads as non-success — the red banner fires above the summary) and (b) on
+    /// finish writes a `RunOutcome` classified `.stranded` carrying the
+    /// `stranded_at_in_progress` stop reason — the durable answer to "why did
+    /// this task strand at in-progress?".
+    @MainActor
+    func testFinishWritesStrandedOutcomeFromStrandedReason() throws {
+        let tmp = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString)
+            .appendingPathComponent("run-outcomes.log")
+        let run = TaskRun(
+            taskID: "058", mode: .execute,
+            outcomeLog: RunOutcomeLog(fileURL: tmp),
+            now: { "2026-06-24T09:00:00Z" }
+        )
+        run.ingestForTesting(
+            #"{"kind":"done","costUsd":3.1,"turns":22,"stopReason":"stranded_at_in_progress"}"# + "\n"
+        )
+        // (a) Surfaced as non-success: a stranded run sets `error`.
+        XCTAssertNotNil(run.error)
+        XCTAssertEqual(run.summary?.turns, 22)
+
+        run.finishForTesting(projectPath: "/proj")
+
+        // (b) Exactly one outcome written, classified `.stranded`.
+        let contents = try String(contentsOf: tmp, encoding: .utf8)
+        let lines = contents.split(separator: "\n", omittingEmptySubsequences: true)
+        XCTAssertEqual(lines.count, 1)
+        let outcome = try JSONDecoder().decode(RunOutcome.self, from: Data(lines[0].utf8))
+        XCTAssertEqual(outcome.taskID, "058")
+        XCTAssertEqual(outcome.classification, .stranded)
+        XCTAssertEqual(outcome.stopReason, "stranded_at_in_progress")
     }
 
     /// A clean `end_turn` done is classified `completed`.

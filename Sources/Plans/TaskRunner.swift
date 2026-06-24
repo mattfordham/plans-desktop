@@ -450,17 +450,33 @@ final class TaskRun {
         "error_max_turns",
     ]
 
+    /// The `done` stop reason the launcher emits when an `execute` run finished
+    /// cleanly (SDK `result` arrived, no cap) BUT the task never reached a
+    /// terminal `review` state — it was left stranded at in-progress because
+    /// `plan-execute` stopped one layer too early (task #058). This is distinct
+    /// from the budget/turn-cap truncation reasons above: the run was not cut
+    /// short, it simply handed off without finishing, so it needs its own
+    /// user-facing message. Single source of truth for the string — reused by
+    /// `RunOutcome.classify` so the literal lives in exactly one Swift file.
+    nonisolated static let strandedStopReason = "stranded_at_in_progress"
+
     /// Maps a `done` event's `stopReason` to a human-readable error message when
-    /// the run was cut short by a budget/turn cap, or `nil` for a clean finish
-    /// (including a missing/normal reason). Pure so the truncation mapping is
+    /// the run did not finish the task — either cut short by a budget/turn cap,
+    /// or stranded at in-progress without reaching review — or `nil` for a clean
+    /// finish (including a missing/normal reason). Pure so the mapping is
     /// unit-testable without spawning a process.
     nonisolated static func truncationError(for stopReason: String?) -> String? {
-        guard let stopReason, truncatingStopReasons.contains(stopReason) else {
-            return nil
+        guard let stopReason else { return nil }
+        if truncatingStopReasons.contains(stopReason) {
+            return "Run cut short — agent budget/turn cap hit before completion. "
+                + "The task was left at in-progress (it did not reach review). "
+                + "Re-run /plan-execute to resume, or raise the budget."
         }
-        return "Run cut short — agent budget/turn cap hit before completion. "
-            + "The task was left at in-progress (it did not reach review). "
-            + "Re-run /plan-execute to resume, or raise the budget."
+        if stopReason == strandedStopReason {
+            return "Run ended but the task never reached review — it was left "
+                + "stranded at in-progress. Re-run /plan-execute to finish it."
+        }
+        return nil
     }
 
     /// Applies one decoded event to observable state: append to the log, and
@@ -469,14 +485,15 @@ final class TaskRun {
         lines.append(LoggedEvent(event: event))
         switch event {
         case let .done(costUsd, turns, stopReason):
-            // Always record the cost/turns summary. When the run was truncated
-            // by a cap (budget/turns), ALSO set `error` so the red banner fires
-            // above the summary — the task was stranded at in-progress and the
-            // user must re-run to finish it.
+            // Always record the cost/turns summary. When the run did not finish
+            // the task — cut short by a cap (budget/turns) OR stranded at
+            // in-progress without reaching review (task #058) — ALSO set `error`
+            // so the red banner fires above the summary and the user knows to
+            // re-run to finish it.
             summary = (costUsd: costUsd, turns: turns)
             lastStopReason = stopReason
-            if let truncation = Self.truncationError(for: stopReason), error == nil {
-                error = truncation
+            if let failureMessage = Self.truncationError(for: stopReason), error == nil {
+                error = failureMessage
             }
         case let .error(message):
             error = message
@@ -898,6 +915,12 @@ final class TaskRunner {
     /// atomic transition (spinner out, plan row in) instead of two frames.
     /// `dismiss(taskID:)` stays idempotent — it only removes a finished, present
     /// run — so a still-running or already-removed run is a safe no-op.
+    ///
+    /// This is also the deferred terminal-state path for the NEW-TASK launcher
+    /// modes (`captureElaborate` / `executeYolo`): the launcher can't run its
+    /// #058 stranded-at-in-progress check for them (the new task's id is unknown
+    /// at parse time), so it relies on this reconciliation to detect the
+    /// newly-created task id post-reload — the accepted first-cut fallback.
     func reconcileFinishedCaptures(against projects: [ProjectTasks]) {
         let decision = Self.reconcile(runs: runs, projects: projects)
 
