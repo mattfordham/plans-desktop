@@ -104,6 +104,7 @@ final class TaskParserTests: XCTestCase {
         **Type:** feature
         **Status:** in-progress
         **Branch:** feature/007-x
+        **Worktree:** /Users/x/.worktrees/007-x
         **Blocked by:** 001 002
         """
         let task = TaskParser().parse(filename: "007-x.md", text: text, isCompletedDir: false)
@@ -112,6 +113,40 @@ final class TaskParserTests: XCTestCase {
         XCTAssertEqual(task.status, .inProgress)
         XCTAssertEqual(task.branch, "feature/007-x")
         XCTAssertEqual(task.blockedBy, ["001", "002"])
+        XCTAssertTrue(task.isKeptWorktree)
+    }
+
+    func testKeptWorktreeTrueWhenWorktreeFieldPresent() {
+        let text = """
+        # Title
+
+        **ID:** 007
+        **Status:** review
+        **Worktree:** /Users/x/.worktrees/007-x
+        """
+        let task = TaskParser().parse(filename: "007-x.md", text: text, isCompletedDir: false)
+        XCTAssertTrue(task.isKeptWorktree)
+    }
+
+    func testKeptWorktreeFalseWhenWorktreeFieldAbsent() {
+        let task = TaskParser().parse(
+            filename: "008-x.md",
+            text: "# Title only",
+            isCompletedDir: false
+        )
+        XCTAssertFalse(task.isKeptWorktree)
+    }
+
+    func testKeptWorktreeFalseWhenWorktreeFieldEmpty() {
+        let text = """
+        # Title
+
+        **ID:** 009
+        **Status:** review
+        **Worktree:**
+        """
+        let task = TaskParser().parse(filename: "009-x.md", text: text, isCompletedDir: false)
+        XCTAssertFalse(task.isKeptWorktree)
     }
 
     func testAllFrontmatterFieldsAbsent() {

@@ -15,7 +15,8 @@ final class BrowserWindowTests: XCTestCase {
         title: String? = nil,
         type: TaskType? = nil,
         status: TaskStatus? = nil,
-        isBlocked: Bool = false
+        isBlocked: Bool = false,
+        isKeptWorktree: Bool = false
     ) -> Task {
         Task(
             id: id,
@@ -24,6 +25,7 @@ final class BrowserWindowTests: XCTestCase {
             status: status,
             created: nil,
             branch: nil,
+            isKeptWorktree: isKeptWorktree,
             blockedBy: [],
             sections: [],
             howProgress: (done: 0, total: 0),

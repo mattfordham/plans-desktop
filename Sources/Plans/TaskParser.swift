@@ -102,6 +102,16 @@ struct Task {
     /// The raw `**Branch:**` value. `nil` when absent.
     let branch: String?
 
+    /// Whether the task has a live `**Worktree:**` field — i.e. it was executed
+    /// with the `keep` keyword so its execution worktree survives for isolated,
+    /// concurrent review (the field is written by plans-cc `plan-execute` and
+    /// stripped by `plan-complete` at teardown). `true` only when the field is
+    /// present AND its value is non-empty; a stripped/blank `**Worktree:**` is
+    /// `false`. This mirrors the plans-cc dashboard TUI's `kept` boolean, which
+    /// drives its `⌂ kept` badge. The field only meaningfully appears on
+    /// `review` / `in-review` tasks.
+    let isKeptWorktree: Bool
+
     /// The 3-digit ids parsed from `**Blocked by:**` (split on whitespace and
     /// commas). Empty when the field is absent or lists nothing.
     let blockedBy: [String]
@@ -336,6 +346,7 @@ struct TaskParser {
             status: task.status,
             created: task.created,
             branch: task.branch,
+            isKeptWorktree: task.isKeptWorktree,
             blockedBy: task.blockedBy,
             sections: task.sections,
             howProgress: task.howProgress,
@@ -371,6 +382,7 @@ struct TaskParser {
         let typeRaw = Self.frontmatterValue(field: "Type", lines: lines)
         let statusRaw = Self.frontmatterValue(field: "Status", lines: lines)
         let branchRaw = Self.frontmatterValue(field: "Branch", lines: lines)
+        let worktreeRaw = Self.frontmatterValue(field: "Worktree", lines: lines)
         let blockedByRaw = Self.frontmatterValue(field: "Blocked by", lines: lines)
 
         let type = TaskType(rawValueTolerant: typeRaw)
@@ -380,6 +392,11 @@ struct TaskParser {
         let status: TaskStatus? = isCompletedDir
             ? .completed
             : TaskStatus(rawValueTolerant: statusRaw)
+
+        // A live worktree marker: the field is present and non-empty. A
+        // stripped/blank `**Worktree:**` (value trimmed to "") is NOT kept.
+        // (`frontmatterValue` already returns the trimmed value.)
+        let isKeptWorktree = !(worktreeRaw ?? "").isEmpty
 
         let blockedBy = Self.parseBlockedBy(blockedByRaw)
 
@@ -393,6 +410,7 @@ struct TaskParser {
             status: status,
             created: createdRaw,
             branch: branchRaw,
+            isKeptWorktree: isKeptWorktree,
             blockedBy: blockedBy,
             sections: sections,
             howProgress: howProgress,

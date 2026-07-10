@@ -576,6 +576,7 @@ final class TaskRunnerTests: XCTestCase {
             status: nil,
             created: nil,
             branch: nil,
+            isKeptWorktree: false,
             blockedBy: [],
             sections: [],
             howProgress: (done: 0, total: 0),

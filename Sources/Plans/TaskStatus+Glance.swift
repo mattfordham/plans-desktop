@@ -126,6 +126,12 @@ struct TaskStatusIndicator: Equatable {
     /// The neutral fallback SF Symbol for a `nil`/unknown status.
     static let neutralSymbol = "circle.dashed"
 
+    /// The SF Symbol for a task kept in a live worktree (executed with the
+    /// `keep` keyword — see `Task.isKeptWorktree`). A house glyph, the desktop
+    /// analogue of the plans-cc dashboard TUI's `⌂ kept` badge. Rendered muted
+    /// (secondary) next to review-state rows so it reads as chrome, not status.
+    static let keptWorktreeSymbol = "house"
+
     /// Builds the indicator for a task with the given `status`, honoring the
     /// blocked-takes-precedence rule. `isBlocked` overrides everything (TUI
     /// behavior: `if (task.isBlocked) return …` is the first check in both

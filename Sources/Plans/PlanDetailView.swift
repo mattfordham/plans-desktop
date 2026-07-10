@@ -162,6 +162,15 @@ struct PlanDetailView: View {
                     Text("·").foregroundStyle(.secondary)
                     Text("[\(type.label)]")
                 }
+                // A kept-worktree task (executed with the `keep` keyword) shows a
+                // muted house glyph — the desktop analogue of the plans-cc
+                // dashboard TUI's `⌂ kept` marker — matching the browser card row.
+                if row.task.isKeptWorktree {
+                    Text("·").foregroundStyle(.secondary)
+                    Image(systemName: TaskStatusIndicator.keptWorktreeSymbol)
+                        .imageScale(.small)
+                        .help("Kept in worktree — reviewable in isolation")
+                }
             }
             .font(.body)
             .foregroundStyle(.secondary)

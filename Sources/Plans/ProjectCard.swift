@@ -467,12 +467,25 @@ struct ProjectCard: View {
                 .modifier(OpenDetailOnTap(row: row, openWindow: openWindow))
 
             // Always-present cell (empty string when no type) so column 3 stays
-            // aligned across every row.
-            Text(typeText)
-                .font(.system(.body, design: .monospaced))
-                .foregroundStyle(.tertiary)
-                .padding(.trailing, 8)
-                .modifier(OpenDetailOnTap(row: row, openWindow: openWindow))
+            // aligned across every row. A kept-worktree task (executed with the
+            // `keep` keyword) appends a muted house glyph after the type badge —
+            // the desktop analogue of the plans-cc dashboard TUI's `⌂ kept`
+            // marker. Only review-state tasks carry a live worktree, so it
+            // appears only there; the icon has a `help` tooltip since it renders
+            // label-free.
+            HStack(spacing: 4) {
+                Text(typeText)
+                    .font(.system(.body, design: .monospaced))
+                    .foregroundStyle(.tertiary)
+                if row.task.isKeptWorktree {
+                    Image(systemName: TaskStatusIndicator.keptWorktreeSymbol)
+                        .imageScale(.small)
+                        .foregroundStyle(.secondary)
+                        .help("Kept in worktree — reviewable in isolation")
+                }
+            }
+            .padding(.trailing, 8)
+            .modifier(OpenDetailOnTap(row: row, openWindow: openWindow))
 
             // The title is the row's flexible column: it should claim ALL the
             // width left after the fixed status/id/type cells and only wrap when
