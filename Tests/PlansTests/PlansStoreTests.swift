@@ -223,6 +223,174 @@ final class PlansStoreTests: XCTestCase {
         XCTAssertEqual(project.counts[.pending], 1)
     }
 
+    // MARK: - Off-main poll offload (#059)
+
+    /// The launch contract: a direct `reload()` populates `projects`
+    /// synchronously (before returning), NOT via a deferred background hop. The
+    /// #059 change only moves the timer-driven poll off-main; `reload()` itself
+    /// stays synchronous so `startPolling()` and `linkProject` see populated
+    /// projects immediately. (`testStartPollingPerformsInitialLoadSynchronously`
+    /// covers the `startPolling()` entry; this guards the bare `reload()` path.)
+    func testReloadPopulatesProjectsSynchronouslyBeforeReturning() throws {
+        let projectDir = try makeProjectDir(name: "alpha")
+        try writeTaskFile(
+            projectDir: projectDir,
+            filename: "001-first.md",
+            text: "# First\n\n**Status:** pending",
+            in: "pending"
+        )
+
+        let reader = try makeReader(projectPaths: [projectDir.path])
+        let store = PlansStore(registryReader: reader)
+
+        // Empty before, populated the instant `reload()` returns — no run-loop
+        // spin, no expectation await needed.
+        XCTAssertTrue(store.projects.isEmpty)
+        store.reload()
+        XCTAssertEqual(store.projects.map(\.projectName), ["Alpha"])
+    }
+
+    /// `performReload(priorGitInfo:)` is thread-agnostic and behavior-preserving:
+    /// invoking it directly on the calling thread and dispatched off a background
+    /// queue yields the same `[ProjectTasks]` (paths, counts, ordering) and
+    /// carries over non-`nil` prior git branch/dirty. Proves the offload the poll
+    /// relies on does not alter results.
+    func testPerformReloadIsThreadAgnosticAndCarriesGitInfo() throws {
+        let alpha = try makeProjectDir(name: "alpha")
+        let beta = try makeProjectDir(name: "beta")
+        try writeTaskFile(
+            projectDir: alpha,
+            filename: "001-a.md",
+            text: "# A\n\n**Status:** pending",
+            in: "pending"
+        )
+        try writeTaskFile(
+            projectDir: beta,
+            filename: "001-b.md",
+            text: "# B\n\n**Status:** completed",
+            in: "completed"
+        )
+
+        let reader = try makeReader(projectPaths: [alpha.path, beta.path])
+        let store = PlansStore(registryReader: reader)
+
+        // Non-nil prior git info for one project to prove the carry-over survives
+        // through the background offload.
+        let priorGitInfo: [String: (String?, Bool?)] = [
+            alpha.path: ("feature/x", true)
+        ]
+
+        // Main-thread reference result.
+        let mainResult = store.performReloadForTesting(priorGitInfo: priorGitInfo)
+
+        // Same call dispatched onto a background queue; await via expectation.
+        let expectation = expectation(description: "background performReload")
+        var backgroundResult: [ProjectTasks] = []
+        DispatchQueue.global(qos: .userInitiated).async {
+            backgroundResult = store.performReloadForTesting(priorGitInfo: priorGitInfo)
+            expectation.fulfill()
+        }
+        wait(for: [expectation], timeout: 5)
+
+        // Same paths, in the same (registry) order.
+        XCTAssertEqual(
+            mainResult.map(\.projectPath),
+            backgroundResult.map(\.projectPath)
+        )
+        XCTAssertEqual(mainResult.map(\.projectPath), [alpha.path, beta.path])
+
+        // Same counts per project.
+        XCTAssertEqual(
+            mainResult.map { $0.counts },
+            backgroundResult.map { $0.counts }
+        )
+
+        // Git carry-over survives on the background path exactly as on main.
+        let bgAlpha = try XCTUnwrap(
+            backgroundResult.first { $0.projectPath == alpha.path }
+        )
+        XCTAssertEqual(bgAlpha.gitBranch, "feature/x")
+        XCTAssertEqual(bgAlpha.gitIsDirty, true)
+
+        // A project with no prior git info stays nil on both paths.
+        let bgBeta = try XCTUnwrap(
+            backgroundResult.first { $0.projectPath == beta.path }
+        )
+        XCTAssertNil(bgBeta.gitBranch)
+        XCTAssertNil(bgBeta.gitIsDirty)
+    }
+
+    /// The out-of-order guard (#059): once a newer reload has bumped the
+    /// generation, applying an OLDER-generation async result is dropped — it does
+    /// not overwrite `projects`. Drives the real guarded tail
+    /// (`applyReloadResult`) deterministically via the test-only applier so no
+    /// real background race is needed.
+    func testStaleAsyncReloadResultIsDroppedByGenerationGuard() throws {
+        let projectDir = try makeProjectDir(name: "alpha")
+        try writeTaskFile(
+            projectDir: projectDir,
+            filename: "001-first.md",
+            text: "# First\n\n**Status:** pending",
+            in: "pending"
+        )
+
+        let reader = try makeReader(projectPaths: [projectDir.path])
+        let store = PlansStore(registryReader: reader)
+
+        // Establish a baseline "newer" state and capture the generation an
+        // in-flight poll would have snapshotted BEFORE it.
+        store.reload()
+        let staleGeneration = store.reloadGenerationForTesting
+
+        // A newer reload starts, bumping the generation past the captured value.
+        store.reload()
+        XCTAssertGreaterThan(store.reloadGenerationForTesting, staleGeneration)
+        let freshProjects = store.projects
+
+        // The stale poll finally hops back to main with an unrelated result
+        // tagged with its now-superseded generation — it must be dropped.
+        let staleProjects = [
+            ProjectTasks(
+                projectPath: "/stale/ghost",
+                projectName: "Ghost",
+                lastSeen: "",
+                tasks: [],
+                counts: [:],
+                activeTasks: []
+            )
+        ]
+        store.applyReloadResultForTesting(staleProjects, generation: staleGeneration)
+
+        // `projects` still reflects the newer reload, not the stale array.
+        XCTAssertEqual(
+            store.projects.map(\.projectPath),
+            freshProjects.map(\.projectPath)
+        )
+        XCTAssertFalse(store.projects.contains { $0.projectPath == "/stale/ghost" })
+    }
+
+    /// Complement to the drop case: a result whose captured generation still
+    /// matches the current generation IS applied by the guarded tail.
+    func testCurrentGenerationReloadResultIsApplied() throws {
+        let reader = try makeReader(projectPaths: [])
+        let store = PlansStore(registryReader: reader)
+
+        let currentGeneration = store.reloadGenerationForTesting
+        let projects = [
+            ProjectTasks(
+                projectPath: "/applied/one",
+                projectName: "One",
+                lastSeen: "",
+                tasks: [],
+                counts: [:],
+                activeTasks: []
+            )
+        ]
+        store.applyReloadResultForTesting(projects, generation: currentGeneration)
+
+        XCTAssertEqual(store.projects.map(\.projectPath), ["/applied/one"])
+    }
+
     func testReloadReflectsFilesystemChangeAfterInitialLoad() throws {
         let projectDir = try makeProjectDir(name: "alpha")
         try writeTaskFile(

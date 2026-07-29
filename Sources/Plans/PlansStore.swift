@@ -198,6 +198,17 @@ final class PlansStore {
     /// `@ObservationIgnored` because the timer itself is not observable UI state.
     @ObservationIgnored private var pollTimer: Timer?
 
+    /// A monotonic counter bumped at the START of every reload — both the
+    /// synchronous `reload()` and the async `reloadAsync()` (#059). It lets the
+    /// async poll path detect that a NEWER reload (a synchronous `linkProject` /
+    /// initial load, or a later poll) has started while its off-main parse was in
+    /// flight, so the stale result can be dropped instead of clobbering fresher
+    /// `projects`. `@ObservationIgnored` because it is internal race bookkeeping,
+    /// not observable UI state. Only ever read/written on the main thread; the
+    /// async path captures a snapshot value into its closure and compares it back
+    /// on the main-thread hop.
+    @ObservationIgnored private var reloadGeneration: Int = 0
+
     /// Invoked at the END of every `reload()` (synchronous task-parse pass),
     /// after `projects` has been repopulated — on BOTH the run-finish hand-off
     /// path AND every 5s poll tick. The app wires this to
@@ -395,6 +406,13 @@ final class PlansStore {
     /// throws: the underlying readers are tolerant (missing/corrupt registry or
     /// `.plans/` directories yield empty results rather than crashing).
     func reload() {
+        // Bump the reload generation (#059). `reload()` is fully synchronous so it
+        // has no stale-result risk of its own, but bumping the counter is what
+        // lets a synchronous reload (from `linkProject` or the initial load) win
+        // the race against an older in-flight async poll: that poll captured a now-
+        // superseded generation and will drop its result when it hops back to main.
+        reloadGeneration += 1
+
         // Snapshot the previously-known git info per path so the re-parse below
         // can carry it over. The parser constructs `ProjectTasks` with `nil` git
         // fields; without this carry-over, every 5s poll would momentarily reset
@@ -405,7 +423,45 @@ final class PlansStore {
             uniquingKeysWith: { first, _ in first }
         )
 
-        projects = registryReader.readProjects().map { project in
+        // Run the parse pass on the calling (main) thread. This keeps `reload()`
+        // synchronous and behavior-identical: `projects` is populated before this
+        // method returns, preserving `startPolling()`'s "populated before this
+        // returns" contract and `linkProject`'s immediate-appear UX.
+        projects = performReload(priorGitInfo: priorGitInfo)
+
+        // Second pass (#024): gather live git state OFF the main thread so the
+        // blocking `git` subprocesses never stall the UI, then merge it back on
+        // the main thread. The first (synchronous) pass above already painted the
+        // cards carrying over the last-known git fields, so this only refreshes
+        // them with live values. Shared with the async poll path — see
+        // `startGitSecondPass()` for the full GCD/Sendability rationale.
+        startGitSecondPass()
+
+        // Reconcile finished capture spinner rows against the just-repopulated
+        // `projects` on EVERY reload — poll tick included, not only the
+        // run-finish hand-off (#051). Fires after the synchronous task-parse
+        // pass above (the git second pass is async and irrelevant to
+        // reconciliation), so the moment a captured plan's file lands and a
+        // poll parses it, the orphaned spinner clears next tick.
+        onDidReload?()
+    }
+
+    /// Builds the fresh `projects` array by reading the registry and re-parsing
+    /// every live project, carrying over the supplied prior git info per path.
+    /// Returns the built array WITHOUT mutating any store state.
+    ///
+    /// This method is intentionally pure and thread-agnostic: it touches no
+    /// mutable `self` state (it only reads the injected `registryReader` /
+    /// `taskParser`, both of which are stateless value-based readers, and the
+    /// caller-supplied `priorGitInfo` snapshot). That makes it safe to invoke on
+    /// any thread — the synchronous `reload()` calls it on the main thread, while
+    /// `reloadAsync()` dispatches it onto a background queue and assigns the
+    /// result back on the main thread. Because it never writes the observable
+    /// `projects`, SwiftUI is never mutated off-main here.
+    private func performReload(
+        priorGitInfo: [String: (String?, Bool?)]
+    ) -> [ProjectTasks] {
+        registryReader.readProjects().map { project in
             let parsed = taskParser.parseProject(at: project.path, lastSeen: project.lastSeen)
             guard let prior = priorGitInfo[project.path] else { return parsed }
             return ProjectTasks(
@@ -419,27 +475,86 @@ final class PlansStore {
                 gitIsDirty: prior.1
             )
         }
+    }
 
-        // Second pass (#024): gather live git state OFF the main thread so the
-        // blocking `git` subprocesses never stall the UI, then merge it back on
-        // the main thread. `GitHelper` methods are `nonisolated`/blocking; we
-        // collect plain Sendable tuples on a background queue and apply them on
-        // the main queue. The first (synchronous) pass above already painted the
-        // cards carrying over the last-known git fields, so this only refreshes
-        // them with live values.
-        //
-        // GCD (not structured concurrency) is used deliberately: `PlansStore` is
-        // a non-`Sendable`, main-thread-only reference type, and GCD lets us hop
-        // background→main without crossing a Swift-concurrency Sendability
-        // boundary on `self`. The captured `paths` are value-type Strings.
-        //
-        // `self` is captured `nonisolated(unsafe)`: `PlansStore` is not
-        // `Sendable`, but it is only ever touched on the main thread, and the
-        // only `self` access in these closures is `applyGitInfo`, which we
-        // re-dispatch onto the main queue. The unsafe annotation documents that
-        // invariant and keeps the `@Sendable` GCD closures warning-clean. The
-        // capture is strong — the store is app-lifetime (same rationale as the
-        // poll timer above) so there is no meaningful retain cycle to break.
+    /// Asynchronous reload for the timer-driven poll: identical to `reload()` in
+    /// outcome, but the (potentially UI-hitching) parse pass runs OFF the main
+    /// thread so a focused text editor never stalls on a poll tick. Only the
+    /// prior-git snapshot is taken on the main thread; the `performReload` parse
+    /// pass is dispatched to a background queue, and its result is applied back on
+    /// the main thread, where the observable `projects` is assigned, the async git
+    /// second pass is kicked off, and `onDidReload?()` fires.
+    ///
+    /// `onDidReload?()` MUST fire AFTER the main-thread `projects` assignment so
+    /// #051 capture-spinner reconciliation still sees the freshly-repopulated
+    /// `projects` (same ordering as synchronous `reload()`).
+    ///
+    /// Out-of-order guard (#059): each call bumps `reloadGeneration` and captures
+    /// that value. On the main-thread hop, BEFORE assigning `projects`, it drops
+    /// the result entirely (no `projects` assignment, no git second pass, no
+    /// `onDidReload?()`) if a newer reload — synchronous or async — has since
+    /// started (`captured != reloadGeneration`). This prevents a slow poll's stale
+    /// parse from clobbering a newer `linkProject`/initial load.
+    ///
+    /// GCD (not structured concurrency) is used deliberately, mirroring the git
+    /// second pass below: `PlansStore` is a non-`Sendable`, main-thread-only
+    /// reference type, and GCD lets us hop background→main without crossing a
+    /// Swift-concurrency Sendability boundary on `self`. `self` is captured
+    /// `nonisolated(unsafe)`; it is only ever touched on the main thread (the
+    /// background closure captures only value-type snapshots — the
+    /// `priorGitInfo` dictionary — and never reads `self`). The capture is strong
+    /// because the store is app-lifetime (same rationale as the poll timer), so
+    /// there is no meaningful retain cycle to break.
+    private func reloadAsync() {
+        // Bump + capture this reload's generation (#059). A newer synchronous
+        // `reload()` or a later `reloadAsync()` will bump past this value, marking
+        // our pending result stale by the time it hops back to main.
+        reloadGeneration += 1
+        let generation = reloadGeneration
+
+        // Snapshot prior git info on the main thread (reads the observable
+        // `projects`), same carry-over rationale as `reload()` (#024).
+        let priorGitInfo = Dictionary(
+            projects.map { ($0.projectPath, ($0.gitBranch, $0.gitIsDirty)) },
+            uniquingKeysWith: { first, _ in first }
+        )
+
+        nonisolated(unsafe) let unsafeSelf = self
+        DispatchQueue.global(qos: .userInitiated).async {
+            let freshProjects = unsafeSelf.performReload(priorGitInfo: priorGitInfo)
+            DispatchQueue.main.async {
+                unsafeSelf.applyReloadResult(freshProjects, generation: generation)
+            }
+        }
+    }
+
+    /// The main-thread tail of an async reload (#059): the guarded assignment of
+    /// the freshly-parsed `projects` plus the follow-on git second pass and
+    /// `onDidReload?()`. Extracted so the real `reloadAsync` closure and the
+    /// test-only applier exercise the SAME guard logic. MUST run on the main
+    /// thread (mutates the observable `projects` and reads `reloadGeneration`).
+    ///
+    /// Drops the result if a newer reload has started since `generation` was
+    /// captured (`generation != reloadGeneration`), returning BEFORE assigning
+    /// `projects` — so a stale poll never clobbers a fresher `linkProject`/initial
+    /// load nor fires its git second pass / `onDidReload?()`. Otherwise assigns
+    /// `projects` FIRST, then kicks the async git second pass and fires
+    /// `onDidReload?()`, preserving the synchronous `reload()` ordering (#051).
+    private func applyReloadResult(_ freshProjects: [ProjectTasks], generation: Int) {
+        guard generation == reloadGeneration else { return }
+        projects = freshProjects
+        startGitSecondPass()
+        onDidReload?()
+    }
+
+    /// Kicks off the #024 async git second pass against the current `projects`:
+    /// gathers live git state OFF the main thread so the blocking `git`
+    /// subprocesses never stall the UI, then merges it back on the main thread via
+    /// `applyGitInfo`. See `reload()` for the full rationale (this is the same
+    /// pass, extracted so both the synchronous and async reload paths can share
+    /// it). MUST be called on the main thread (it reads the observable
+    /// `projects`).
+    private func startGitSecondPass() {
         let paths = projects.map(\.projectPath)
         nonisolated(unsafe) let unsafeSelf = self
         DispatchQueue.global(qos: .utility).async {
@@ -453,14 +568,6 @@ final class PlansStore {
                 unsafeSelf.applyGitInfo(results)
             }
         }
-
-        // Reconcile finished capture spinner rows against the just-repopulated
-        // `projects` on EVERY reload — poll tick included, not only the
-        // run-finish hand-off (#051). Fires after the synchronous task-parse
-        // pass above (the git second pass is async and irrelevant to
-        // reconciliation), so the moment a captured plan's file lands and a
-        // poll parses it, the orphaned spinner clears next tick.
-        onDidReload?()
     }
 
     /// A Sendable carrier for one project's git query results, used to ferry the
@@ -496,11 +603,13 @@ final class PlansStore {
         }
     }
 
-    /// Begins live refresh: performs an immediate `reload()` (preserving the
-    /// one-shot launch semantics — `projects` is populated synchronously before
-    /// this returns) and then schedules a repeating main-run-loop `Timer` that
-    /// calls `reload()` every `interval` seconds. Any existing timer is
-    /// invalidated first, so calling this repeatedly is safe.
+    /// Begins live refresh: performs an immediate SYNCHRONOUS `reload()`
+    /// (preserving the one-shot launch semantics — `projects` is populated
+    /// synchronously before this returns) and then schedules a repeating
+    /// main-run-loop `Timer` that calls the ASYNC `reloadAsync()` every `interval`
+    /// seconds. Only the poll goes off-main (#059) so a focused text editor never
+    /// hitches on a poll tick; the initial load stays synchronous. Any existing
+    /// timer is invalidated first, so calling this repeatedly is safe.
     func startPolling(interval: TimeInterval = 5) {
         stopPolling()
         reload()
@@ -510,7 +619,7 @@ final class PlansStore {
             withTimeInterval: interval,
             repeats: true
         ) { [self] _ in
-            reload()
+            reloadAsync()
         }
     }
 
@@ -526,5 +635,31 @@ final class PlansStore {
     /// lifecycle behavior without waiting on real wall-clock timer firing.
     var isPolling: Bool {
         pollTimer?.isValid ?? false
+    }
+
+    /// Test-only hook: exposes the private, pure `performReload(priorGitInfo:)` so
+    /// tests can prove it is thread-agnostic (same result whether invoked on the
+    /// calling thread or a background queue) and that the git carry-over survives.
+    /// Keeps the production method `private`.
+    func performReloadForTesting(
+        priorGitInfo: [String: (String?, Bool?)]
+    ) -> [ProjectTasks] {
+        performReload(priorGitInfo: priorGitInfo)
+    }
+
+    /// Test-only hook: the current monotonic reload generation (#059), so tests
+    /// can capture a value, drive a newer reload, and prove the guard drops the
+    /// stale result.
+    var reloadGenerationForTesting: Int {
+        reloadGeneration
+    }
+
+    /// Test-only hook: drives the REAL guarded main-thread tail of an async reload
+    /// (`applyReloadResult(_:generation:)`) with a caller-supplied captured
+    /// generation, so the generation guard can be exercised deterministically
+    /// without racing a real background dispatch. MUST be called on the main
+    /// thread (it delegates to the main-thread-only applier).
+    func applyReloadResultForTesting(_ projects: [ProjectTasks], generation: Int) {
+        applyReloadResult(projects, generation: generation)
     }
 }
