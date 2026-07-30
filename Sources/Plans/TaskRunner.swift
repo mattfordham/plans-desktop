@@ -759,10 +759,12 @@ final class TaskRunner {
     /// `dismiss(taskID:)`. Because reconciliation (and the manual popover-dismiss
     /// path) is what removes the run from the map, "row visible" is exactly "run
     /// still in `runs`", so the spinner-out / plan-row-in transition is atomic.
-    /// An errored capture stays visible too, but never indefinitely: the bounded
-    /// reconcile fallback (`maxReconcileAttempts`) and the manual popover-dismiss
-    /// both clear it. The `captureRow` UI shows an unconditional `ProgressView`,
-    /// which reads as "still creating" for the brief hand-off window.
+    /// An errored capture stays visible INDEFINITELY: reconcile never
+    /// auto-dismisses a run whose `error` is set (that silent clearing is how
+    /// failed captures used to vanish unread), so only the manual
+    /// popover-dismiss clears it. The `captureRow` UI renders a warning glyph
+    /// for that state; the clean-run states keep the `ProgressView`, which
+    /// reads as "still creating" for the brief hand-off window.
     func runningCaptures(projectPath: String) -> [TaskRun] {
         let prefix = Self.captureKey(projectPath: projectPath) + ":"
         return runs.values
@@ -926,6 +928,15 @@ final class TaskRunner {
                 }
                 continue
             }
+
+            // A capture that finished IN ERROR is never auto-dismissed — not by
+            // the new-id hand-off, not by the bounded fallback. Auto-dismissal
+            // is exactly what made failed captures disappear before the user
+            // could read the error (six Ensemble captures were silently
+            // swallowed this way when the launcher's API call 400'd). The row
+            // persists, rendering its error state, until the user opens the
+            // popover and closes it (the manual `dismiss(taskID:)` path).
+            if run.error != nil { continue }
 
             if !newIDs.isEmpty {
                 // A genuinely new task id appeared — the captured plan is present.

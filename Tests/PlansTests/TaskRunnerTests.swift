@@ -797,6 +797,82 @@ final class TaskRunnerTests: XCTestCase {
         XCTAssertNil(runnerB.run(for: runB.taskID))
     }
 
+    // MARK: - Errored captures persist until manual dismissal
+
+    /// Builds a finished capture run that ENDED IN ERROR (e.g. the launcher's
+    /// API call failed before any task was written), with its outcome log
+    /// pointed at a throwaway temp file so the test never touches the real
+    /// `~/.claude/plans-cc/run-outcomes.log`.
+    @MainActor
+    private func makeErroredCapture(
+        path: String,
+        baseline: Set<String>,
+        id: String = "capture:/p:" + UUID().uuidString
+    ) -> TaskRun {
+        let tmp = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString)
+            .appendingPathComponent("run-outcomes.log")
+        let run = TaskRun(taskID: id, mode: .captureElaborate,
+                          description: "Add a thing", projectPath: path,
+                          baselineTaskIDs: baseline,
+                          outcomeLog: RunOutcomeLog(fileURL: tmp))
+        run.finishForTesting(projectPath: path, error: "API Error: 400")
+        return run
+    }
+
+    /// A capture that finished with an error must NOT be cleared by the bounded
+    /// reconcile fallback — auto-dismissal is exactly what made failed captures
+    /// vanish before the user could see the error. The counter must not even
+    /// advance: an errored run does not participate in the fallback at all.
+    @MainActor
+    func testErroredCaptureIsNotDismissedByBoundedFallback() {
+        let run = makeErroredCapture(path: "/p", baseline: ["001"])
+        // Project never gains a new id (the failed run wrote no task).
+        let projects = [makeProject(path: "/p", taskIDs: ["001"])]
+        let runs = [run.taskID: run]
+
+        for pass in 1...(TaskRun.maxReconcileAttempts + 1) {
+            let toDismiss = TaskRunner.taskIDsToDismiss(runs: runs, projects: projects)
+            XCTAssertFalse(toDismiss.contains(run.taskID),
+                           "errored capture must survive pass \(pass)")
+        }
+        XCTAssertEqual(run.reconcileAttempts, 0)
+    }
+
+    /// Even when a NEW task id appears (e.g. captureElaborate wrote the plan and
+    /// then errored during elaboration), an errored capture row is kept so the
+    /// error is surfaced — the new-id hand-off only auto-dismisses clean runs.
+    @MainActor
+    func testErroredCaptureIsNotDismissedWhenNewTaskIDAppears() {
+        let run = makeErroredCapture(path: "/p", baseline: ["001"])
+        let projects = [makeProject(path: "/p", taskIDs: ["001", "002"])]
+
+        let toDismiss = TaskRunner.taskIDsToDismiss(
+            runs: [run.taskID: run], projects: projects
+        )
+        XCTAssertFalse(toDismiss.contains(run.taskID))
+    }
+
+    /// Instance-seam proof of the full contract: reconcile passes leave an
+    /// errored capture's row visible (`runningCaptures` still returns it), and
+    /// only the manual popover-dismiss path clears it.
+    @MainActor
+    func testErroredCaptureRemainsVisibleUntilManualDismiss() {
+        let runner = TaskRunner()
+        let run = makeErroredCapture(path: "/p", baseline: ["001"])
+        runner.ingestRunForTesting(run)
+        let projects = [makeProject(path: "/p", taskIDs: ["001"])]
+
+        for _ in 0...(TaskRun.maxReconcileAttempts + 1) {
+            runner.reconcileFinishedCaptures(against: projects)
+        }
+        XCTAssertEqual(runner.runningCaptures(projectPath: "/p").map(\.taskID),
+                       [run.taskID])
+
+        runner.dismiss(taskID: run.taskID)
+        XCTAssertTrue(runner.runningCaptures(projectPath: "/p").isEmpty)
+    }
+
     // MARK: - Hand-off re-key (task #053)
 
     /// Builds a RUNNING capture run for `projectPath` with the given baseline.

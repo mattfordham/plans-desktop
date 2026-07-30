@@ -320,19 +320,30 @@ struct ProjectCard: View {
         }
     }
 
-    /// A single in-flight capture row: a small spinner plus the run's description,
+    /// A single capture row: a small spinner plus the run's description,
     /// tappable (same `contentShape` + `onTapGesture` primitive as the per-row
     /// spinner) to toggle that run's progress popover, anchored to the row bounds.
     /// On the popover's close the finished run is dropped and the store reloaded
     /// so the new task surfaces via the read path.
+    ///
+    /// A capture that finished IN ERROR swaps the spinner for a warning glyph —
+    /// reconciliation pins errored runs (they are never auto-dismissed), so this
+    /// row is how the failure is raised; closing its popover is what clears it.
     @ViewBuilder
     private func captureRow(_ run: TaskRun) -> some View {
+        let failed = !run.isRunning && run.error != nil
         HStack(spacing: 8) {
-            ProgressView()
-                .controlSize(.small)
+            if failed {
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .foregroundStyle(.red)
+                    .imageScale(.small)
+            } else {
+                ProgressView()
+                    .controlSize(.small)
+            }
             Text(run.description ?? "Capturing…")
                 .font(.body)
-                .foregroundStyle(.secondary)
+                .foregroundStyle(failed ? AnyShapeStyle(.red) : AnyShapeStyle(.secondary))
                 .lineLimit(1)
                 .truncationMode(.tail)
             Spacer(minLength: 0)
@@ -351,7 +362,8 @@ struct ProjectCard: View {
                     store.reload()
                 }
         }
-        .help("Show capture progress")
+        .help(failed ? "Capture failed — click for details, close to dismiss"
+                     : "Show capture progress")
     }
 
     // MARK: - Footer (project star + git status)
