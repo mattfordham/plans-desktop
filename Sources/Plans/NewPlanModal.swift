@@ -434,6 +434,15 @@ struct PlanTextEditor: NSViewRepresentable {
         scrollView.drawsBackground = false
         scrollView.backgroundColor = .clear
 
+        // Register image dragged types LAST — after `isRichText = false` and every
+        // other text-view configuration, and after the view is installed as the
+        // scroll view's document view. `NSTextView` re-derives its own dragged-type
+        // list as a side effect of rich-text/editing configuration, which would
+        // wipe a registration made in `init`. Register additively so inherited
+        // plain-text/URL drop types are preserved (#062).
+        let existingDraggedTypes = textView.registeredDraggedTypes
+        textView.registerForDraggedTypes(existingDraggedTypes + [.png, .tiff, .fileURL])
+
         return scrollView
     }
 
@@ -465,13 +474,17 @@ struct PlanTextEditor: NSViewRepresentable {
 /// routing their PNG bytes to `onImagePasted` instead of letting raw image data
 /// land in the text. Plain-text paste and every other text-view behaviour fall
 /// through to `super` unchanged.
-private final class PlanNSTextView: NSTextView {
+final class PlanNSTextView: NSTextView {
     /// Set by `PlanTextEditor`; receives PNG bytes for a pasted/dropped image.
     var onImagePasted: ((Data) -> Void)?
 
     override init(frame frameRect: NSRect, textContainer container: NSTextContainer?) {
         super.init(frame: frameRect, textContainer: container)
-        registerForDraggedTypes([.png, .tiff, .fileURL])
+        // NOTE: image dragged-type registration is intentionally NOT done here.
+        // `NSTextView` re-derives its own registered dragged types as a side
+        // effect of later configuration (e.g. `isRichText = false`), which wipes
+        // any registration made in `init`. It is registered at the END of
+        // `PlanTextEditor.makeNSView` instead — do not move it back here.
     }
 
     @available(*, unavailable)
@@ -520,18 +533,27 @@ private final class PlanNSTextView: NSTextView {
     // MARK: Pasteboard → PNG
 
     /// True if `pasteboard` carries image data we can extract as PNG.
-    private static func hasImage(on pasteboard: NSPasteboard) -> Bool {
+    static func hasImage(on pasteboard: NSPasteboard) -> Bool {
         pngData(from: pasteboard) != nil
     }
 
     /// Extracts PNG `Data` from `pasteboard`, or nil when no image is present.
     /// Prefers a direct `.png`; otherwise re-encodes `.tiff` bitmap data (and, as
     /// a fallback, an image file URL) into PNG via `NSBitmapImageRep`.
-    private static func pngData(from pasteboard: NSPasteboard) -> Data? {
+    static func pngData(from pasteboard: NSPasteboard) -> Data? {
         if let png = pasteboard.data(forType: .png) {
             return png
         }
         if let tiff = pasteboard.data(forType: .tiff),
+           let rep = NSBitmapImageRep(data: tiff) {
+            return rep.representation(using: .png, properties: [:])
+        }
+        // Many sources (screenshots, browsers, Preview) put an NSImage object on
+        // the pasteboard with no raw .png/.tiff readable via data(forType:).
+        // Read it as an object and re-encode. Prefer this over the file URL so
+        // in-memory images win.
+        if let image = pasteboard.readObjects(forClasses: [NSImage.self], options: nil)?.first as? NSImage,
+           let tiff = image.tiffRepresentation,
            let rep = NSBitmapImageRep(data: tiff) {
             return rep.representation(using: .png, properties: [:])
         }
