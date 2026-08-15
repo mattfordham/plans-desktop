@@ -143,4 +143,14 @@ final class PlanDetailViewTests: XCTestCase {
             }
         }
     }
+
+    // MARK: - PlanDetailView.shouldAutoOpenProgress
+
+    func testAutoOpensProgressWhenAlreadyRunningOnAppear() {
+        XCTAssertTrue(PlanDetailView.shouldAutoOpenProgress(onAppearRunning: true))
+    }
+
+    func testDoesNotAutoOpenProgressWhenNotRunningOnAppear() {
+        XCTAssertFalse(PlanDetailView.shouldAutoOpenProgress(onAppearRunning: false))
+    }
 }

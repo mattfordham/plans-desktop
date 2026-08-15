@@ -47,12 +47,16 @@ struct PlanDetailView: View {
     /// the inline running state, and the progress sheet.
     @Environment(TaskRunner.self) private var runner
 
-    /// Whether the progress sheet is presented. Raised when THIS task's run
-    /// starts (see the `.onChange(of: runner.isRunning(taskID:))` below) and
-    /// lowered by the sheet's Done button. Kept as real view state (rather than
-    /// binding the sheet to the run's `isRunning`) so the user can close the
-    /// sheet WITHOUT the close being swallowed and without stopping the run —
-    /// dismissing the sheet is decoupled from the run's lifecycle.
+    /// Whether the progress sheet is presented. Raised ONLY when this task is
+    /// already running as the window appears (the `.onAppear` already-running
+    /// case, gated by `shouldAutoOpenProgress(onAppearRunning:)`) or by the
+    /// header's "Show progress" button; lowered by the sheet's Done button. A
+    /// fresh run started from THIS view deliberately does NOT raise it (#061) —
+    /// matching the dashboard, where Execute starts the run without popping the
+    /// sheet. Kept as real view state (rather than binding the sheet to the run's
+    /// `isRunning`) so the user can close the sheet WITHOUT the close being
+    /// swallowed and without stopping the run — dismissing is decoupled from the
+    /// run's lifecycle.
     @State private var showProgress = false
 
     /// Whether the "Refine Plan" sheet (#056) is presented. Raised by the
@@ -92,19 +96,15 @@ struct PlanDetailView: View {
         }
         // If this task is ALREADY running when the window opens (e.g. the user
         // clicked the card spinner to come here), pop the progress sheet right
-        // away — `.onChange` only catches a fresh transition, not the standing
-        // state, so this `.onAppear` covers the already-running case.
+        // away. This is the ONLY auto-open path (#022): a fresh run started from
+        // this view does NOT pop the sheet (#061) — the header's "Show progress"
+        // button is the deliberate re-entry. The rule is encoded in the pure
+        // `shouldAutoOpenProgress(onAppearRunning:)` helper.
         .onAppear {
-            if let id = row?.task.id, runner.isRunning(taskID: id) {
+            if let id = row?.task.id,
+               PlanDetailView.shouldAutoOpenProgress(onAppearRunning: runner.isRunning(taskID: id)) {
                 showProgress = true
             }
-        }
-        // Raise the sheet when THIS task's run starts. Scoped to this row's task,
-        // so a run launched for a different task never pops a sheet here. The
-        // sheet stays up after the run ends so the user can read the summary,
-        // then closes it themselves via Done.
-        .onChange(of: runner.isRunning(taskID: row?.task.id ?? "")) { _, isRunning in
-            if isRunning { showProgress = true }
         }
         // The modal progress sheet. Presented via real view state so the Done
         // button / auto-dismiss can actually close it; `onDisappear` reloads the
@@ -356,6 +356,18 @@ struct PlanDetailView: View {
         default:
             return false
         }
+    }
+
+    /// Decides whether the progress sheet should auto-open, gated to the single
+    /// case where the task is ALREADY running as the window appears (e.g. the
+    /// user clicked the card spinner to come here). A fresh run started from THIS
+    /// view must NOT auto-open the sheet — the dashboard doesn't, and neither
+    /// should the detail pop-up (#061); the header's "Show progress" button is the
+    /// deliberate re-entry path. `onAppearRunning` is `runner.isRunning(taskID:)`
+    /// evaluated in `.onAppear`; this returns it unchanged, encoding the rule as a
+    /// pure, testable decision.
+    static func shouldAutoOpenProgress(onAppearRunning: Bool) -> Bool {
+        onAppearRunning
     }
 
     /// Resolves the on-disk markdown file for a task, so the read-only
