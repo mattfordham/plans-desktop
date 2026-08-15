@@ -27,8 +27,9 @@ private enum PlanType {
 ///
 /// It resolves its row from the injected `PlansStore` by composite id via the
 /// shared `BrowserViewModel.resolveRow(in:id:)`, so it stays live as the store
-/// re-reads. It carries NO Close button — when hosted in its own window the
-/// window's close control replaces it. When the id can't be resolved (the plan
+/// re-reads. Its header carries an explicit "Close" button that dismisses the
+/// hosting window via the `dismiss` environment action, complementing the
+/// native window close control. When the id can't be resolved (the plan
 /// completed, the project disappeared, or `rowID` is nil) it shows a muted
 /// "Plan not found" placeholder. The view ONLY reads from the store — it never
 /// writes, moves, or deletes any `.plans/` data (§2 read-only).
@@ -38,6 +39,9 @@ struct PlanDetailView: View {
     let rowID: TaskRow.ID?
 
     @Environment(PlansStore.self) private var store
+
+    /// Dismisses the hosting detail window, driving the header's "Close" button.
+    @Environment(\.dismiss) private var dismiss
 
     /// The shared task-run coordinator, injected by the scene. Resolves the
     /// `TaskRun` for this view's task — driving the Elaborate/Execute actions,
@@ -249,6 +253,16 @@ struct PlanDetailView: View {
                 } label: {
                     Label("Open in Markdown App", systemImage: "doc.text")
                 }
+
+                // Dismisses the hosting detail window. Escape also triggers it
+                // via the .cancelAction keyboard shortcut, complementing the
+                // native window close control.
+                Button {
+                    dismiss()
+                } label: {
+                    Label("Close", systemImage: "xmark")
+                }
+                .keyboardShortcut(.cancelAction)
             }
             .padding(.top, 4)
         }
