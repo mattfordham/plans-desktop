@@ -115,4 +115,32 @@ final class PlanDetailViewTests: XCTestCase {
     func testScrollTargetReturnsNilForEmptyList() {
         XCTAssertNil(RunProgressSheet.scrollTarget(for: []))
     }
+
+    // MARK: - PlanDetailView.canDelete gating (#060)
+
+    /// `PlanDetailView.canDelete` is the pure predicate behind the Delete
+    /// action's availability, and unlike its siblings (`canWork` gated to
+    /// `.elaborated`, `canElaborate` gated to `.pending`) it is deliberately
+    /// unconditional: an abandoned plan can sit at ANY lifecycle status, and a
+    /// blocked plan is *more* deletable, not less. The real safety gate is the
+    /// destructive `NSAlert` confirmation, not availability.
+    ///
+    /// This sweeps every `TaskStatus` case (via `CaseIterable`, so a new status
+    /// is covered automatically) plus the unknown-status `nil`, crossed with
+    /// both `isBlocked` values, so the "always available" contract is pinned
+    /// down and any future accidental gating fails here.
+    @MainActor
+    func testCanDeleteIsAvailableForEveryStatusAndBlockedState() {
+        let statuses: [TaskStatus?] = TaskStatus.allCases.map { $0 } + [nil]
+
+        for status in statuses {
+            for isBlocked in [false, true] {
+                XCTAssertTrue(
+                    PlanDetailView.canDelete(status: status, isBlocked: isBlocked),
+                    "Delete must stay available for status "
+                        + "\(status?.rawValue ?? "nil") / isBlocked=\(isBlocked)"
+                )
+            }
+        }
+    }
 }

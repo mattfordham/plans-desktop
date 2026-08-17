@@ -508,9 +508,9 @@ final class TaskRunnerTests: XCTestCase {
     /// `RunMode.usesDescription` is the pure flag `TaskRun.spawn` consults to pass
     /// `--description <text>` (and omit `--task-id`): true for the three
     /// description-driven modes (`.capture`, `.captureElaborate`, `.executeYolo`),
-    /// false for the existing-task modes (`.execute`, `.elaborate`). Asserting it
-    /// directly verifies the `.captureElaborate` description wiring without
-    /// spawning a real `node` process.
+    /// false for the existing-task modes (`.execute`, `.elaborate`, `.delete`).
+    /// Asserting it directly verifies the `.captureElaborate` description wiring
+    /// without spawning a real `node` process.
     func testRunModeUsesDescriptionFlag() {
         XCTAssertTrue(RunMode.capture.usesDescription)
         XCTAssertTrue(RunMode.captureElaborate.usesDescription)
@@ -520,18 +520,22 @@ final class TaskRunnerTests: XCTestCase {
 
         XCTAssertFalse(RunMode.execute.usesDescription)
         XCTAssertFalse(RunMode.elaborate.usesDescription)
+        // delete names an EXISTING task by id; there is no free text to pass.
+        XCTAssertFalse(RunMode.delete.usesDescription)
     }
 
     /// `RunMode.usesTaskID` is the pure flag `TaskRun.spawn` consults to pass
     /// `--task-id <id>`: true for the existing-task modes (`.execute`,
-    /// `.elaborate`, `.reElaborate`), false for the description-driven modes
-    /// (`.capture`, `.captureElaborate`, `.executeYolo`) whose task does not exist
-    /// yet. Asserting it directly verifies the arg-shape split without spawning a
-    /// real `node` process.
+    /// `.elaborate`, `.reElaborate`, `.delete`), false for the description-driven
+    /// modes (`.capture`, `.captureElaborate`, `.executeYolo`) whose task does not
+    /// exist yet. Asserting it directly verifies the arg-shape split without
+    /// spawning a real `node` process.
     func testRunModeUsesTaskIDFlag() {
         XCTAssertTrue(RunMode.execute.usesTaskID)
         XCTAssertTrue(RunMode.elaborate.usesTaskID)
         XCTAssertTrue(RunMode.reElaborate.usesTaskID)
+        // delete targets an existing task file, so it is id-addressed too.
+        XCTAssertTrue(RunMode.delete.usesTaskID)
 
         XCTAssertFalse(RunMode.capture.usesTaskID)
         XCTAssertFalse(RunMode.captureElaborate.usesTaskID)
@@ -549,6 +553,20 @@ final class TaskRunnerTests: XCTestCase {
 
         XCTAssertTrue(RunMode.reElaborate.usesTaskID)
         XCTAssertTrue(RunMode.reElaborate.usesDescription)
+    }
+
+    /// `.delete` is id-only: it names an EXISTING task (so `spawn` emits
+    /// `--task-id`) and carries no free text (so no `--description`). Its raw
+    /// value is the literal the runner switches on for its `--mode` flag, so the
+    /// round-trip pins the Swift↔TypeScript contract with
+    /// `Tools/work-task/run-task.ts`'s `"delete"` branch — a rename on either
+    /// side would otherwise fail only at runtime.
+    func testDeleteModeIsTaskIDOnlyAndRoundTripsRawValue() {
+        XCTAssertEqual(RunMode.delete.rawValue, "delete")
+        XCTAssertEqual(RunMode(rawValue: "delete"), .delete)
+
+        XCTAssertTrue(RunMode.delete.usesTaskID)
+        XCTAssertFalse(RunMode.delete.usesDescription)
     }
 
     /// A `.reElaborate` run carries BOTH an existing task id and the free-text

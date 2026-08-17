@@ -129,7 +129,11 @@ enum RunEvent: Codable, Equatable {
 /// task id), leaving it in `review`; `reElaborate` runs `plan-elaborate` in
 /// Path-C further-elaboration mode on an EXISTING already-elaborated task,
 /// folding a free-text `--description` in as the user's refinement guidance —
-/// the only mode that carries BOTH an existing task id AND a description.
+/// the only mode that carries BOTH an existing task id AND a description;
+/// `delete` runs `plan-delete` autonomously to permanently remove an EXISTING
+/// task's plan file (the in-app confirm having already stood in for the skill's
+/// interactive gate), deliberately KEEPING the task's git branch so a single
+/// click can never destroy commits.
 enum RunMode: String {
     case execute
     case elaborate
@@ -137,20 +141,21 @@ enum RunMode: String {
     case captureElaborate
     case executeYolo
     case reElaborate
+    case delete
 
     /// Whether this mode operates on an EXISTING task, so `TaskRun.spawn` passes
     /// `--task-id <id>`. True for the existing-task modes `.execute` /
-    /// `.elaborate` / `.reElaborate`; false for the description-driven modes
-    /// (`.capture` / `.captureElaborate` / `.executeYolo`), whose task does not
-    /// exist yet. Pure flag (no I/O) so the arg-shape contract is unit-testable
-    /// without spawning a `node` process.
+    /// `.elaborate` / `.reElaborate` / `.delete`; false for the
+    /// description-driven modes (`.capture` / `.captureElaborate` /
+    /// `.executeYolo`), whose task does not exist yet. Pure flag (no I/O) so the
+    /// arg-shape contract is unit-testable without spawning a `node` process.
     ///
     /// This is INDEPENDENT of `usesDescription`: `.reElaborate` is the one mode
     /// where both are true (it refines an existing task using free-text
     /// guidance), so `spawn` emits `--task-id` AND `--description` for it.
     var usesTaskID: Bool {
         switch self {
-        case .execute, .elaborate, .reElaborate:
+        case .execute, .elaborate, .reElaborate, .delete:
             return true
         case .capture, .captureElaborate, .executeYolo:
             return false
@@ -161,8 +166,9 @@ enum RunMode: String {
     /// passes `--description <text>`. True for the description-driven modes
     /// (`.capture` / `.captureElaborate` / `.executeYolo`) AND for `.reElaborate`
     /// (which folds the user's refinement guidance in alongside its `--task-id`).
-    /// False for the plain existing-task modes `.execute` / `.elaborate`. Pure
-    /// flag (no I/O) so the arg-shape contract is unit-testable without spawning a
+    /// False for the plain existing-task modes `.execute` / `.elaborate` /
+    /// `.delete`, which are fully identified by their task id alone. Pure flag
+    /// (no I/O) so the arg-shape contract is unit-testable without spawning a
     /// `node` process.
     ///
     /// This is INDEPENDENT of `usesTaskID`: a mode can need both (`.reElaborate`)
@@ -172,7 +178,7 @@ enum RunMode: String {
         switch self {
         case .capture, .captureElaborate, .executeYolo, .reElaborate:
             return true
-        case .execute, .elaborate:
+        case .execute, .elaborate, .delete:
             return false
         }
     }

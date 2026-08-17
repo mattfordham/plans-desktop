@@ -27,21 +27,20 @@ private enum PlanType {
 ///
 /// It resolves its row from the injected `PlansStore` by composite id via the
 /// shared `BrowserViewModel.resolveRow(in:id:)`, so it stays live as the store
-/// re-reads. Its header carries an explicit "Close" button that dismisses the
-/// hosting window via the `dismiss` environment action, complementing the
-/// native window close control. When the id can't be resolved (the plan
+/// re-reads. It carries NO Close button — when hosted in its own window the
+/// window's close control replaces it. When the id can't be resolved (the plan
 /// completed, the project disappeared, or `rowID` is nil) it shows a muted
-/// "Plan not found" placeholder. The view ONLY reads from the store — it never
-/// writes, moves, or deletes any `.plans/` data (§2 read-only).
+/// "Plan not found" placeholder. The view itself ONLY reads from the store — it
+/// never opens a `.plans/` file for writing. Its Elaborate / Refine / Execute /
+/// Delete actions mutate nothing in-process; each one spawns the bundled runner
+/// subprocess, the sole writer of `.plans/`, which drives the corresponding
+/// plans-cc skill (§2).
 struct PlanDetailView: View {
     /// The composite row id (`projectPath + "/" + task.id`) to render, or `nil`
     /// when no plan is targeted (renders the placeholder).
     let rowID: TaskRow.ID?
 
     @Environment(PlansStore.self) private var store
-
-    /// Dismisses the hosting detail window, driving the header's "Close" button.
-    @Environment(\.dismiss) private var dismiss
 
     /// The shared task-run coordinator, injected by the scene. Resolves the
     /// `TaskRun` for this view's task — driving the Elaborate/Execute actions,
@@ -254,15 +253,25 @@ struct PlanDetailView: View {
                     Label("Open in Markdown App", systemImage: "doc.text")
                 }
 
-                // Dismisses the hosting detail window. Escape also triggers it
-                // via the .cancelAction keyboard shortcut, complementing the
-                // native window close control.
-                Button {
-                    dismiss()
-                } label: {
-                    Label("Close", systemImage: "xmark")
+                // "Delete" — hands the plan off to the bundled runner in
+                // `plan-delete` mode. Lives in this always-visible file-actions
+                // block (so it's hidden automatically while a run is in flight)
+                // rather than the status-gated block, because `canDelete` is
+                // true at every status. The modal confirm below is the REAL
+                // safety gate: the runner does not allowlist `AskUserQuestion`,
+                // so `plan-delete`'s own yes/no prompts can never reach the user
+                // (the delete prompt pre-answers them). This is the only place a
+                // human consents to an irreversible deletion.
+                if Self.canDelete(status: row.task.status, isBlocked: row.task.isBlocked) {
+                    Button {
+                        if Self.confirmDelete(row: row) {
+                            runner.run(projectPath: row.projectPath,
+                                       taskID: row.task.id, mode: .delete)
+                        }
+                    } label: {
+                        Label("Delete", systemImage: "trash")
+                    }
                 }
-                .keyboardShortcut(.cancelAction)
             }
             .padding(.top, 4)
         }
@@ -296,6 +305,57 @@ struct PlanDetailView: View {
     static func canReElaborate(status: TaskStatus?, isBlocked: Bool) -> Bool {
         guard !isBlocked else { return false }
         return status == .elaborated
+    }
+
+    /// Pure predicate for the "Delete" action's availability. Unlike Execute
+    /// (gated to `elaborated`) and Elaborate (gated to `pending`), deletion is
+    /// valid at EVERY lifecycle status: an abandoned plan is exactly the one you
+    /// want to delete, and that plan can be sitting at any status — pending,
+    /// elaborated, mid-flight, awaiting review, or completed. `isBlocked` does
+    /// not gate it either: a blocked plan is *more* deletable, not less, since
+    /// being blocked is a common reason to abandon it. So this predicate is
+    /// unconditionally `true`; it exists for symmetry with its siblings and so
+    /// the "always available" rule is explicit and unit-testable rather than an
+    /// unstated absence of gating at the call site. The real safety gate is the
+    /// destructive `NSAlert` confirmation, not availability.
+    static func canDelete(status: TaskStatus?, isBlocked: Bool) -> Bool {
+        return true
+    }
+
+    /// Runs the modal confirmation for "Delete", returning `true` only when the
+    /// user explicitly confirms. Modeled on the quit-guard alert in
+    /// `PlansApp.swift`: first button is the default and destructive, second
+    /// cancels, and anything other than `alertFirstButtonReturn` is a cancel.
+    /// Because the bundled runner can't surface `plan-delete`'s own interactive
+    /// confirms, the status-specific consequences that skill would have warned
+    /// about are folded into `informativeText` here instead.
+    private static func confirmDelete(row: TaskRow) -> Bool {
+        let alert = NSAlert()
+        alert.messageText = "Delete plan #\(row.task.id)?"
+
+        var informative = "\"\(row.title ?? "(untitled)")\" will be permanently deleted. "
+            + "This cannot be undone."
+        switch row.task.status {
+        case .review, .inReview:
+            informative += "\n\nThis task has a branch with unmerged changes. "
+                + "The branch will remain, but task tracking will be lost."
+        case .inProgress:
+            informative += "\n\nThis task is in progress. Any uncommitted work will be lost."
+        default:
+            break
+        }
+        alert.informativeText = informative
+
+        let deleteButton = alert.addButton(withTitle: "Delete")
+        deleteButton.hasDestructiveAction = true
+        alert.addButton(withTitle: "Cancel")
+
+        switch alert.runModal() {
+        case .alertFirstButtonReturn:
+            return true
+        default:
+            return false
+        }
     }
 
     /// Resolves the on-disk markdown file for a task, so the read-only
@@ -559,7 +619,7 @@ struct RunProgressSheet: View {
     }
 
     /// The verb for this run's mode ("Executing" / "Elaborating" / "Capturing"
-    /// / "Capturing & elaborating" / "Capturing & executing").
+    /// / "Capturing & elaborating" / "Capturing & executing" / "Deleting").
     private var modeVerb: String {
         switch run?.mode {
         case .elaborate: return "Elaborating"
@@ -567,6 +627,7 @@ struct RunProgressSheet: View {
         case .capture: return "Capturing"
         case .captureElaborate: return "Capturing & elaborating"
         case .executeYolo: return "Capturing & executing"
+        case .delete: return "Deleting"
         case .execute, .none: return "Executing"
         }
     }

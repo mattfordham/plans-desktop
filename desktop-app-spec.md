@@ -62,18 +62,42 @@ A full window for actually reading and triaging work. It must let the user:
 
 ---
 
-## 2. Hard Constraint: Read-Only
+## 2. Hard Constraint: The App Never Writes `.plans/` Itself
 
-**The app is a pure viewer. It MUST NEVER write to any `.plans/` directory, edit
-or create task files, change task status, or move tasks between projects.** It
-reads the registry and the task files and displays them. That is all. Any
-mutation of plans-cc data is explicitly out of scope and must not be
-implemented. Treat all `.plans/` content as read-only input.
+**The app process MUST NEVER write to any `.plans/` directory, edit or create
+task files, change task status, or move tasks between projects.** In-process,
+all `.plans/` content is strictly read-only input: the app reads the registry
+and the task files and displays them.
 
-(The registry file at `~/.claude/plans-cc/projects.json` is written by the
-plans-cc tooling itself; the app reads it but does not need to write it. See §4
-for the one tolerable exception note — even there, writing is optional and not
-required.)
+Mutation of plans-cc data is **not** out of scope — but it happens in exactly
+one place. The app bundles an Agent-SDK **runner subprocess**
+(`Tools/work-task/run-task.ts`, built to `dist/run-task.js`), and that
+subprocess is the **sole writer** of a project's `.plans/` directory and git
+tree. The app drives it for the plans-cc lifecycle verbs — **capture**,
+**elaborate**, **execute**, and **delete** — by spawning it with a `--mode`
+and the task id or description, then rendering its NDJSON progress stream.
+
+The distinction that matters, and that must be preserved:
+
+- The app **never hand-edits** a task file and never parses-and-rewrites one.
+  There is no code path in the Swift app that opens a `.plans/` file for
+  writing.
+- Every mutation goes through the corresponding **plans-cc skill**, so
+  plans-cc's own conventions (id allocation, file naming, status transitions,
+  pending↔completed moves, git behavior) remain owned by plans-cc rather than
+  reimplemented — and drifting — in the app.
+
+> **Note:** this has been the real architecture since the runner was introduced
+> with capture/elaborate/execute; the "pure viewer" wording above it was simply
+> stale. Adding **delete** did not introduce mutation, it added one more verb to
+> a runner that already had three.
+
+Note that this constraint is about **`.plans/` task data**. The registry file at
+`~/.claude/plans-cc/projects.json` is a separate, much simpler artifact: it is
+normally written by the plans-cc tooling itself, and the app only needs to read
+it — but the app does write it in one narrow case, when the user links a new
+project (`RegistryWriter`, an atomic temp-file-and-move). It never rewrites the
+registry just to prune stale entries; see §4.3.
 
 ---
 
@@ -144,7 +168,11 @@ An entry is **stale** if its `.plans/` directory no longer exists — i.e. if
   not show those projects.
 - You are not required to rewrite the registry file to remove stale entries —
   the plans-cc tooling self-heals the file on its next write. Simply skipping
-  stale entries when reading is sufficient and keeps the app read-only.
+  stale entries when reading is sufficient and keeps the *stale-entry* path
+  read-only. (This is scoped to pruning during reads. The app does write
+  `projects.json` elsewhere — `RegistryWriter` registers a newly linked project
+  — but it never rewrites the registry merely to garbage-collect stale
+  entries.)
 
 ### 4.4 Tolerance: missing / empty / corrupt
 
@@ -409,6 +437,9 @@ A correct build of this app:
    projects at once, sorts by staleness, and is reachable by drilling down from
    the glance.
 6. Updates live (watch or poll) and periodically re-reads the registry.
-7. Is **read-only** — never writes to, edits, or moves any `.plans/` data.
+7. **Never writes `.plans/` data in-process** — the app itself never edits or
+   moves a task file; all mutation (capture / elaborate / execute / delete) is
+   delegated to the bundled runner subprocess, which drives the plans-cc skills
+   (§2).
 8. Is native macOS (Swift), menu bar + window, built/installed separately from
    the plans-cc npm package, with no signing/notarization requirement.

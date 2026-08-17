@@ -61,11 +61,12 @@ type Mode =
   | "reElaborate"
   | "capture"
   | "captureElaborate"
-  | "executeYolo";
+  | "executeYolo"
+  | "delete";
 
 interface Args {
   projectRoot: string;
-  /** Required for execute/elaborate/reElaborate; undefined for capture/captureElaborate/executeYolo (no task exists yet). */
+  /** Required for execute/elaborate/reElaborate/delete; undefined for capture/captureElaborate/executeYolo (no task exists yet). */
   taskId?: string;
   mode: Mode;
   /** Required for capture/captureElaborate/executeYolo AND reElaborate: the free-text description/guidance to act on. */
@@ -104,7 +105,8 @@ function parseArgs(argv: string[]): Args | null {
         value !== "reElaborate" &&
         value !== "capture" &&
         value !== "captureElaborate" &&
-        value !== "executeYolo"
+        value !== "executeYolo" &&
+        value !== "delete"
       ) {
         return null;
       }
@@ -138,7 +140,8 @@ function parseArgs(argv: string[]): Args | null {
     return { projectRoot, taskId, mode, description };
   }
 
-  // execute / elaborate operate on an existing task.
+  // execute / elaborate / delete operate on an existing task, identified by id
+  // alone — no description.
   if (!taskId) {
     return null;
   }
@@ -361,6 +364,50 @@ function buildExecuteYoloPrompt(description: string): string {
   ].join("\n");
 }
 
+/**
+ * Build the prompt for a `delete` run. This drives `plan-delete <id>` to
+ * permanently remove an existing task's plan file, state file, and PROGRESS.md
+ * entries.
+ *
+ * plan-delete has TWO interactive gates, and this runner does NOT allowlist the
+ * `AskUserQuestion` tool — so an unanswered gate would strand the run. Both are
+ * therefore pre-answered in the prompt itself:
+ *
+ * 1. Step 6's "Are you sure you want to permanently delete task #NNN? (yes/no)"
+ *    text confirm — answered "yes". The user already confirmed in-app before
+ *    this run was spawned, so the in-app confirm IS the human gate.
+ * 2. Step 7c's `AskUserQuestion` about deleting the task's associated git
+ *    branch — answered "Keep branch". A single in-app click must never destroy
+ *    git commits, so the branch is ALWAYS kept regardless of task state.
+ */
+function buildDeletePrompt(taskId: string): string {
+  return [
+    `Use the \`plan-delete\` skill to permanently delete the plans-cc task with`,
+    `id ${taskId}:`,
+    "",
+    `/plan-delete ${taskId}`,
+    "",
+    "Requirements:",
+    "1. The user has ALREADY confirmed this deletion in the app before this run",
+    "   was started. When the skill asks \"Are you sure you want to permanently",
+    `   delete task #${taskId}? (yes/no)\", the answer is YES — proceed with the`,
+    "   deletion. Do NOT stop to re-confirm.",
+    "2. KEEP the task's associated git branch. If the skill asks whether to",
+    "   delete the branch, the answer is \"Keep branch\" — leave it exactly as-is.",
+    "   Never run `git branch -D` or otherwise remove the branch: deleting a",
+    "   branch would destroy commits, and that must never follow from a single",
+    "   in-app click.",
+    "3. Work fully autonomously. Do NOT ask the user any questions — there is no",
+    "   interactive UI to answer them. Both of the skill's prompts are already",
+    "   answered above; apply those answers and continue.",
+    "4. Complete the rest of the skill's cleanup as normal: remove the task file,",
+    "   remove its state file, and update PROGRESS.md (and HISTORY.md if the task",
+    "   was completed).",
+    "",
+    "Work autonomously to completion. Do not ask for confirmation.",
+  ].join("\n");
+}
+
 function buildPrompt(args: Args): string {
   if (args.mode === "capture") {
     return buildCapturePrompt(args.description ?? "");
@@ -376,6 +423,9 @@ function buildPrompt(args: Args): string {
   }
   if (args.mode === "elaborate") {
     return buildElaboratePrompt(args.taskId ?? "");
+  }
+  if (args.mode === "delete") {
+    return buildDeletePrompt(args.taskId ?? "");
   }
   return buildExecutePrompt(args.taskId ?? "");
 }
@@ -436,7 +486,7 @@ async function main(): Promise<void> {
   const args = parseArgs(process.argv.slice(2));
   if (!args) {
     emitError(
-      "Missing or invalid arguments. Usage: run-task.js --project-root <abs path> [--mode execute|elaborate|reElaborate|capture|captureElaborate|executeYolo] (--task-id <NNN> for execute/elaborate; --description <text> for capture/captureElaborate/executeYolo; BOTH --task-id <NNN> and --description <text> for reElaborate)",
+      "Missing or invalid arguments. Usage: run-task.js --project-root <abs path> [--mode execute|elaborate|reElaborate|capture|captureElaborate|executeYolo|delete] (--task-id <NNN> for execute/elaborate/delete; --description <text> for capture/captureElaborate/executeYolo; BOTH --task-id <NNN> and --description <text> for reElaborate)",
     );
     process.exit(1);
     return;
