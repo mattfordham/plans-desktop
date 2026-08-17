@@ -137,4 +137,130 @@ final class PlanTextEditorImageTests: XCTestCase {
 
         XCTAssertNil(PlanNSTextView.pngData(from: pasteboard))
     }
+
+    // MARK: - Paste entry point (#062 follow-up)
+
+    /// Builds a `PlanNSTextView` configured exactly as `PlanTextEditor.makeNSView`
+    /// does — critically `isRichText = false`, which is what restricts the view's
+    /// advertised readable types and gates ⌘V.
+    private func makeTextView() -> PlanNSTextView {
+        let textStorage = NSTextStorage()
+        let layoutManager = NSLayoutManager()
+        textStorage.addLayoutManager(layoutManager)
+        let textContainer = NSTextContainer(
+            containerSize: NSSize(width: 300, height: CGFloat.greatestFiniteMagnitude)
+        )
+        textContainer.widthTracksTextView = true
+        layoutManager.addTextContainer(textContainer)
+
+        let textView = PlanNSTextView(
+            frame: NSRect(x: 0, y: 0, width: 300, height: 200),
+            textContainer: textContainer
+        )
+        textView.isRichText = false
+        return textView
+    }
+
+    /// A menu item standing in for Edit ▸ Paste, used to ask the text view whether
+    /// it would ENABLE ⌘V for the current pasteboard.
+    private func pasteMenuItem() -> NSMenuItem {
+        NSMenuItem(title: "Paste", action: #selector(NSText.paste(_:)), keyEquivalent: "v")
+    }
+
+    /// The real root cause of "drag works, paste doesn't": with `isRichText =
+    /// false` the text view advertises ONLY text-ish readable types, so AppKit
+    /// disables the Paste command for an image-only clipboard and ⌘V is never
+    /// dispatched at all — `paste(_:)` is not even called. Overriding
+    /// `readablePasteboardTypes` to advertise the image types is what re-enables
+    /// the command and lets the image branch run.
+    func testAdvertisesImageTypesAsReadable() throws {
+        let textView = makeTextView()
+        let readable = Set(textView.readablePasteboardTypes)
+
+        XCTAssertTrue(readable.contains(.png), "expected .png to be advertised as readable")
+        XCTAssertTrue(readable.contains(.tiff), "expected .tiff to be advertised as readable")
+        XCTAssertTrue(readable.contains(.fileURL), "expected .fileURL to be advertised as readable")
+    }
+
+    /// Advertising the image types must actually flip the Paste command from
+    /// disabled to enabled for an image-only pasteboard. This is the behaviour the
+    /// user observed as "Cmd+V does nothing".
+    func testPasteCommandIsEnabledForImageOnlyPasteboard() throws {
+        let textView = makeTextView()
+        // `validateUserInterfaceItem` for paste: consults the GENERAL pasteboard,
+        // so drive it through the same seam the view uses, without mutating the
+        // user's real clipboard.
+        pasteboard.clearContents()
+        pasteboard.setData(try pngBytes(), forType: .png)
+
+        XCTAssertTrue(
+            textView.canPaste(from: pasteboard),
+            "expected an image-only pasteboard to enable the Paste command"
+        )
+    }
+
+    /// The paste entry point must hand PNG bytes to `onImagePasted` and must NOT
+    /// let the image land in the text (no attachment glyph, no `super` insert).
+    func testReadSelectionCapturesImageAndLeavesTextUntouched() throws {
+        let textView = makeTextView()
+        var captured: Data?
+        textView.onImagePasted = { captured = $0 }
+
+        pasteboard.clearContents()
+        pasteboard.setData(try pngBytes(), forType: .png)
+
+        XCTAssertTrue(textView.readSelection(from: pasteboard), "expected the image to be handled")
+        assertValidPNG(captured, "(readSelection entry point)")
+        XCTAssertEqual(textView.string, "", "image paste must not insert anything into the text")
+    }
+
+    /// A PDF-only pasteboard (screenshots, Preview, browsers) reaches the callback
+    /// through the entry point too, not just through the extraction helper.
+    func testReadSelectionCapturesNSImageOnlyPasteboard() throws {
+        let textView = makeTextView()
+        var captured: Data?
+        textView.onImagePasted = { captured = $0 }
+
+        pasteboard.clearContents()
+        pasteboard.setData(pdfData(), forType: .pdf)
+
+        XCTAssertTrue(textView.readSelection(from: pasteboard))
+        assertValidPNG(captured, "(PDF-only pasteboard via entry point)")
+        XCTAssertEqual(textView.string, "")
+    }
+
+    /// Regression guard: plain-text paste must keep working normally and must NOT
+    /// fire the image callback. Both `NewPlanModal` and `ReElaborateModal` depend
+    /// on this.
+    func testPlainTextPasteStillInsertsTextAndDoesNotFireCallback() throws {
+        let textView = makeTextView()
+        var fired = false
+        textView.onImagePasted = { _ in fired = true }
+
+        pasteboard.clearContents()
+        pasteboard.setString("hello world", forType: .string)
+
+        XCTAssertTrue(textView.readSelection(from: pasteboard))
+        XCTAssertFalse(fired, "plain-text paste must not fire onImagePasted")
+        XCTAssertEqual(textView.string, "hello world")
+    }
+
+    /// `pasteAsPlainText` is the other command AppKit can route a paste through
+    /// (Edit ▸ Paste and Match Style, and some plain-text configurations). It must
+    /// run the same image branch rather than silently dropping the image.
+    func testPasteAsPlainTextRoutesImagesThroughTheSameBranch() throws {
+        let textView = makeTextView()
+        var captured: Data?
+        textView.onImagePasted = { captured = $0 }
+
+        pasteboard.clearContents()
+        pasteboard.setData(try pngBytes(), forType: .png)
+
+        XCTAssertTrue(
+            textView.captureImage(from: pasteboard),
+            "expected the shared image branch to handle an image-only pasteboard"
+        )
+        assertValidPNG(captured, "(shared capture helper)")
+        XCTAssertEqual(textView.string, "")
+    }
 }

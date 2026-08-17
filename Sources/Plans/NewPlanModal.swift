@@ -492,23 +492,75 @@ final class PlanNSTextView: NSTextView {
         fatalError("init(coder:) has not been implemented")
     }
 
-    /// Intercept ⌘V. If the general pasteboard carries image data, capture it and
-    /// stop — otherwise defer to the standard plain-text paste.
+    /// The image types this view can accept on a paste, in addition to whatever
+    /// `NSTextView` already advertises.
+    private static let imagePasteTypes: [NSPasteboard.PasteboardType] = [.png, .tiff, .fileURL]
+
+    /// Advertise the image types as readable.
+    ///
+    /// This is the actual fix for "drag-and-drop works but ⌘V does nothing".
+    /// With `isRichText = false`, `NSTextView` advertises only text-ish readable
+    /// types (string/RTF/HTML/URL/filenames/colour/font/ruler). AppKit validates
+    /// the Paste command against exactly this list, so for an image-only
+    /// clipboard `validateUserInterfaceItem(paste:)` returned false, Edit ▸ Paste
+    /// was DISABLED, and ⌘V was never dispatched at all — `paste(_:)` and
+    /// `readSelection(from:)` were never even called. (Drag-and-drop was
+    /// unaffected because it validates against the separately-registered dragged
+    /// types instead, which is why dropping worked while pasting did not.)
+    ///
+    /// Adding the image types here re-enables the command and lets the paste
+    /// reach `readSelection(from:)`, where the image branch runs. Plain text is
+    /// unaffected: the string type still takes precedence when the pasteboard
+    /// carries text, so a text paste inserts text exactly as before.
+    override var readablePasteboardTypes: [NSPasteboard.PasteboardType] {
+        Self.imagePasteTypes + super.readablePasteboardTypes
+    }
+
+    /// The single shared "is there an image here, and if so capture it" branch.
+    /// `paste`, `pasteAsPlainText`, `pasteAsRichText`, `readSelection` and
+    /// `performDragOperation` all funnel through this so they cannot drift apart.
+    /// Returns true when an image was captured and the caller must NOT fall
+    /// through to `super` (which would insert an attachment glyph into the text).
+    @discardableResult
+    func captureImage(from pasteboard: NSPasteboard) -> Bool {
+        guard let data = Self.pngData(from: pasteboard) else { return false }
+        onImagePasted?(data)
+        return true
+    }
+
+    /// Whether a paste from `pasteboard` should be enabled for this view.
+    /// Mirrors AppKit's own rule (does the pasteboard carry any type we
+    /// advertise as readable?) while remaining injectable for tests, which must
+    /// never touch the user's real clipboard.
+    func canPaste(from pasteboard: NSPasteboard) -> Bool {
+        pasteboard.availableType(from: readablePasteboardTypes) != nil
+    }
+
+    /// Intercept ⌘V. If the pasteboard carries image data, capture it and stop —
+    /// otherwise defer to the standard plain-text paste.
     override func paste(_ sender: Any?) {
-        if let data = Self.pngData(from: NSPasteboard.general) {
-            onImagePasted?(data)
-            return
-        }
+        guard !captureImage(from: NSPasteboard.general) else { return }
         super.paste(sender)
     }
 
-    /// Belt-and-suspenders for services/`readSelection`-driven inserts: capture
-    /// image data the same way, otherwise fall through to `super`.
+    /// Edit ▸ Paste and Match Style, and the route some plain-text configurations
+    /// take. Runs the same image branch so an image can never slip past it.
+    override func pasteAsPlainText(_ sender: Any?) {
+        guard !captureImage(from: NSPasteboard.general) else { return }
+        super.pasteAsPlainText(sender)
+    }
+
+    /// Same image branch for the rich-text paste command.
+    override func pasteAsRichText(_ sender: Any?) {
+        guard !captureImage(from: NSPasteboard.general) else { return }
+        super.pasteAsRichText(sender)
+    }
+
+    /// Where an enabled ⌘V actually lands once the image types are advertised
+    /// above; also covers services-driven inserts. Capturing here (rather than
+    /// letting `super` run) is what keeps the image out of the text.
     override func readSelection(from pasteboard: NSPasteboard) -> Bool {
-        if let data = Self.pngData(from: pasteboard) {
-            onImagePasted?(data)
-            return true
-        }
+        if captureImage(from: pasteboard) { return true }
         return super.readSelection(from: pasteboard)
     }
 
@@ -523,10 +575,7 @@ final class PlanNSTextView: NSTextView {
     }
 
     override func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
-        if let data = Self.pngData(from: sender.draggingPasteboard) {
-            onImagePasted?(data)
-            return true
-        }
+        if captureImage(from: sender.draggingPasteboard) { return true }
         return super.performDragOperation(sender)
     }
 
