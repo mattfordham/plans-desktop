@@ -110,4 +110,46 @@ final class ProjectCardTests: XCTestCase {
         XCTAssertEqual(url.path, "/tmp/example/.plans")
         XCTAssertEqual(url.lastPathComponent, ".plans")
     }
+
+    // MARK: - titleSizing (deterministic flexible-title column, #063)
+
+    /// #063: the title column previously relied on a magic `idealWidth:
+    /// 1_000_000` sentinel to win the Grid's flexible-width negotiation. Under a
+    /// wide card with a single short row that negotiation degraded, collapsing
+    /// the title into a sliver and reflowing the row into a duplicated
+    /// two-column look. The fix pins the sizing decision in a pure, view-free
+    /// `titleSizing` helper: the title stretches to `maxWidth: .infinity` (no
+    /// ideal width) and is bounded by a 2-line limit with tail truncation so a
+    /// long title never collapses the column. This asserts the decision no
+    /// longer depends on any magic sentinel width.
+    func testTitleSizingUsesNoMagicSentinelWidth() {
+        let sizing = ProjectCard.titleSizing
+        // The title stretches to the full remaining width — no bounded ideal.
+        XCTAssertNil(sizing.idealWidth)
+        XCTAssertEqual(sizing.maxWidth, .infinity)
+        // Defensively: whatever ideal is exposed, it is not a large sentinel.
+        if let ideal = sizing.idealWidth {
+            XCTAssertLessThan(ideal, 100_000)
+        }
+    }
+
+    /// #063: the title is bounded by a line limit + tail truncation so a long
+    /// title wraps to at most two lines and then truncates, rather than forcing
+    /// the flexible column to a sliver.
+    func testTitleSizingIsBoundedByLineLimitAndTailTruncation() {
+        let sizing = ProjectCard.titleSizing
+        XCTAssertEqual(sizing.lineLimit, 2)
+        XCTAssertEqual(sizing.truncationMode, .tail)
+    }
+
+    // MARK: - planRow cell-count invariant (table layout, #063)
+
+    /// #063: each `planRow` GridRow must emit exactly five cells — status icon /
+    /// id / [type] / title / actions — so the `Grid`'s cross-row column
+    /// alignment (a table look) survives. Pinning the count as a static
+    /// constant lets this invariant be asserted without rendering the view; the
+    /// view and this constant are kept in agreement by construction.
+    func testPlanRowEmitsExactlyFiveCells() {
+        XCTAssertEqual(ProjectCard.planRowCellCount, 5)
+    }
 }

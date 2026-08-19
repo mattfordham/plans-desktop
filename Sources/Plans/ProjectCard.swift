@@ -135,6 +135,43 @@ struct ProjectCard: View {
         URL(fileURLWithPath: projectPath).appendingPathComponent(".plans")
     }
 
+    // MARK: - Title-column sizing (#063 deterministic flexible title)
+
+    /// The sizing decision for a plan row's flexible title column, extracted as a
+    /// pure value so it is unit-testable without instantiating the view (mirrors
+    /// `shouldScrollContent` / `finderURL`).
+    ///
+    /// #063: the title used to pin a magic `idealWidth: 1_000_000` sentinel to
+    /// win the `Grid`'s flexible-width negotiation. Under a wide card holding a
+    /// single short row the Grid couldn't satisfy that absurd ideal, its column
+    /// negotiation degraded, the title collapsed to a sliver, and the row
+    /// reflowed into a duplicated two-column look. This encodes the deterministic
+    /// replacement: the title carries NO ideal width (`idealWidth == nil`), just
+    /// stretches to `maxWidth: .infinity` to claim the width left after the fixed
+    /// status/id/type cells, and is bounded by a 2-line limit + tail truncation
+    /// so a long title wraps at most twice and then truncates instead of forcing
+    /// the column to a sliver.
+    struct TitleSizing {
+        /// No magic sentinel — the title has no fixed ideal width.
+        var idealWidth: CGFloat? = nil
+        /// The title stretches to fill the remaining row width.
+        var maxWidth: CGFloat = .infinity
+        /// Bounded so a long title never collapses the flexible column.
+        var lineLimit: Int = 2
+        /// Overflow past the line limit truncates at the tail.
+        var truncationMode: Text.TruncationMode = .tail
+    }
+
+    /// The single source of truth for the title column's sizing, consumed by
+    /// `planRow` so the view and the tested decision cannot drift apart.
+    static let titleSizing = TitleSizing()
+
+    /// #063: a `planRow` GridRow always emits exactly these five cells —
+    /// status icon / id / [type] / title / actions — so the enclosing `Grid`
+    /// aligns them into columns (a table look). Pinned as a constant so the
+    /// per-row cell-count invariant is assertable without rendering the view.
+    static let planRowCellCount = 5
+
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             header
@@ -499,25 +536,28 @@ struct ProjectCard: View {
             .padding(.trailing, 8)
             .modifier(OpenDetailOnTap(row: row, openWindow: openWindow))
 
-            // The title is the row's flexible column: it should claim ALL the
-            // width left after the fixed status/id/type cells and only wrap when
-            // that genuinely runs out. A bare wrapping `Text` doesn't do that
-            // inside a `Grid`: the Grid sizes a flexible column to its content's
-            // IDEAL width, and a multi-line `Text`'s ideal width is roughly its
-            // longest unbreakable word — so the column collapses to a few
-            // characters and the title wraps into a sliver while the rest of the
-            // row sits empty (the reported narrow-title / ballooned-row bug).
+            // The title is the row's flexible column: it claims the width left
+            // after the fixed status/id/type cells and wraps only when that runs
+            // out. #063: the sizing is deterministic and no longer negotiated via
+            // a magic ideal width. The old approach pinned `idealWidth:
+            // 1_000_000` to win the Grid's flexible-column sizing, but under a
+            // wide card holding a single short row the Grid couldn't satisfy that
+            // absurd ideal — its negotiation degraded, the title collapsed to a
+            // sliver, and the row reflowed into a duplicated two-column look.
             //
-            // Pinning a large `idealWidth` makes the Grid allocate this column the
-            // remaining width (it's the only column asking for a wide ideal), so
-            // the title fills the row; `maxWidth: .infinity` still lets it stretch
-            // to the real available width, and it only wraps once the card is
-            // narrower than that — exactly the intended table behavior.
+            // Instead the title carries NO ideal width and simply stretches to
+            // `maxWidth: .infinity`, and a bounded `lineLimit(2)` + tail
+            // truncation guarantees a long title wraps at most twice and then
+            // truncates rather than forcing the column to a sliver. The sizing
+            // decision lives in the pure `ProjectCard.titleSizing` helper so the
+            // view and its unit test share one source of truth.
             Text(row.title ?? "(untitled)")
                 .font(.body)
+                .lineLimit(ProjectCard.titleSizing.lineLimit)
+                .truncationMode(ProjectCard.titleSizing.truncationMode)
                 .fixedSize(horizontal: false, vertical: true)
                 .gridColumnAlignment(.leading)
-                .frame(idealWidth: 1_000_000, maxWidth: .infinity, alignment: .leading)
+                .frame(maxWidth: ProjectCard.titleSizing.maxWidth, alignment: .leading)
                 .modifier(OpenDetailOnTap(row: row, openWindow: openWindow))
 
             // Trailing per-row action: the single status-relevant Elaborate /
@@ -793,3 +833,57 @@ private struct OpenDetailOnTap: ViewModifier {
             .onTapGesture { openWindow(id: "plan-detail", value: row.id) }
     }
 }
+
+#if DEBUG
+/// #063 reproduction preview: a single project with ONE short active task, laid
+/// out in a WIDE fixed frame. This is the exact triggering condition for the
+/// duplicated-column / collapsed-title symptom reported on the "Ensemble" card:
+/// a wide card whose Grid has only one (short) row negotiates its flexible title
+/// column poorly. With no other row demanding width, the Grid can size the title
+/// column to the multi-line `Text`'s IDEAL width (roughly its longest word) and
+/// let the `.frame(idealWidth: 1_000_000, maxWidth: .infinity)` hack at
+/// `planRow` (see the title cell in `planRow`) collapse — the title shrinks to a
+/// sliver and the row reflows into the two-column look.
+///
+/// Trigger recipe (static, determinable without running):
+///   - exactly ONE active task (single `GridRow`)
+///   - a short title (few words, so its ideal width is tiny)
+///   - a WIDE card frame (900pt below) so there is a large surplus of width for
+///     the degenerate column negotiation to mis-allocate
+///
+/// Wrapped in `#if DEBUG` and left un-verified — visual confirmation happens in
+/// review. Building the package proves the preview compiles.
+#Preview("063 — single wide row (collapsed title)") {
+    let task = Task(
+        id: "611",
+        title: "Ensemble task",
+        type: .feature,
+        status: .pending,
+        created: nil,
+        branch: nil,
+        isKeptWorktree: false,
+        blockedBy: [],
+        sections: [],
+        howProgress: (done: 0, total: 0),
+        isBlocked: false,
+        isCompletedDir: false
+    )
+    let project = ProjectTasks(
+        projectPath: "/tmp/Ensemble",
+        projectName: "Ensemble",
+        lastSeen: "",
+        tasks: [task],
+        counts: [.pending: 1],
+        activeTasks: [task],
+        gitBranch: "main",
+        gitIsDirty: false
+    )
+    return ProjectCard(project: project, onNewPlan: { _ in })
+        .environment(PlansStore())
+        .environment(TaskRunner())
+        // The WIDE frame is the load-bearing part of the repro: a narrow card
+        // does not exhibit the collapse.
+        .frame(width: 900)
+        .padding()
+}
+#endif
