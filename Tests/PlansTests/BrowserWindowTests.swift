@@ -899,6 +899,54 @@ final class BrowserWindowTests: XCTestCase {
         XCTAssertEqual(BrowserViewModel.manualOrderRevertLabel, "Sort by Recency")
     }
 
+    // MARK: - shouldOpenNewPlan (#064: re-entrancy guard for the New Plan sheet)
+    //
+    // The New Plan sheet's open decision is extracted into a pure static helper so
+    // the ⌘N re-present race and the "no projects" guard are unit-testable without
+    // the store. It returns `nil` when a request is already active (so a second
+    // ⌘N / toolbar tap while the sheet is open is a no-op that never re-seeds the
+    // binding and wipes the in-flight draft) or when there are no projects,
+    // otherwise a fresh request for the staleness-sorted first (most-recently-
+    // touched) project.
+
+    /// No projects → no request to open.
+    func testShouldOpenNewPlanNilWhenNoProjects() {
+        let result = BrowserWindow.shouldOpenNewPlan(
+            currentRequest: nil,
+            sortedProjects: []
+        )
+        XCTAssertNil(result)
+    }
+
+    /// A request is already active (the sheet is open) → the guard returns `nil`
+    /// so a second ⌘N / toolbar tap does NOT re-present and clobber the draft.
+    func testShouldOpenNewPlanNilWhenRequestAlreadyActive() {
+        let active = NewPlanRequest(projectPath: "/a")
+        let projects = [
+            makeProject(path: "/a", name: "alpha", lastSeen: "2026-06-04T12:00:00Z"),
+            makeProject(path: "/b", name: "bravo", lastSeen: "2026-01-01T00:00:00Z"),
+        ]
+        let result = BrowserWindow.shouldOpenNewPlan(
+            currentRequest: active,
+            sortedProjects: projects
+        )
+        XCTAssertNil(result)
+    }
+
+    /// No active request + projects present → a fresh request targeting the FIRST
+    /// (staleness-sorted, most-recently-touched) project.
+    func testShouldOpenNewPlanTargetsFirstSortedProjectWhenIdle() {
+        let projects = BrowserViewModel.sortByStaleness([
+            makeProject(path: "/b", name: "bravo", lastSeen: "2026-01-01T00:00:00Z"),
+            makeProject(path: "/a", name: "alpha", lastSeen: "2026-06-04T12:00:00Z"),
+        ])
+        let result = BrowserWindow.shouldOpenNewPlan(
+            currentRequest: nil,
+            sortedProjects: projects
+        )
+        XCTAssertEqual(result?.projectPath, "/a")
+    }
+
     // MARK: - ProjectTasks.hasOutstandingWork (#021)
 
     /// A project with at least one active (outstanding) task reports work.

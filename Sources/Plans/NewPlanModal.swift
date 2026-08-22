@@ -31,6 +31,14 @@ struct NewPlanModal: View {
     /// Dismisses the sheet (Cancel and post-submit).
     @Environment(\.dismiss) private var dismiss
 
+    /// The authoritative dismissal for the `.sheet(item:)` presenting this modal
+    /// (#064): `BrowserWindow` passes `{ newPlanRequest = nil }`, so calling this
+    /// nils the presenting binding and closes the sheet. Depending on
+    /// `@Environment(\.dismiss)` alone left the request set after Capture/Cancel,
+    /// so the next open restored the just-submitted draft; routing close through
+    /// this closure guarantees the binding is cleared.
+    var onClose: () -> Void
+
     /// The currently-selected target project path, seeded from the init argument
     /// and driven by the project `Picker`.
     @State private var projectPath: String
@@ -87,8 +95,9 @@ struct NewPlanModal: View {
     /// Seeds `projectPath` from the initially-selected project. The remaining
     /// fields are restored from that project's saved draft in `.onAppear` (the
     /// store is only available from the environment, not at init time).
-    init(initialProjectPath: String) {
+    init(initialProjectPath: String, onClose: @escaping () -> Void) {
         _projectPath = State(initialValue: initialProjectPath)
+        self.onClose = onClose
     }
 
     /// The projects offered by the picker, in the same staleness order the grid
@@ -147,7 +156,10 @@ struct NewPlanModal: View {
             HStack {
                 Button("Clear") { clear() }
                 Spacer()
-                Button("Cancel") { dismiss() }
+                // #064: nil the presenting `.sheet(item:)` binding via `onClose`
+                // (the authoritative dismissal); keep `dismiss()` as harmless
+                // belt-and-suspenders.
+                Button("Cancel") { dismiss(); onClose() }
                     .keyboardShortcut(.cancelAction)
                 // ⌘↩ submits (a bare Return inserts a newline in the multi-line
                 // editor, so the submit shortcut is the Command-modified Return).
@@ -378,10 +390,15 @@ struct NewPlanModal: View {
             deep: deep,
             knownTaskIDs: knownTaskIDs
         )
-        // Reset the staged image after capture.
+        // Reset the staged image and drop the saved draft BEFORE closing so a
+        // reopen can never restore the just-submitted draft (#064).
         imageData = nil
         store.clearDraft(for: projectPath)
+        // `dismiss()` is harmless belt-and-suspenders; `onClose()` — which nils
+        // the presenting `.sheet(item:)` binding — is the authoritative dismissal
+        // and the FINAL mutation of the turn.
         dismiss()
+        onClose()
     }
 }
 

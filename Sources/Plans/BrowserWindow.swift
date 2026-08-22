@@ -217,7 +217,15 @@ struct BrowserWindow: View {
             // `ProjectCard`). `.sheet(item:)` so a fresh request id re-presents
             // even for the same project path.
             .sheet(item: $newPlanRequest) { request in
-                NewPlanModal(initialProjectPath: request.projectPath)
+                // #064: niling the `item:` binding is the AUTHORITATIVE dismissal
+                // for `.sheet(item:)` — the sheet stays presented until this
+                // becomes `nil`. Rather than relying on `@Environment(\.dismiss)`
+                // writing the binding back (which left the request set after a
+                // Capture/Cancel, so the next open restored the stale draft), the
+                // modal calls this `onClose` to nil the request itself.
+                NewPlanModal(initialProjectPath: request.projectPath) {
+                    newPlanRequest = nil
+                }
             }
             // #034: the app-wide ⌘N command (in `PlansApp`) can't reach this
             // window's `@State`, so it bumps `store.newPlanTrigger` and we open
@@ -309,9 +317,40 @@ struct BrowserWindow: View {
     /// toolbar "New Plan" button and the app-wide ⌘N command (#034, via
     /// `newPlanTrigger`) so both open the modal identically.
     private func openNewPlanForRecentProject() {
-        if let first = BrowserViewModel.sortByStaleness(store.projects).first {
-            newPlanRequest = NewPlanRequest(projectPath: first.projectPath)
+        // #064: only SET the binding when the helper hands back a fresh request.
+        // When it returns `nil` because a request is already active (the sheet is
+        // open), we deliberately leave `newPlanRequest` UNTOUCHED — assigning the
+        // `nil` back would close the open sheet instead of no-op'ing. So both the
+        // toolbar button and the ⌘N `.onChange` are true no-ops mid-capture.
+        if let request = BrowserWindow.shouldOpenNewPlan(
+            currentRequest: newPlanRequest,
+            sortedProjects: BrowserViewModel.sortByStaleness(store.projects)
+        ) {
+            newPlanRequest = request
         }
+    }
+
+    /// The pure open-decision for the shared "New Plan" sheet (#064). Given the
+    /// CURRENTLY-active request and the already-staleness-sorted projects, returns
+    /// the FRESH request to present, or `nil` when the sheet should not (re-)open:
+    ///
+    /// - `currentRequest != nil` → `nil`. This is the re-entrancy guard: a second
+    ///   ⌘N (or toolbar tap) while the sheet is open must NOT mint a fresh request
+    ///   — a new `id` would re-present the sheet and re-seed the fields, wiping
+    ///   whatever draft the user is mid-way through. The caller treats `nil` as
+    ///   "leave the current binding alone" (see `openNewPlanForRecentProject`), so
+    ///   the open sheet is untouched.
+    /// - no projects → `nil` (nothing to capture against; keeps the sheet closed).
+    /// - idle + projects present → a FRESH `NewPlanRequest` for the first (most-
+    ///   recently-touched) project. The caller passes the staleness-sorted list so
+    ///   this stays pure and testable without the store.
+    static func shouldOpenNewPlan(
+        currentRequest: NewPlanRequest?,
+        sortedProjects: [ProjectTasks]
+    ) -> NewPlanRequest? {
+        guard currentRequest == nil else { return nil }
+        guard let first = sortedProjects.first else { return nil }
+        return NewPlanRequest(projectPath: first.projectPath)
     }
 
     private var cardGrid: some View {
@@ -654,7 +693,11 @@ struct BrowserWindow: View {
 /// Plan" modal can be driven by `.sheet(item:)` (a bare `String?` isn't
 /// `Identifiable`). A fresh `id` per request means re-tapping the same project's
 /// "+" re-presents the sheet rather than being deduplicated.
-private struct NewPlanRequest: Identifiable {
+///
+/// Declared at module visibility (not `private`) so the `shouldOpenNewPlan`
+/// re-entrancy guard (#064) can be unit-tested by constructing/inspecting a
+/// request directly, without the store.
+struct NewPlanRequest: Identifiable {
     let id = UUID()
     let projectPath: String
 }
