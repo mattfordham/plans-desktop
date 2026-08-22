@@ -239,6 +239,15 @@ final class TaskRun {
     /// description/title strings). Empty for non-capture runs.
     let baselineTaskIDs: Set<String>
 
+    /// Whether this run's elaborate pass should run in "deep" mode (#065). Maps
+    /// directly to the valueless `--deep` process flag: when true, `spawn`
+    /// appends `--deep` to the Node arguments and the launcher appends a trailing
+    /// ` deep` token to its `/plan-elaborate <id>` line. This composes
+    /// ORTHOGONALLY with `mode` — it is not a new `RunMode`; it rides alongside
+    /// whichever elaborate-bearing mode is selected (captureElaborate,
+    /// reElaborate, elaborate). Defaults false for non-deep runs.
+    let deep: Bool
+
     /// Bounded fallback counter for reconciliation. A finished capture that never
     /// observes a new task id (e.g. the underlying run failed, or plans-cc reused
     /// an id) must not stay pinned forever. Each reconcile pass that fails to find
@@ -316,6 +325,7 @@ final class TaskRun {
 
     init(taskID: String, mode: RunMode, description: String? = nil,
          projectPath: String? = nil, baselineTaskIDs: Set<String> = [],
+         deep: Bool = false,
          outcomeLog: RunOutcomeLog = RunOutcomeLog(),
          now: @escaping () -> String = { ISO8601DateFormatter().string(from: Date()) }) {
         self.taskID = taskID
@@ -323,6 +333,7 @@ final class TaskRun {
         self.description = description
         self.projectPath = projectPath
         self.baselineTaskIDs = baselineTaskIDs
+        self.deep = deep
         self.outcomeLog = outcomeLog
         self.now = now
     }
@@ -361,6 +372,7 @@ final class TaskRun {
         let taskID = self.taskID
         let mode = self.mode
         let description = self.description
+        let deep = self.deep
         _Concurrency.Task { [weak self] in
             let nodePath = await _Concurrency.Task.detached {
                 TaskRun.resolveNodePath()
@@ -378,7 +390,7 @@ final class TaskRun {
             runnerLog.notice("resolved node: \(nodePath, privacy: .public)")
             self.spawn(nodePath: nodePath, scriptURL: scriptURL,
                        projectPath: projectPath, taskID: taskID, mode: mode,
-                       description: description)
+                       description: description, deep: deep)
         }
     }
 
@@ -407,7 +419,7 @@ final class TaskRun {
 
     private func spawn(nodePath: String, scriptURL: URL,
                        projectPath: String, taskID: String, mode: RunMode,
-                       description: String?) {
+                       description: String?, deep: Bool) {
         let proc = Process()
         proc.executableURL = URL(fileURLWithPath: nodePath)
         var arguments = [
@@ -428,6 +440,13 @@ final class TaskRun {
             arguments += ["--description", description]
         }
         arguments += ["--mode", mode.rawValue]
+        // `--deep` (#065) is a valueless flag, ORTHOGONAL to the
+        // task-id/description split above: it can accompany ANY mode's elaborate
+        // pass (captureElaborate / reElaborate / elaborate). Appended AFTER
+        // `--mode` so the argument order stays stable/predictable.
+        if deep {
+            arguments += ["--deep"]
+        }
         proc.arguments = arguments
 
         let stdoutPipe = Pipe()
@@ -800,11 +819,18 @@ final class TaskRunner {
     /// genuinely NEW task id once plans-cc writes the captured plan. Defaulted to
     /// empty to keep existing call sites compiling; an empty baseline simply means
     /// "any task id present at reconcile time counts as new".
-    func capture(projectPath: String, description: String, execute: Bool = false, elaborate: Bool = false, knownTaskIDs: Set<String> = []) {
+    /// `deep` (#065) is orthogonal to mode selection: when true it rides through
+    /// to the `TaskRun`'s `--deep` process flag so the elaborate pass of a
+    /// `.captureElaborate` run goes deep. It has no effect on a plain `.capture`
+    /// (no elaborate pass) or an `.executeYolo` run (yolo takes no deep keyword),
+    /// and does NOT influence `captureMode(...)`. Defaulted false to keep existing
+    /// call sites compiling.
+    func capture(projectPath: String, description: String, execute: Bool = false, elaborate: Bool = false, deep: Bool = false, knownTaskIDs: Set<String> = []) {
         let key = Self.captureKey(projectPath: projectPath) + ":" + UUID().uuidString
         let mode = Self.captureMode(execute: execute, elaborate: elaborate)
         let taskRun = TaskRun(taskID: key, mode: mode, description: description,
-                              projectPath: projectPath, baselineTaskIDs: knownTaskIDs)
+                              projectPath: projectPath, baselineTaskIDs: knownTaskIDs,
+                              deep: deep)
         runs[key] = taskRun
         taskRun.start(projectPath: projectPath) { [weak self] in
             self?.onAnyRunFinished?()

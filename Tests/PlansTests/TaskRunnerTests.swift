@@ -448,6 +448,39 @@ final class TaskRunnerTests: XCTestCase {
                           TaskRunner.captureKey(projectPath: "/b"))
     }
 
+    // MARK: - Deep flag (#065)
+
+    /// A `TaskRun` built with `deep: true` carries the flag on the run — this is
+    /// exactly the stored property `TaskRun.spawn` reads to emit the valueless
+    /// `--deep` argument. Asserted on the stored property rather than by spawning
+    /// a process (mirroring the `usesTaskID`/`usesDescription` precedent, which
+    /// verify arg shape via pure flags to avoid launching a real `node` run).
+    @MainActor
+    func testDeepRunCarriesDeepFlag() {
+        let run = TaskRun(taskID: "042", mode: .elaborate, deep: true)
+        XCTAssertTrue(run.deep)
+    }
+
+    /// `TaskRun.deep` defaults to false when the init param is omitted, so every
+    /// existing call site (which never passes `deep`) is unaffected — no `--deep`
+    /// is emitted for them.
+    @MainActor
+    func testDeepRunDefaultsToFalse() {
+        let run = TaskRun(taskID: "042", mode: .elaborate)
+        XCTAssertFalse(run.deep)
+    }
+
+    /// `deep` is ORTHOGONAL to `RunMode`: it composes with any mode rather than
+    /// being a mode of its own, so `TaskRunner.captureMode(execute:elaborate:)`
+    /// (which has no `deep` input) selects the same mode regardless. Deep is a
+    /// separate valueless flag threaded through `TaskRun`, not a mode.
+    func testDeepDoesNotAlterSelectedRunMode() {
+        // captureMode has no `deep` parameter — the elaborate selection stands.
+        XCTAssertEqual(TaskRunner.captureMode(execute: false, elaborate: true), .captureElaborate)
+        XCTAssertEqual(TaskRunner.captureMode(execute: true, elaborate: true), .executeYolo)
+        XCTAssertEqual(TaskRunner.captureMode(execute: false, elaborate: false), .capture)
+    }
+
     // MARK: - Multiple back-to-back captures (task #029)
 
     /// `capture(...)` now keys every submission under a UNIQUE per-run id of the

@@ -209,4 +209,41 @@ final class NewPlanDraftPersistenceTests: XCTestCase {
         let restored = try XCTUnwrap(store.draft(for: "/proj"))
         XCTAssertEqual(restored.text, "authoritative")
     }
+
+    // MARK: - Deep toggle Codable round-trip (#065)
+
+    /// A draft with `deep: true` encodes and decodes back with the flag
+    /// preserved — the "Deep" toggle survives dismiss/relaunch alongside the
+    /// existing fields. Asserted with a direct `JSONEncoder`/`JSONDecoder`
+    /// round-trip on `CaptureDraft` (the precise way to pin the Codable
+    /// behavior), and `text` is checked too so the round-trip is proven real.
+    func testDeepDraftRoundTripsPreservingDeepTrue() throws {
+        let draft = PlansStore.CaptureDraft(
+            text: "reasoned plan", execute: false, elaborate: true, deep: true
+        )
+
+        let encoded = try JSONEncoder().encode(draft)
+        let decoded = try JSONDecoder().decode(PlansStore.CaptureDraft.self, from: encoded)
+
+        XCTAssertTrue(decoded.deep)
+        XCTAssertEqual(decoded.text, "reasoned plan")
+        XCTAssertTrue(decoded.elaborate)
+    }
+
+    /// The critical backward-compat guarantee: an OLDER draft JSON saved before
+    /// #065 (no `deep` key at all) must still decode cleanly, defaulting `deep`
+    /// to false. The synthesized `Codable` uses the property-level default for
+    /// the absent key rather than throwing, so pre-#065 persisted drafts survive
+    /// an app upgrade. `imageData` (`Data?`) is optional and omitted here.
+    func testOlderDraftWithoutDeepKeyDecodesAsDeepFalse() throws {
+        let legacyJSON = #"{"text":"old draft","execute":false,"elaborate":true}"#
+
+        let decoded = try JSONDecoder().decode(
+            PlansStore.CaptureDraft.self, from: Data(legacyJSON.utf8)
+        )
+
+        XCTAssertFalse(decoded.deep)
+        XCTAssertEqual(decoded.text, "old draft")
+        XCTAssertTrue(decoded.elaborate)
+    }
 }

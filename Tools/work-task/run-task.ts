@@ -71,6 +71,14 @@ interface Args {
   mode: Mode;
   /** Required for capture/captureElaborate/executeYolo AND reElaborate: the free-text description/guidance to act on. */
   description?: string;
+  /**
+   * Optional (#065). When true, the elaborate-bearing prompt builders
+   * (buildElaboratePrompt / buildReElaboratePrompt / buildCaptureElaboratePrompt)
+   * append a trailing ` deep` token to the `/plan-elaborate <id>` line, requesting
+   * a deeper elaboration pass. Orthogonal to `mode`; ignored by non-elaborate
+   * builders.
+   */
+  deep?: boolean;
 }
 
 /** Emit one NDJSON line on stdout. Never pretty-printed. */
@@ -88,6 +96,8 @@ function parseArgs(argv: string[]): Args | null {
   let taskId: string | undefined;
   let description: string | undefined;
   let mode: Mode = "execute";
+  // #065: valueless flag requesting a deeper elaborate pass. Orthogonal to mode.
+  let deep = false;
 
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
@@ -97,6 +107,9 @@ function parseArgs(argv: string[]): Args | null {
       taskId = argv[++i];
     } else if (arg === "--description") {
       description = argv[++i];
+    } else if (arg === "--deep") {
+      // Valueless flag — do NOT consume the following argv token.
+      deep = true;
     } else if (arg === "--mode") {
       const value = argv[++i];
       if (
@@ -128,7 +141,7 @@ function parseArgs(argv: string[]): Args | null {
     if (!description) {
       return null;
     }
-    return { projectRoot, mode, description };
+    return { projectRoot, mode, description, deep };
   }
 
   if (mode === "reElaborate") {
@@ -137,7 +150,7 @@ function parseArgs(argv: string[]): Args | null {
     if (!taskId || !description) {
       return null;
     }
-    return { projectRoot, taskId, mode, description };
+    return { projectRoot, taskId, mode, description, deep };
   }
 
   // execute / elaborate / delete operate on an existing task, identified by id
@@ -145,7 +158,7 @@ function parseArgs(argv: string[]): Args | null {
   if (!taskId) {
     return null;
   }
-  return { projectRoot, taskId, mode };
+  return { projectRoot, taskId, mode, deep };
 }
 
 /**
@@ -207,10 +220,15 @@ function buildExecutePrompt(taskId: string): string {
  * unattended hand-off with no UI to answer prompts, we instruct the agent to
  * elaborate autonomously, recording reasonable assumptions instead of asking.
  */
-function buildElaboratePrompt(taskId: string): string {
+function buildElaboratePrompt(taskId: string, deep: boolean): string {
   return [
     `Use the \`plan-elaborate\` skill to research and flesh out the plans-cc`,
-    `task with id ${taskId}.`,
+    `task with id ${taskId}:`,
+    "",
+    // #065: emit an explicit command line so the trailing ` deep` token (when
+    // requested) sits END-ANCHORED as the final token on the invocation line,
+    // matching the other two elaborate-bearing builders.
+    `/plan-elaborate ${taskId}${deep ? " deep" : ""}`,
     "",
     "Requirements:",
     "1. Work fully autonomously. Do NOT ask the user any questions — there is",
@@ -234,12 +252,17 @@ function buildElaboratePrompt(taskId: string): string {
  * autonomously and record reasonable assumptions instead of asking. The task
  * stays in the `elaborated` state.
  */
-function buildReElaboratePrompt(taskId: string, description: string): string {
+function buildReElaboratePrompt(
+  taskId: string,
+  description: string,
+  deep: boolean,
+): string {
   return [
     `Use the \`plan-elaborate\` skill to FURTHER elaborate (Path C) the existing,`,
     `already-elaborated plans-cc task with id ${taskId}:`,
     "",
-    `/plan-elaborate ${taskId}`,
+    // #065: trailing ` deep` token END-ANCHORED as the final token on the line.
+    `/plan-elaborate ${taskId}${deep ? " deep" : ""}`,
     "",
     `The user has provided the following guidance for what to add, refine, or`,
     `clarify in this further elaboration — fold it into the plan as the direction`,
@@ -301,7 +324,10 @@ function buildCapturePrompt(description: string): string {
  * prompts, we instruct the agent to work autonomously, recording reasonable
  * assumptions instead of asking.
  */
-function buildCaptureElaboratePrompt(description: string): string {
+function buildCaptureElaboratePrompt(
+  description: string,
+  deep: boolean,
+): string {
   return [
     `Record a new plans-cc task from the following description, then flesh it`,
     `out — capture, then elaborate:`,
@@ -313,7 +339,8 @@ function buildCaptureElaboratePrompt(description: string): string {
     `2. Then immediately use the \`plan-elaborate\` skill on the task you just`,
     `   captured, passing its new id:`,
     "",
-    `   /plan-elaborate <new-id>`,
+    // #065: trailing ` deep` token END-ANCHORED as the final token on the line.
+    `   /plan-elaborate <new-id>${deep ? " deep" : ""}`,
     "",
     "Requirements:",
     "1. Run BOTH steps in sequence: capture the task, then elaborate it. Do NOT",
@@ -413,16 +440,20 @@ function buildPrompt(args: Args): string {
     return buildCapturePrompt(args.description ?? "");
   }
   if (args.mode === "captureElaborate") {
-    return buildCaptureElaboratePrompt(args.description ?? "");
+    return buildCaptureElaboratePrompt(args.description ?? "", args.deep ?? false);
   }
   if (args.mode === "executeYolo") {
     return buildExecuteYoloPrompt(args.description ?? "");
   }
   if (args.mode === "reElaborate") {
-    return buildReElaboratePrompt(args.taskId ?? "", args.description ?? "");
+    return buildReElaboratePrompt(
+      args.taskId ?? "",
+      args.description ?? "",
+      args.deep ?? false,
+    );
   }
   if (args.mode === "elaborate") {
-    return buildElaboratePrompt(args.taskId ?? "");
+    return buildElaboratePrompt(args.taskId ?? "", args.deep ?? false);
   }
   if (args.mode === "delete") {
     return buildDeletePrompt(args.taskId ?? "");

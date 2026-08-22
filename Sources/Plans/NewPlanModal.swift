@@ -44,6 +44,12 @@ struct NewPlanModal: View {
     /// Whether the "Elaborate" toggle is on (flesh the plan out after capture).
     @State private var elaborate = false
 
+    /// Whether the "Deep" toggle is on (#065): draft the elaboration via a
+    /// reasoning sub-agent (plans-cc `deep` mode). Only meaningful when
+    /// `elaborate` is on (the Deep toggle is disabled otherwise) — it modifies the
+    /// elaboration pass rather than being a run mode of its own.
+    @State private var deep = false
+
     /// The PNG bytes of an image pasted/dropped into the editor (#048), or nil
     /// when none is staged. Persisted in the per-project draft (UserDefaults only,
     /// never `.plans/` §2); written to disk under Application Support and appended
@@ -124,6 +130,12 @@ struct NewPlanModal: View {
                 Toggle("Elaborate", isOn: $elaborate)
                     .toggleStyle(.checkbox)
                     .help("Flesh the plan out after capturing it")
+                // Deep only affects an elaboration pass, so it reads best right
+                // after Elaborate and is enabled only when Elaborate is on (#065).
+                Toggle("Deep", isOn: $deep)
+                    .toggleStyle(.checkbox)
+                    .help("Draft the elaboration via a reasoning sub-agent (plans-cc `deep` mode)")
+                    .disabled(!elaborate)
                 Toggle("Execute", isOn: $execute)
                     .toggleStyle(.checkbox)
                     .help("Capture, elaborate, and run the new plan autonomously in a worktree")
@@ -177,6 +189,7 @@ struct NewPlanModal: View {
         .onChange(of: text) { _, _ in persistDraft() }
         .onChange(of: execute) { _, _ in persistDraft() }
         .onChange(of: elaborate) { _, _ in persistDraft() }
+        .onChange(of: deep) { _, _ in persistDraft() }
         .onChange(of: imageData) { _, _ in persistDraft() }
     }
 
@@ -281,11 +294,13 @@ struct NewPlanModal: View {
             text = draft.text
             execute = draft.execute
             elaborate = draft.elaborate
+            deep = draft.deep
             imageData = draft.imageData
         } else {
             text = ""
             execute = false
             elaborate = false
+            deep = false
             imageData = nil
         }
         // Clear the guard on the next runloop tick, after the field `.onChange`
@@ -308,6 +323,7 @@ struct NewPlanModal: View {
                 text: text,
                 execute: execute,
                 elaborate: elaborate,
+                deep: deep,
                 imageData: imageData
             ),
             for: projectPath
@@ -319,6 +335,7 @@ struct NewPlanModal: View {
         text = ""
         execute = false
         elaborate = false
+        deep = false
         imageData = nil
         store.clearDraft(for: projectPath)
     }
@@ -330,7 +347,7 @@ struct NewPlanModal: View {
     private func submit() {
         let trimmed = trimmedText
         guard !trimmed.isEmpty else { return }
-        modalLog.notice("modal Capture submitted: project=\(self.projectPath, privacy: .public) execute=\(self.execute) elaborate=\(self.elaborate)")
+        modalLog.notice("modal Capture submitted: project=\(self.projectPath, privacy: .public) execute=\(self.execute) elaborate=\(self.elaborate) deep=\(self.deep)")
         // Snapshot the project's CURRENT task ids as the reconciliation baseline,
         // so the run-finish hand-off (#051) can detect the genuinely-new id once
         // plans-cc writes the captured plan and dismiss the spinner row in the
@@ -358,6 +375,7 @@ struct NewPlanModal: View {
             description: description,
             execute: execute,
             elaborate: elaborate,
+            deep: deep,
             knownTaskIDs: knownTaskIDs
         )
         // Reset the staged image after capture.

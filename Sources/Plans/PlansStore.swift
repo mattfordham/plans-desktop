@@ -62,6 +62,15 @@ final class PlansStore {
         var execute: Bool
         /// Whether the "Elaborate" toggle is on (flesh the plan out after capture).
         var elaborate: Bool
+        /// Whether the "Deep" toggle is on (#065): draft the elaboration via a
+        /// reasoning sub-agent (plans-cc `deep` mode). Orthogonal to the run mode —
+        /// only meaningful when `elaborate` is on, which it modifies. Defaults to
+        /// false at the property level; backward-compat for older drafts (saved
+        /// before #065, with no `deep` key) is handled by the explicit
+        /// `init(from:)` below via `decodeIfPresent` — Swift's SYNTHESIZED decoder
+        /// does NOT consult property defaults for a non-Optional key and would
+        /// otherwise throw `keyNotFound` when `deep` is absent.
+        var deep: Bool = false
         /// The PNG bytes of an image pasted/dropped into the form (#048), or nil
         /// when no image is staged. Held alongside the text so a dismissed-and-
         /// reopened sheet (or an app relaunch) restores the staged image too.
@@ -73,14 +82,31 @@ final class PlansStore {
 
         /// Memberwise init (explicit so the type can be constructed across the
         /// module without relying on the synthesized internal initializer).
-        /// `imageData` defaults to nil so existing call sites and decoding of
-        /// older drafts (saved before #048, with no `imageData` key) still work —
-        /// the synthesized `Codable` decodes an absent `Data?` key as nil.
-        init(text: String, execute: Bool, elaborate: Bool, imageData: Data? = nil) {
+        /// `deep` defaults to false and `imageData` to nil so existing call sites
+        /// and decoding of older drafts (saved before #065 / #048, with no `deep`
+        /// or `imageData` key) still work — the synthesized `Codable` decodes an
+        /// absent `Bool`/`Data?` key defaulted here as false/nil.
+        init(text: String, execute: Bool, elaborate: Bool, deep: Bool = false, imageData: Data? = nil) {
             self.text = text
             self.execute = execute
             self.elaborate = elaborate
+            self.deep = deep
             self.imageData = imageData
+        }
+
+        /// Explicit `Codable` decoding so a draft persisted before #065 (with no
+        /// `deep` key) still decodes cleanly. Swift's synthesized `init(from:)`
+        /// requires every non-Optional key to be present and would throw
+        /// `keyNotFound` for an absent `deep`; `decodeIfPresent(... ) ?? false`
+        /// restores the intended default and keeps pre-#065 drafts loadable across
+        /// an app upgrade. Encoding stays synthesized (the default `encode(to:)`).
+        init(from decoder: Decoder) throws {
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            self.text = try container.decode(String.self, forKey: .text)
+            self.execute = try container.decode(Bool.self, forKey: .execute)
+            self.elaborate = try container.decode(Bool.self, forKey: .elaborate)
+            self.deep = try container.decodeIfPresent(Bool.self, forKey: .deep) ?? false
+            self.imageData = try container.decodeIfPresent(Data.self, forKey: .imageData)
         }
     }
 
