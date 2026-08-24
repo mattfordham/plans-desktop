@@ -110,6 +110,16 @@ final class PlansStore {
         didSet { defaults.set(Array(starredProjectPaths), forKey: Self.starredProjectsKey) }
     }
 
+    /// The path of the single project the dashboard is "focused" on (#067), or
+    /// `nil` when focus mode is off and every project is shown. When set, the
+    /// browser filters the grid down to just this project's card (see
+    /// `BrowserViewModel.visibleUnderFocus`). Pure UI-only state — like every
+    /// other browser preference it is persisted ONLY to `defaults` on each set
+    /// and is NEVER written to `.plans/` (§2 read-only).
+    var focusedProjectPath: String? {
+        didSet { defaults.set(focusedProjectPath, forKey: Self.focusedProjectKey) }
+    }
+
     /// A non-persisted "open the New Plan form" trigger (#034). Bridges the
     /// scene-level ⌘N menu command (in `PlansApp`) to `BrowserWindow`'s sheet
     /// state: the menu command can't reach the window's `@State`, so it bumps
@@ -154,6 +164,9 @@ final class PlansStore {
     /// UserDefaults key for the persisted starred project paths (#035). The
     /// stored value is `Array(starredProjectPaths)` (UserDefaults stores arrays).
     private static let starredProjectsKey = "starredProjects"
+
+    /// UserDefaults key for the persisted focused project path (#067).
+    private static let focusedProjectKey = "focusedProject"
 
     /// The statuses surfaced in the menu bar icon space, in a fresh order that
     /// leads with actively-running work: in-progress → review → in-review. This
@@ -311,6 +324,9 @@ final class PlansStore {
         // back into the `Set`. Assigning the backing field avoids the `didSet`
         // re-persisting the just-read value.
         _starredProjectPaths = Set(defaults.stringArray(forKey: Self.starredProjectsKey) ?? [])
+        // Load persisted focused project path (#067): assigning the backing field
+        // avoids the `didSet` re-persisting the just-read value.
+        _focusedProjectPath = defaults.string(forKey: Self.focusedProjectKey)
         // Load persisted capture drafts (#031): decode the stored JSON `Data`,
         // defaulting to an empty map on missing/corrupt data. Assigning the
         // backing field avoids the `didSet` re-persisting the just-read value.
@@ -422,6 +438,21 @@ final class PlansStore {
     /// via the `manualOrderActive` setter.
     func clearManualOrder() {
         manualOrderActive = false
+    }
+
+    /// Toggles focus mode for `path` (#067): focuses it when it is not already the
+    /// focused project, or clears focus when it already is (a second toggle on the
+    /// same card exits focus mode). Persisted via the `focusedProjectPath` setter.
+    /// UI-only state — never touches `.plans/` (§2 read-only).
+    func toggleFocus(_ path: String) {
+        focusedProjectPath = (focusedProjectPath == path) ? nil : path
+    }
+
+    /// Exits focus mode by clearing the focused project (#067), restoring the full
+    /// dashboard. Persisted via the `focusedProjectPath` setter. UI-only state —
+    /// never touches `.plans/` (§2 read-only).
+    func clearFocus() {
+        focusedProjectPath = nil
     }
 
     /// Errors surfaced by `linkProject(at:)` so the UI can present a message.

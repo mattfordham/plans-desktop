@@ -157,6 +157,12 @@ struct BrowserWindow: View {
     /// user has STARRED (#035, `store.starredProjectPaths`) — so a starred but
     /// empty project's card survives the filter — preserving order.
     /// `store.projects` is never mutated — only this derived view is filtered.
+    ///
+    /// Finally, "Focus" mode (#067) collapses the result to the single focused
+    /// project's card. The focus is resolved defensively: a `focusedProjectPath`
+    /// naming a project that is no longer live is treated as no focus at all, so
+    /// unlinking/losing the focused project restores the full grid instead of
+    /// leaving it stuck on an empty view.
     private var sortedProjects: [ProjectTasks] {
         let sorted: [ProjectTasks]
         if store.manualOrderActive && !store.projectOrderOverride.isEmpty {
@@ -167,9 +173,21 @@ struct BrowserWindow: View {
         } else {
             sorted = BrowserViewModel.sortByStaleness(store.projects)
         }
-        guard store.hideEmptyProjects else { return sorted }
-        return sorted.filter {
-            BrowserViewModel.visibleUnderHideEmpty($0, starredProjectPaths: store.starredProjectPaths)
+        let hideEmptyResolved: [ProjectTasks]
+        if store.hideEmptyProjects {
+            hideEmptyResolved = sorted.filter {
+                BrowserViewModel.visibleUnderHideEmpty($0, starredProjectPaths: store.starredProjectPaths)
+            }
+        } else {
+            hideEmptyResolved = sorted
+        }
+        // Auto-clear a stale focus: only honor the focused path when some live
+        // project actually carries it, otherwise fall back to showing everything.
+        let effectiveFocus = store.focusedProjectPath.flatMap { path in
+            store.projects.contains { $0.projectPath == path } ? path : nil
+        }
+        return hideEmptyResolved.filter {
+            BrowserViewModel.visibleUnderFocus($0, focusedProjectPath: effectiveFocus)
         }
     }
 
@@ -340,6 +358,25 @@ struct BrowserWindow: View {
                     .buttonStyle(.borderless)
                     .disabled(!store.manualOrderActive)
                     .help("Discard the manual card order and sort by recency.")
+                }
+                // #067: exit "Focus" mode. Mirrors the recency-revert precedent
+                // above — a persistent toolbar control that is ALWAYS present (so
+                // its placement never shifts) and simply DISABLED when nothing is
+                // focused. Tinted while focus is active. Tapping it clears
+                // `store.focusedProjectPath` so `sortedProjects` re-derives to the
+                // full grid — the guaranteed way out of a single-card view. Pure
+                // store call; never writes `.plans/` (§2).
+                ToolbarItem(placement: .automatic) {
+                    Button {
+                        store.clearFocus()
+                    } label: {
+                        Label("Show All Projects", systemImage: "rectangle.3.group")
+                            .labelStyle(.titleAndIcon)
+                    }
+                    .buttonStyle(.borderless)
+                    .foregroundStyle(store.focusedProjectPath != nil ? AnyShapeStyle(.tint) : AnyShapeStyle(.primary))
+                    .disabled(store.focusedProjectPath == nil)
+                    .help("Exit focus mode and show every project.")
                 }
             }
             // Width-probe approach (low-confidence layout choice, see §009
@@ -703,6 +740,18 @@ enum BrowserViewModel {
         starredProjectPaths: Set<String>
     ) -> Bool {
         project.hasOutstandingWork || starredProjectPaths.contains(project.projectPath)
+    }
+
+    /// Whether `project` is visible under focus mode (#067): when
+    /// `focusedProjectPath` is `nil`, focus mode is off and every project is
+    /// visible; otherwise only the project whose path matches the focused path is
+    /// shown. Pure value work — no I/O, no SwiftUI.
+    static func visibleUnderFocus(
+        _ project: ProjectTasks,
+        focusedProjectPath: String?
+    ) -> Bool {
+        guard let focusedProjectPath else { return true }
+        return project.projectPath == focusedProjectPath
     }
 
     /// Splits a section body into paragraphs on blank lines for per-paragraph

@@ -413,6 +413,7 @@ struct ProjectCard: View {
         HStack(spacing: 8) {
             gitFooter
             Spacer(minLength: 8)
+            focusToggle
             starToggle
         }
     }
@@ -687,6 +688,22 @@ struct ProjectCard: View {
             }
         }
     }
+
+    /// The project focus toggle (#067). A `viewfinder` glyph, opaque/tinted when
+    /// this project is the currently-focused one and muted otherwise. Tapping
+    /// toggles focus on `project.projectPath` (`store.toggleFocus`), which the
+    /// browser's `sortedProjects` reacts to — collapsing the grid to this card, or
+    /// restoring the full grid when the same card is toggled off.
+    @ViewBuilder
+    private var focusToggle: some View {
+        let isFocused = store.focusedProjectPath == project.projectPath
+        FocusToggleGlyph(
+            isFocused: isFocused,
+            help: isFocused ? "Exit focus" : "Focus project"
+        ) {
+            store.toggleFocus(project.projectPath)
+        }
+    }
 }
 
 /// A pending "Refine Plan" request (#056): the task + project a tapped Refine
@@ -716,6 +733,36 @@ private struct StarToggleGlyph: View {
             Image(systemName: "star.fill")
                 .imageScale(.medium)
                 .foregroundStyle(Color.white.opacity(isStarred ? 0.6 : (hovering ? 0.35 : 0.15)))
+                .frame(width: 22, height: 22)
+                .background(
+                    RoundedRectangle(cornerRadius: 5)
+                        .fill(Color.primary.opacity(hovering ? 0.10 : 0))
+                )
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .animation(.easeOut(duration: 0.12), value: hovering)
+        .onHover { hovering = $0 }
+        .help(help)
+    }
+}
+
+/// The project focus glyph (#067). Mirrors `StarToggleGlyph`: a `.plain` `Button`
+/// showing a solid `viewfinder` whose white opacity conveys state — medium when
+/// this project is focused, very low otherwise (brightening slightly on hover) —
+/// over the same subtle hover background and cursor treatment as the star.
+private struct FocusToggleGlyph: View {
+    let isFocused: Bool
+    let help: String
+    let action: () -> Void
+
+    @State private var hovering = false
+
+    var body: some View {
+        Button(action: action) {
+            Image(systemName: "viewfinder")
+                .imageScale(.medium)
+                .foregroundStyle(Color.white.opacity(isFocused ? 0.6 : (hovering ? 0.35 : 0.15)))
                 .frame(width: 22, height: 22)
                 .background(
                     RoundedRectangle(cornerRadius: 5)

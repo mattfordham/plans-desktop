@@ -865,6 +865,62 @@ final class PlansStoreTests: XCTestCase {
         XCTAssertEqual(reloaded.starredProjectPaths, ["/proj2"])
     }
 
+    // MARK: - Focused project (#067, persisted to injected UserDefaults)
+
+    func testFocusedProjectPathDefaultsToNil() throws {
+        let reader = try makeReader(projectPaths: [])
+        let store = PlansStore(registryReader: reader, defaults: makeDefaults())
+
+        XCTAssertNil(store.focusedProjectPath)
+    }
+
+    func testFocusedProjectPathPersistsAcrossStoreInstances() throws {
+        let reader = try makeReader(projectPaths: [])
+        let defaults = makeDefaults()
+
+        let store = PlansStore(registryReader: reader, defaults: defaults)
+        store.focusedProjectPath = "/proj1"
+
+        XCTAssertEqual(store.focusedProjectPath, "/proj1")
+
+        // A fresh store over the SAME defaults restores the focused path.
+        let reloaded = PlansStore(registryReader: reader, defaults: defaults)
+        XCTAssertEqual(reloaded.focusedProjectPath, "/proj1")
+    }
+
+    func testClearFocusSetsPathToNilAndPersists() throws {
+        let reader = try makeReader(projectPaths: [])
+        let defaults = makeDefaults()
+
+        let store = PlansStore(registryReader: reader, defaults: defaults)
+        store.focusedProjectPath = "/proj1"
+        store.clearFocus()
+
+        XCTAssertNil(store.focusedProjectPath)
+
+        // The cleared (nil) state persists across a fresh store.
+        let reloaded = PlansStore(registryReader: reader, defaults: defaults)
+        XCTAssertNil(reloaded.focusedProjectPath)
+    }
+
+    func testToggleFocusSetsWhenUnfocusedAndClearsWhenAlreadyFocused() throws {
+        let reader = try makeReader(projectPaths: [])
+        let store = PlansStore(registryReader: reader, defaults: makeDefaults())
+
+        // Toggling an unfocused path focuses it.
+        store.toggleFocus("/proj1")
+        XCTAssertEqual(store.focusedProjectPath, "/proj1")
+
+        // Toggling the SAME (already-focused) path clears the focus.
+        store.toggleFocus("/proj1")
+        XCTAssertNil(store.focusedProjectPath)
+
+        // Toggling a DIFFERENT path while one is focused switches focus.
+        store.toggleFocus("/proj1")
+        store.toggleFocus("/proj2")
+        XCTAssertEqual(store.focusedProjectPath, "/proj2")
+    }
+
     // MARK: - New Plan trigger (non-persisted ⌘N → sheet bridge, #034)
 
     func testRequestNewPlanIncrementsTrigger() throws {

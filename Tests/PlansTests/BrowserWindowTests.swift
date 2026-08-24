@@ -381,6 +381,32 @@ final class BrowserWindowTests: XCTestCase {
         )
     }
 
+    // MARK: - visibleUnderFocus (#067: focus mode shows only the focused project)
+
+    /// With no project focused (`nil`), every project is visible.
+    func testVisibleUnderFocusTrueWhenNoFocus() {
+        let project = makeProject(path: "/p", name: "p")
+        XCTAssertTrue(
+            BrowserViewModel.visibleUnderFocus(project, focusedProjectPath: nil)
+        )
+    }
+
+    /// With a focus set, only the project whose path MATCHES is visible.
+    func testVisibleUnderFocusTrueForMatchingProject() {
+        let project = makeProject(path: "/p", name: "p")
+        XCTAssertTrue(
+            BrowserViewModel.visibleUnderFocus(project, focusedProjectPath: "/p")
+        )
+    }
+
+    /// With a focus set, a non-matching project is hidden.
+    func testVisibleUnderFocusFalseForNonMatchingProject() {
+        let project = makeProject(path: "/p", name: "p")
+        XCTAssertFalse(
+            BrowserViewModel.visibleUnderFocus(project, focusedProjectPath: "/other")
+        )
+    }
+
     // MARK: - Cross-project selected-row resolution (mirrors the view)
 
     /// The view resolves `selectedRowID` by scanning EVERY project's active rows.
