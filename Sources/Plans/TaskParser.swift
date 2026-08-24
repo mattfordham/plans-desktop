@@ -5,7 +5,7 @@ import Foundation
 /// tolerant: a missing or unrecognized `**Status:**` value yields `nil` rather
 /// than crashing (see `TaskStatus(rawValueTolerant:)`), mirroring plans-cc's
 /// defensive parsing.
-enum TaskStatus: String, Codable, CaseIterable {
+enum TaskStatus: String, Codable, CaseIterable, Equatable {
     case pending
     case elaborated
     case inProgress = "in-progress"
@@ -46,7 +46,7 @@ enum TaskStatus: String, Codable, CaseIterable {
 /// The type of a task, drawn from the exact §5.4 vocabulary. Decoding is tolerant
 /// in the same way as `TaskStatus`: a missing or unrecognized `**Type:**` value
 /// yields `nil`.
-enum TaskType: String, Codable, CaseIterable {
+enum TaskType: String, Codable, CaseIterable, Equatable {
     case bug
     case feature
     case refactor
@@ -78,7 +78,7 @@ struct TaskSection: Equatable {
 /// structural elements of the markdown; optional fields are `nil` when the
 /// corresponding line is absent, matching the defensive parsing the spec
 /// requires (every field may be missing).
-struct Task {
+struct Task: Equatable {
     /// The 3-character id taken literally from the start of the filename (§5.2).
     let id: String
 
@@ -131,11 +131,39 @@ struct Task {
     /// Whether this file was found under `completed/`. Threaded in by the caller
     /// so the parser can force `status` to `.completed`.
     let isCompletedDir: Bool
+
+    /// Hand-written `Equatable` (#066). Swift cannot synthesize the conformance
+    /// here because `howProgress` is a TUPLE `(done: Int, total: Int)`, and
+    /// tuples do not conform to protocols.
+    ///
+    /// This `==` is load-bearing: it gates whether a reload PUBLISHES a new
+    /// `projects` value, so a field omitted here would cause a real on-disk
+    /// change to be silently dropped from both surfaces. Every one of the
+    /// twelve stored properties is therefore compared, in declaration order:
+    /// `id`, `title`, `type`, `status`, `created`, `branch`, `isKeptWorktree`,
+    /// `blockedBy`, `sections`, `howProgress` (both tuple elements), `isBlocked`,
+    /// `isCompletedDir`. If a property is ever ADDED to `Task`, it MUST be added
+    /// here too.
+    static func == (lhs: Task, rhs: Task) -> Bool {
+        lhs.id == rhs.id
+            && lhs.title == rhs.title
+            && lhs.type == rhs.type
+            && lhs.status == rhs.status
+            && lhs.created == rhs.created
+            && lhs.branch == rhs.branch
+            && lhs.isKeptWorktree == rhs.isKeptWorktree
+            && lhs.blockedBy == rhs.blockedBy
+            && lhs.sections == rhs.sections
+            && lhs.howProgress.done == rhs.howProgress.done
+            && lhs.howProgress.total == rhs.howProgress.total
+            && lhs.isBlocked == rhs.isBlocked
+            && lhs.isCompletedDir == rhs.isCompletedDir
+    }
 }
 
 /// A project's parsed tasks plus a per-status count summary (§5.5 step 7).
 /// Assembled in segment 2; defined here so the model is complete.
-struct ProjectTasks {
+struct ProjectTasks: Equatable {
     /// The project root path (the registry `path`).
     let projectPath: String
 
@@ -209,6 +237,67 @@ struct ProjectTasks {
     }
 }
 
+/// A cheap, comparable fingerprint of a project's `.plans/` state (#066).
+///
+/// The reload path re-parses a project ONLY when its signature differs from the
+/// signature captured on the previous tick; when the signature is unchanged, the
+/// previous `ProjectTasks` is reused verbatim. This collapses the idle cost of a
+/// poll tick from "list + read + markdown-parse every task file in every
+/// project" down to "one directory listing per project, with mtime/size
+/// prefetched in the same syscall batch".
+///
+/// ## What the signature covers, and why
+///
+/// The signature is built from BOTH `.plans/pending/` and `.plans/completed/`
+/// and, for each `.md` file in them, the tuple:
+///
+///   `(relative path, content-modification date, file size)`
+///
+/// - **Path set** catches files being ADDED, REMOVED, RENAMED, and MOVED between
+///   `pending/` and `completed/` (what plans-cc `plan-complete` does).
+/// - **Size** catches the overwhelmingly common in-place content edit, where a
+///   task file's body grows or shrinks (a checkbox ticked, a section appended).
+/// - **Modification date** catches an in-place edit that happens to preserve the
+///   byte count exactly (e.g. `pending` → `elabora`-length swaps, or a single
+///   character flipped).
+///
+/// Deliberately NOT used: the containing DIRECTORY's own mtime. A directory's
+/// mtime changes when its entry list changes but NOT when an existing file's
+/// contents are rewritten in place, so gating on it alone would silently stop
+/// surfacing edits to existing tasks — a far worse bug than the energy cost this
+/// change exists to fix.
+///
+/// ## Known failure mode
+///
+/// A same-size rewrite that ALSO lands within the filesystem's mtime resolution
+/// of the previous write would be missed for one tick. On APFS, `mtime` has
+/// nanosecond resolution, so this requires two writes in the same nanosecond —
+/// not reachable in practice. Any real editor / `plan-*` script write stamps a
+/// fresh mtime. The signature also self-heals: the NEXT genuine change re-parses
+/// the whole project, so no state can be permanently stale.
+///
+/// Content hashing was rejected: it would require reading every file's bytes
+/// each tick, which is most of the cost being eliminated.
+struct ProjectSignature: Equatable {
+    /// One entry per `.md` file, in a deterministic (sorted) order:
+    /// `(relative path, modification-date epoch seconds, size in bytes)`.
+    /// `Equatable` compares these element-wise, so any add/remove/rename/edit
+    /// shows up as an inequality.
+    let entries: [Entry]
+
+    /// A single file's fingerprint within a `ProjectSignature`.
+    struct Entry: Equatable {
+        /// `"pending/001-foo.md"` — the directory plus filename, so a move
+        /// between `pending/` and `completed/` registers as a change.
+        let relativePath: String
+        /// The file's content-modification time as a `TimeInterval` since the
+        /// reference date, or `nil` when unavailable.
+        let modified: TimeInterval?
+        /// The file's size in bytes, or `nil` when unavailable.
+        let size: Int?
+    }
+}
+
 /// Parses plans-cc task files (Data Contract 2, §5), mirroring the behavior of
 /// the plans-cc `lib/parse-tasks.js` reference implementation. Parsing is
 /// tolerant throughout: missing fields, missing sections, and malformed input
@@ -228,6 +317,69 @@ struct TaskParser {
     /// Defaults to the real filesystem. Inject a custom `fileManager` in tests.
     init(fileManager: FileManager = .default) {
         self.fileManager = fileManager
+    }
+
+    // MARK: - Change detection (#066)
+
+    /// Computes the cheap change-detection fingerprint for the project rooted at
+    /// `projectPath` — see `ProjectSignature` for the full rationale on what it
+    /// covers and its one (unreachable-in-practice) failure mode.
+    ///
+    /// Cost is one `contentsOfDirectory` call per `.plans` subdirectory, with
+    /// `.contentModificationDateKey` / `.fileSizeKey` PREFETCHED in that same
+    /// call so the per-file attribute reads are served from the batched
+    /// enumeration rather than costing an extra `stat` round-trip each.
+    ///
+    /// Tolerant like every other parser path: a missing `.plans/`, a missing
+    /// subdirectory, or an unreadable attribute yields an empty/partial
+    /// signature rather than throwing. Two consecutive calls against an
+    /// unchanged tree are always equal.
+    func projectSignature(at projectPath: String) -> ProjectSignature {
+        let plansDir = URL(fileURLWithPath: projectPath)
+            .appendingPathComponent(".plans")
+
+        var entries: [ProjectSignature.Entry] = []
+        // Both directories `parseProject` enumerates, in the same order, so the
+        // resulting entry list is deterministic.
+        for subdir in ["pending", "completed"] {
+            entries.append(
+                contentsOf: signatureEntries(
+                    in: plansDir.appendingPathComponent(subdir),
+                    subdir: subdir
+                )
+            )
+        }
+        return ProjectSignature(entries: entries)
+    }
+
+    /// Builds the signature entries for one `.plans` subdirectory. Returns an
+    /// empty array when the directory is missing (tolerant, never throws).
+    private func signatureEntries(
+        in directory: URL,
+        subdir: String
+    ) -> [ProjectSignature.Entry] {
+        // Prefetching the two keys we need means the values come back with the
+        // batched directory enumeration instead of one `stat` per file.
+        let urls = (try? fileManager.contentsOfDirectory(
+            at: directory,
+            includingPropertiesForKeys: [.contentModificationDateKey, .fileSizeKey]
+        )) ?? []
+
+        return urls
+            .filter { $0.pathExtension == "md" }
+            // Sorted so the entry order is stable across ticks regardless of the
+            // order the filesystem hands entries back in.
+            .sorted { $0.lastPathComponent < $1.lastPathComponent }
+            .map { url in
+                let values = try? url.resourceValues(
+                    forKeys: [.contentModificationDateKey, .fileSizeKey]
+                )
+                return ProjectSignature.Entry(
+                    relativePath: "\(subdir)/\(url.lastPathComponent)",
+                    modified: values?.contentModificationDate?.timeIntervalSinceReferenceDate,
+                    size: values?.fileSize
+                )
+            }
     }
 
     // MARK: - Project-level assembly

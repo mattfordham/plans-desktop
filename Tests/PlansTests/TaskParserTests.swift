@@ -469,4 +469,150 @@ final class TaskParserTests: XCTestCase {
         XCTAssertEqual(project.projectName, tempDir.lastPathComponent.titleized())
         XCTAssertEqual(project.projectPath, tempDir.path)
     }
+
+    // MARK: - Project change signature (#066 Step 3)
+
+    /// A stable, cheap signature for a project's `.plans/` state must be equal
+    /// across two consecutive computations when nothing changed on disk. This is
+    /// the property the reload change-gate relies on: an equal signature means
+    /// "safe to reuse the previous parse result".
+    func testProjectSignatureIsStableWhenNothingChanges() throws {
+        try writeTaskFile(
+            filename: "001-a.md",
+            text: "# A\n\n**Status:** pending",
+            in: "pending"
+        )
+        try writeTaskFile(
+            filename: "002-b.md",
+            text: "# B\n\n**Status:** completed",
+            in: "completed"
+        )
+        let parser = TaskParser()
+        let first = parser.projectSignature(at: tempDir.path)
+        let second = parser.projectSignature(at: tempDir.path)
+        XCTAssertEqual(first, second)
+    }
+
+    /// Adding a task file must change the signature (a new directory entry).
+    func testProjectSignatureChangesWhenFileAdded() throws {
+        try writeTaskFile(
+            filename: "001-a.md",
+            text: "# A\n\n**Status:** pending",
+            in: "pending"
+        )
+        let parser = TaskParser()
+        let before = parser.projectSignature(at: tempDir.path)
+        try writeTaskFile(
+            filename: "003-c.md",
+            text: "# C\n\n**Status:** pending",
+            in: "pending"
+        )
+        XCTAssertNotEqual(before, parser.projectSignature(at: tempDir.path))
+    }
+
+    /// Deleting a task file must change the signature.
+    func testProjectSignatureChangesWhenFileDeleted() throws {
+        try writeTaskFile(
+            filename: "001-a.md",
+            text: "# A\n\n**Status:** pending",
+            in: "pending"
+        )
+        try writeTaskFile(
+            filename: "003-c.md",
+            text: "# C\n\n**Status:** pending",
+            in: "pending"
+        )
+        let parser = TaskParser()
+        let before = parser.projectSignature(at: tempDir.path)
+        try FileManager.default.removeItem(
+            at: tempDir
+                .appendingPathComponent(".plans")
+                .appendingPathComponent("pending")
+                .appendingPathComponent("003-c.md")
+        )
+        XCTAssertNotEqual(before, parser.projectSignature(at: tempDir.path))
+    }
+
+    /// THE critical case (#066 Step 3): editing an EXISTING file's contents in
+    /// place — same filename, same directory entries, so the containing
+    /// directory's own mtime is not a reliable signal. The signature must still
+    /// change, otherwise edits to existing tasks would silently stop surfacing.
+    ///
+    /// The edit here also changes the file's SIZE, so the signature catches it
+    /// even on a filesystem with coarse mtime granularity.
+    func testProjectSignatureChangesWhenExistingFileEditedInPlace() throws {
+        try writeTaskFile(
+            filename: "001-a.md",
+            text: "# A\n\n**Status:** pending",
+            in: "pending"
+        )
+        let parser = TaskParser()
+        let before = parser.projectSignature(at: tempDir.path)
+
+        try writeTaskFile(
+            filename: "001-a.md",
+            text: "# A\n\n**Status:** in-progress\n\n## How\n\n- [ ] step one",
+            in: "pending"
+        )
+        XCTAssertNotEqual(before, parser.projectSignature(at: tempDir.path))
+    }
+
+    /// A same-length in-place edit (identical byte count) must ALSO be caught —
+    /// size alone is not sufficient, so the signature has to include per-file
+    /// modification timestamps too. The file's mtime is explicitly advanced to
+    /// defeat sub-second filesystem timestamp granularity, which is exactly what
+    /// a real editor write does (it stamps a new mtime).
+    func testProjectSignatureChangesWhenExistingFileEditedToSameLength() throws {
+        try writeTaskFile(
+            filename: "001-a.md",
+            text: "# A\n\n**Status:** pending",
+            in: "pending"
+        )
+        let fileURL = tempDir
+            .appendingPathComponent(".plans")
+            .appendingPathComponent("pending")
+            .appendingPathComponent("001-a.md")
+        let parser = TaskParser()
+        let before = parser.projectSignature(at: tempDir.path)
+
+        // Same byte count as "pending" -> "PENDING" is identical length; use a
+        // different 7-character status-ish body so only the bytes differ.
+        try "# A\n\n**Status:** review!".write(to: fileURL, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes(
+            [.modificationDate: Date().addingTimeInterval(60)],
+            ofItemAtPath: fileURL.path
+        )
+        XCTAssertNotEqual(before, parser.projectSignature(at: tempDir.path))
+    }
+
+    /// Moving a file from `pending/` to `completed/` (what `plan-complete` does)
+    /// must change the signature — both directories' entry sets change.
+    func testProjectSignatureChangesWhenFileMovedToCompleted() throws {
+        try writeTaskFile(
+            filename: "001-a.md",
+            text: "# A\n\n**Status:** pending",
+            in: "pending"
+        )
+        try makeEmptyDir("completed")
+        let parser = TaskParser()
+        let before = parser.projectSignature(at: tempDir.path)
+
+        try FileManager.default.moveItem(
+            at: tempDir.appendingPathComponent(".plans/pending/001-a.md"),
+            to: tempDir.appendingPathComponent(".plans/completed/001-a.md")
+        )
+        XCTAssertNotEqual(before, parser.projectSignature(at: tempDir.path))
+    }
+
+    /// A project with no `.plans/` directories at all yields a signature rather
+    /// than crashing, and that signature is stable — tolerant, like every other
+    /// parser path.
+    func testProjectSignatureForMissingDirectoriesIsStable() {
+        let missing = tempDir.appendingPathComponent("no-such-project").path
+        let parser = TaskParser()
+        XCTAssertEqual(
+            parser.projectSignature(at: missing),
+            parser.projectSignature(at: missing)
+        )
+    }
 }

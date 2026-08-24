@@ -194,6 +194,13 @@ final class PlansStore {
     /// Injected (defaulting to `.standard`) so tests can pass an isolated suite.
     @ObservationIgnored private let defaults: UserDefaults
 
+    /// The store's time source (#066 Step 2), defaulting to `Date.init`. The ONLY
+    /// wall-clock read on the git-throttle path goes through here, so tests can
+    /// inject a mutable clock and step across the throttle boundary
+    /// deterministically instead of sleeping. Never call `Date()` directly in
+    /// throttle logic — that would make the interval untestable.
+    @ObservationIgnored private let now: () -> Date
+
     /// The repeating timer that drives live refresh, or `nil` when not polling.
     /// `@ObservationIgnored` because the timer itself is not observable UI state.
     @ObservationIgnored private var pollTimer: Timer?
@@ -208,6 +215,45 @@ final class PlansStore {
     /// async path captures a snapshot value into its closure and compares it back
     /// on the main-thread hop.
     @ObservationIgnored private var reloadGeneration: Int = 0
+
+    /// The change-gate cache (#066): the last-computed `ProjectSignature` and the
+    /// `ProjectTasks` it produced, keyed by project path. On each reload, a
+    /// project whose freshly-computed signature EQUALS its cached one is not
+    /// re-listed/re-read/re-parsed at all — the cached `ProjectTasks` is reused
+    /// verbatim. This is the fix for #066: on an idle tick, where no `.plans/`
+    /// file has changed in any registered project, the reload does one cheap
+    /// directory listing per project and nothing else.
+    ///
+    /// Freshness is preserved because the poll interval is unchanged and the
+    /// signature is recomputed on EVERY tick — only the expensive read+parse is
+    /// gated, never the detection. See `ProjectSignature` for exactly which
+    /// on-disk changes the signature catches (adds, removes, renames, moves, and
+    /// in-place content edits) and its one unreachable-in-practice failure mode.
+    ///
+    /// Entries for projects no longer in the registry are dropped on each reload,
+    /// so an unregistered project can never resurrect a stale cached result.
+    ///
+    /// `@ObservationIgnored` — internal memoization, not observable UI state.
+    /// Only ever read/written on the MAIN thread: the async poll path snapshots
+    /// it on main before dispatching, and installs the rebuilt cache back on main
+    /// inside `applyReloadResult`, under the same #059 generation guard that
+    /// protects `projects` (so a stale poll can never install a stale cache).
+    @ObservationIgnored private var parseCache: [String: CachedParse] = [:]
+
+    /// One project's memoized parse: the signature of the `.plans/` state that
+    /// produced `tasks`, plus that result. `Sendable` so it can ride along into
+    /// the background parse closure as part of an immutable snapshot.
+    private struct CachedParse {
+        let signature: ProjectSignature
+        let tasks: ProjectTasks
+    }
+
+    /// The project paths that were actually RE-PARSED (not served from the
+    /// change-gate cache) by the most recent reload, in registry order. Written
+    /// on the main thread by `reload()` / `applyReloadResult`. Exposed to tests
+    /// via `lastReloadParsedPathsForTesting` so the gate's behavior is directly
+    /// assertable: `[]` means an entirely idle tick did zero parsing.
+    @ObservationIgnored private var lastReloadParsedPaths: [String] = []
 
     /// Invoked at the END of every `reload()` (synchronous task-parse pass),
     /// after `projects` has been repopulated — on BOTH the run-finish hand-off
@@ -247,12 +293,14 @@ final class PlansStore {
         registryReader: RegistryReader = RegistryReader(),
         registryWriter: RegistryWriter = RegistryWriter(),
         taskParser: TaskParser = TaskParser(),
-        defaults: UserDefaults = .standard
+        defaults: UserDefaults = .standard,
+        now: @escaping () -> Date = Date.init
     ) {
         self.registryReader = registryReader
         self.registryWriter = registryWriter
         self.taskParser = taskParser
         self.defaults = defaults
+        self.now = now
         // Load persisted manual-order state. Assigning the backing fields avoids
         // re-persisting (the `didSet` would write the just-read value back).
         _projectOrderOverride = defaults.stringArray(forKey: Self.orderKey) ?? []
@@ -427,7 +475,16 @@ final class PlansStore {
         // synchronous and behavior-identical: `projects` is populated before this
         // method returns, preserving `startPolling()`'s "populated before this
         // returns" contract and `linkProject`'s immediate-appear UX.
-        projects = performReload(priorGitInfo: priorGitInfo)
+        //
+        // The change gate (#066) is threaded through as a value: the current
+        // cache goes in, a rebuilt cache comes out, and it is installed here on
+        // the main thread — the same shape the async path uses, so both paths
+        // share one code path.
+        let result = performReload(priorGitInfo: priorGitInfo, cache: parseCache)
+        publishProjects(result.projects)
+        parseCache = result.cache
+        lastReloadParsedPaths = result.parsedPaths
+
 
         // Second pass (#024): gather live git state OFF the main thread so the
         // blocking `git` subprocesses never stall the UI, then merge it back on
@@ -459,10 +516,37 @@ final class PlansStore {
     /// result back on the main thread. Because it never writes the observable
     /// `projects`, SwiftUI is never mutated off-main here.
     private func performReload(
-        priorGitInfo: [String: (String?, Bool?)]
-    ) -> [ProjectTasks] {
-        registryReader.readProjects().map { project in
-            let parsed = taskParser.parseProject(at: project.path, lastSeen: project.lastSeen)
+        priorGitInfo: [String: (String?, Bool?)],
+        cache: [String: CachedParse]
+    ) -> ReloadResult {
+        var freshCache: [String: CachedParse] = [:]
+        var parsedPaths: [String] = []
+
+        let projects = registryReader.readProjects().map { project -> ProjectTasks in
+            // Cheap change detection (#066): one batched directory listing per
+            // `.plans` subdirectory, with mtime + size prefetched. Recomputed on
+            // EVERY tick so freshness is never gated — only the expensive
+            // read + markdown-parse below is.
+            let signature = taskParser.projectSignature(at: project.path)
+
+            let parsed: ProjectTasks
+            if let cached = cache[project.path],
+               cached.signature == signature,
+               cached.tasks.lastSeen == project.lastSeen {
+                // Unchanged since the last tick: reuse the previous parse
+                // verbatim. No directory re-listing of contents, no file reads,
+                // no markdown parsing.
+                parsed = cached.tasks
+            } else {
+                parsed = taskParser.parseProject(at: project.path, lastSeen: project.lastSeen)
+                parsedPaths.append(project.path)
+            }
+
+            // Rebuilt from the registry each time, so a project that dropped out
+            // of the registry has its cache entry dropped with it and cannot
+            // resurrect a stale result if it is re-added later.
+            freshCache[project.path] = CachedParse(signature: signature, tasks: parsed)
+
             guard let prior = priorGitInfo[project.path] else { return parsed }
             return ProjectTasks(
                 projectPath: parsed.projectPath,
@@ -475,6 +559,19 @@ final class PlansStore {
                 gitIsDirty: prior.1
             )
         }
+
+        return ReloadResult(projects: projects, cache: freshCache, parsedPaths: parsedPaths)
+    }
+
+    /// The full output of one `performReload` pass (#066): the projects to
+    /// publish, the rebuilt change-gate cache to install, and which project paths
+    /// were actually re-parsed this pass. Bundled into a single value so the
+    /// background parse can hand everything back across the main-thread hop
+    /// atomically, under one generation guard.
+    private struct ReloadResult {
+        let projects: [ProjectTasks]
+        let cache: [String: CachedParse]
+        let parsedPaths: [String]
     }
 
     /// Asynchronous reload for the timer-driven poll: identical to `reload()` in
@@ -519,11 +616,20 @@ final class PlansStore {
             uniquingKeysWith: { first, _ in first }
         )
 
+        // Snapshot the change-gate cache on the main thread too (#066). It is a
+        // dictionary of immutable values, so the background pass reads only this
+        // detached copy and never touches `self.parseCache`; the rebuilt cache is
+        // installed back on main under the #059 generation guard.
+        let cacheSnapshot = parseCache
+
         nonisolated(unsafe) let unsafeSelf = self
         DispatchQueue.global(qos: .userInitiated).async {
-            let freshProjects = unsafeSelf.performReload(priorGitInfo: priorGitInfo)
+            let result = unsafeSelf.performReload(
+                priorGitInfo: priorGitInfo,
+                cache: cacheSnapshot
+            )
             DispatchQueue.main.async {
-                unsafeSelf.applyReloadResult(freshProjects, generation: generation)
+                unsafeSelf.applyReloadResult(result, generation: generation)
             }
         }
     }
@@ -540,11 +646,147 @@ final class PlansStore {
     /// load nor fires its git second pass / `onDidReload?()`. Otherwise assigns
     /// `projects` FIRST, then kicks the async git second pass and fires
     /// `onDidReload?()`, preserving the synchronous `reload()` ordering (#051).
-    private func applyReloadResult(_ freshProjects: [ProjectTasks], generation: Int) {
+    private func applyReloadResult(_ result: ReloadResult, generation: Int) {
         guard generation == reloadGeneration else { return }
-        projects = freshProjects
+        publishProjects(result.projects)
+        // Install the rebuilt change-gate cache (#066) inside the SAME guard that
+        // protects `projects`, so a dropped stale result leaves the cache
+        // untouched too — the two can never drift apart.
+        parseCache = result.cache
+        lastReloadParsedPaths = result.parsedPaths
         startGitSecondPass()
         onDidReload?()
+    }
+
+    // MARK: - Equality-gated publishing (#066 Step 4)
+
+    /// Assigns `projects` ONLY when `newValue` actually differs from what is
+    /// already published (#066 Step 4). This is the single write point for the
+    /// observable `projects` on the reload path.
+    ///
+    /// Why the guard is necessary: `@Observable` reports a mutation on ANY
+    /// assignment to a stored property, even one whose new value compares equal
+    /// to the old. Before this gate, every 5s poll reassigned `projects` with a
+    /// freshly-built-but-identical array, which invalidated every SwiftUI
+    /// observer of the store — the project cards, `MenuBarView`, and (most
+    /// expensively) `MenuBarLabel`, which re-bakes its menu-bar bitmap through
+    /// `ImageRenderer` whenever `store.iconSpaceCounts` is re-read. Step 3 had
+    /// already stopped the idle tick from re-PARSING; this stops it from
+    /// re-RENDERING.
+    ///
+    /// Correctness rests entirely on `ProjectTasks: Equatable` comparing the
+    /// whole value graph — see `Task.==`, which is hand-written (its
+    /// `howProgress` tuple blocks synthesis) and deliberately compares every
+    /// stored property. A missed field here would silently drop a real change
+    /// from both surfaces, which is far worse than the energy cost.
+    ///
+    /// Returns nothing; `lastReloadDidPublishProjects` records the outcome for
+    /// the test seam. MUST be called on the main thread (it may mutate the
+    /// observable `projects`).
+    private func publishProjects(_ newValue: [ProjectTasks]) {
+        guard newValue != projects else {
+            lastReloadDidPublishProjects = false
+            return
+        }
+        projects = newValue
+        lastReloadDidPublishProjects = true
+        projectsPublishCount &+= 1
+    }
+
+    /// Whether the most recent reload actually PUBLISHED a new `projects` value
+    /// (#066 Step 4), as opposed to finding it byte-for-byte identical and
+    /// leaving the observable untouched. Exposed to tests via
+    /// `lastReloadDidPublishProjectsForTesting`. `@ObservationIgnored` — reading
+    /// it must never itself create an observation dependency.
+    @ObservationIgnored private var lastReloadDidPublishProjects: Bool = false
+
+    /// A monotonic count of how many times `projects` has actually been
+    /// reassigned (#066 Step 4), across BOTH the reload path and the git
+    /// second-pass merge. Lets a test prove that N idle ticks bumped it zero
+    /// times. `@ObservationIgnored` — internal bookkeeping, not UI state.
+    @ObservationIgnored private var projectsPublishCount: Int = 0
+
+    // MARK: - Throttled git second pass (#066 Step 2)
+
+    /// How long a project's git branch/dirty result is considered fresh enough to
+    /// reuse without re-running `git` (#066 Step 2).
+    ///
+    /// Chosen as **30 seconds** — the short end of the ~30-60s freshness lag the
+    /// task's Assumptions already accept. At the unchanged 5s poll interval this
+    /// turns 12 ticks' worth of git work into 1, a ~83% cut in subprocess spawns
+    /// (24 spawns every 5s → 24 every 30s; ~415k/day → ~69k/day), while keeping
+    /// the worst-case staleness of a branch indicator to 30s. A longer window
+    /// (60s) would only save a further ~8% of the original spawns while doubling
+    /// the window in which the UI can show a wrong branch, so it is not worth it.
+    ///
+    /// The staleness ceiling is in practice much tighter than 30s for the case
+    /// that actually matters: a branch change driven by this app (or by a plan
+    /// moving through `.plans/`) also changes that project's parse signature, and
+    /// a changed project bypasses the throttle entirely (see
+    /// `gitPathsToQueryThisTick`). Only a branch switch made entirely outside the
+    /// app, touching no `.plans/` file, waits out the full window.
+    private static let gitThrottleInterval: TimeInterval = 30
+
+    /// When each project path's git state was last QUERIED (#066 Step 2), keyed
+    /// by project path. Rebuilt against the live registry on every pass, so a
+    /// project that drops out of the registry loses its timestamp and cannot be
+    /// throttled by a stale entry if it is re-registered later — it is queried
+    /// immediately, exactly like a newly-registered project.
+    ///
+    /// `@ObservationIgnored` — internal throttle bookkeeping, not UI state. Main
+    /// thread only: it is read and written solely inside `startGitSecondPass()`,
+    /// which the reload paths call on the main thread. The background git work
+    /// itself is untouched by this (#059 threading is unchanged).
+    @ObservationIgnored private var gitQueryTimes: [String: Date] = [:]
+
+    /// The project paths whose git state the most recent pass actually scheduled
+    /// a query for (#066 Step 2). `[]` means a fully throttled tick spawned zero
+    /// subprocesses. Exposed to tests via `lastGitPassQueriedPathsForTesting`.
+    @ObservationIgnored private var lastGitPassQueriedPaths: [String] = []
+
+    /// Decides which of the current projects need a live git query on this tick,
+    /// and records the query time for those that do (#066 Step 2).
+    ///
+    /// A project is queried when ANY of these hold:
+    /// 1. It has no recorded query time — newly registered (or re-registered), so
+    ///    its branch is unknown and must be filled in immediately.
+    /// 2. `gitThrottleInterval` has elapsed since its last query — the ceiling
+    ///    that guarantees an externally-made branch switch still surfaces.
+    /// 3. Its parse result changed on this very tick (it appears in
+    ///    `lastReloadParsedPaths`) — a `.plans/` edit very often accompanies a
+    ///    branch/dirty change (a plan moving to in-progress as a worktree is
+    ///    created), so a changed project refreshes git without waiting out the
+    ///    window. This is what keeps the common case feeling instant.
+    ///
+    /// Also prunes `gitQueryTimes` down to the live project paths, which is what
+    /// makes de-registration drop the entry (see the property doc). Returns the
+    /// paths to query, in `projects` order. MUST be called on the main thread.
+    private func gitPathsToQueryThisTick() -> [String] {
+        let currentTime = now()
+        let changedPaths = Set(lastReloadParsedPaths)
+
+        var refreshedTimes: [String: Date] = [:]
+        var pathsToQuery: [String] = []
+
+        for path in projects.map(\.projectPath) {
+            let lastQueried = gitQueryTimes[path]
+            let isStale = lastQueried.map {
+                currentTime.timeIntervalSince($0) >= Self.gitThrottleInterval
+            } ?? true
+
+            if isStale || changedPaths.contains(path) {
+                pathsToQuery.append(path)
+                refreshedTimes[path] = currentTime
+            } else {
+                // Carrying the ORIGINAL timestamp forward (not `currentTime`) is
+                // what makes the window an absolute ceiling: repeatedly skipping
+                // a project can never push its next query further out.
+                refreshedTimes[path] = lastQueried
+            }
+        }
+
+        gitQueryTimes = refreshedTimes
+        return pathsToQuery
     }
 
     /// Kicks off the #024 async git second pass against the current `projects`:
@@ -554,8 +796,22 @@ final class PlansStore {
     /// pass, extracted so both the synchronous and async reload paths can share
     /// it). MUST be called on the main thread (it reads the observable
     /// `projects`).
+    ///
+    /// Throttled (#066 Step 2): only the subset of projects returned by
+    /// `gitPathsToQueryThisTick()` is queried, so a fully idle tick spawns zero
+    /// subprocesses instead of two per project. Threading is deliberately
+    /// unchanged — the same background dispatch, the same `GitResult`
+    /// merge-by-path in `applyGitInfo` — the pass simply carries fewer results,
+    /// and projects absent from it keep their last-known git fields (carried over
+    /// by `performReload`) rather than being reset.
     private func startGitSecondPass() {
-        let paths = projects.map(\.projectPath)
+        let paths = gitPathsToQueryThisTick()
+        lastGitPassQueriedPaths = paths
+
+        // Nothing survived the throttle: skip the background dispatch entirely so
+        // an idle tick costs zero queue hops as well as zero subprocesses.
+        guard !paths.isEmpty else { return }
+
         nonisolated(unsafe) let unsafeSelf = self
         DispatchQueue.global(qos: .utility).async {
             var results: [GitResult] = []
@@ -584,13 +840,21 @@ final class PlansStore {
     /// rebuilds that element (structs are value types) carrying over all existing
     /// fields plus the git values. Projects that disappeared between the parse
     /// pass and this merge are simply skipped.
+    ///
+    /// Equality-gated (#066 Step 4): the merged array is built into a LOCAL copy
+    /// and handed to `publishProjects`, which assigns the observable only when
+    /// the result actually differs. On an idle tick the branch and dirty flag are
+    /// unchanged, so this pass — which runs every 5s regardless — would otherwise
+    /// have re-published identical data and defeated the parse-path gate a beat
+    /// later.
     private func applyGitInfo(_ results: [GitResult]) {
+        var merged = projects
         for result in results {
-            guard let index = projects.firstIndex(where: { $0.projectPath == result.path }) else {
+            guard let index = merged.firstIndex(where: { $0.projectPath == result.path }) else {
                 continue
             }
-            let existing = projects[index]
-            projects[index] = ProjectTasks(
+            let existing = merged[index]
+            merged[index] = ProjectTasks(
                 projectPath: existing.projectPath,
                 projectName: existing.projectName,
                 lastSeen: existing.lastSeen,
@@ -601,6 +865,7 @@ final class PlansStore {
                 gitIsDirty: result.dirty
             )
         }
+        publishProjects(merged)
     }
 
     /// Begins live refresh: performs an immediate SYNCHRONOUS `reload()`
@@ -644,7 +909,47 @@ final class PlansStore {
     func performReloadForTesting(
         priorGitInfo: [String: (String?, Bool?)]
     ) -> [ProjectTasks] {
-        performReload(priorGitInfo: priorGitInfo)
+        // An empty cache means the change gate (#066) always misses, so this hook
+        // exercises the full parse path exactly as it did before the gate landed.
+        performReload(priorGitInfo: priorGitInfo, cache: [:]).projects
+    }
+
+    /// Test-only hook: the project paths actually RE-PARSED by the most recent
+    /// reload (#066). `[]` proves an idle tick did zero read/parse work; a
+    /// non-empty array names exactly which projects the change gate let through.
+    var lastReloadParsedPathsForTesting: [String] {
+        lastReloadParsedPaths
+    }
+
+    /// Test-only hook: the project paths whose git state the most recent git
+    /// second pass actually scheduled a query for (#066 Step 2). `[]` proves a
+    /// throttled tick spawned zero `/usr/bin/git` subprocesses; a non-empty array
+    /// names exactly which projects the throttle let through.
+    var lastGitPassQueriedPathsForTesting: [String] {
+        lastGitPassQueriedPaths
+    }
+
+    /// Test-only hook: whether the most recent reload (or git merge) actually
+    /// reassigned the observable `projects` (#066 Step 4). `false` proves the
+    /// equality gate suppressed the publish, so no SwiftUI observer — including
+    /// `MenuBarLabel`'s `ImageRenderer` re-bake — was invalidated on that tick.
+    var lastReloadDidPublishProjectsForTesting: Bool {
+        lastReloadDidPublishProjects
+    }
+
+    /// Test-only hook: the monotonic count of actual `projects` reassignments
+    /// (#066 Step 4). A test can snapshot it, drive N idle ticks, and assert the
+    /// value is unchanged.
+    var projectsPublishCountForTesting: Int {
+        projectsPublishCount
+    }
+
+    /// Test-only hook: drives the REAL main-thread git merge (`applyGitInfo`)
+    /// with caller-supplied results, so the equality gate on the git second pass
+    /// can be exercised without spawning `git` subprocesses. MUST be called on
+    /// the main thread.
+    func applyGitInfoForTesting(_ results: [(path: String, branch: String?, dirty: Bool?)]) {
+        applyGitInfo(results.map { GitResult(path: $0.path, branch: $0.branch, dirty: $0.dirty) })
     }
 
     /// Test-only hook: the current monotonic reload generation (#059), so tests
@@ -660,6 +965,13 @@ final class PlansStore {
     /// without racing a real background dispatch. MUST be called on the main
     /// thread (it delegates to the main-thread-only applier).
     func applyReloadResultForTesting(_ projects: [ProjectTasks], generation: Int) {
-        applyReloadResult(projects, generation: generation)
+        // Tests drive this with a bare projects array; the change-gate cache is
+        // irrelevant to the generation guard being exercised, so an empty cache
+        // is supplied. Passing `parsedPaths: []` mirrors "nothing was re-parsed",
+        // which is accurate for a caller-supplied result.
+        applyReloadResult(
+            ReloadResult(projects: projects, cache: [:], parsedPaths: []),
+            generation: generation
+        )
     }
 }

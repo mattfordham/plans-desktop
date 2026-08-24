@@ -891,4 +891,709 @@ final class PlansStoreTests: XCTestCase {
         let reloaded = PlansStore(registryReader: reader, defaults: defaults)
         XCTAssertEqual(reloaded.newPlanTrigger, 0)
     }
+
+    // MARK: - Change-gated parsing (#066 Step 3)
+
+    /// A project whose `.plans/` is unchanged between two consecutive reloads
+    /// must NOT be re-read/re-parsed on the second reload: the prior parse result
+    /// is reused verbatim. This is the whole point of the change gate — on an
+    /// idle tick with N unchanged projects, zero task files are read or parsed.
+    func testUnchangedProjectIsNotReparsedOnSubsequentReload() throws {
+        let projectDir = try makeProjectDir(name: "alpha")
+        try writeTaskFile(
+            projectDir: projectDir,
+            filename: "001-first.md",
+            text: "# First\n\n**Status:** pending",
+            in: "pending"
+        )
+
+        let reader = try makeReader(projectPaths: [projectDir.path])
+        let store = PlansStore(registryReader: reader)
+
+        store.reload()
+        XCTAssertEqual(
+            store.lastReloadParsedPathsForTesting, [projectDir.path],
+            "the first reload has no cache, so the project must be parsed"
+        )
+
+        store.reload()
+        XCTAssertEqual(
+            store.lastReloadParsedPathsForTesting, [],
+            "an unchanged project must be skipped on the second reload"
+        )
+
+        // The reused result must still be correct and present.
+        let project = try XCTUnwrap(store.projects.first)
+        XCTAssertEqual(project.projectPath, projectDir.path)
+        XCTAssertEqual(project.counts[.pending], 1)
+        XCTAssertEqual(project.activeTasks.first?.title, "First")
+    }
+
+    /// Adding a task file must re-parse that project and surface the new data.
+    func testAddedTaskFileCausesReparseAndSurfaces() throws {
+        let projectDir = try makeProjectDir(name: "alpha")
+        try writeTaskFile(
+            projectDir: projectDir,
+            filename: "001-first.md",
+            text: "# First\n\n**Status:** pending",
+            in: "pending"
+        )
+
+        let reader = try makeReader(projectPaths: [projectDir.path])
+        let store = PlansStore(registryReader: reader)
+        store.reload()
+        store.reload()
+        XCTAssertEqual(store.lastReloadParsedPathsForTesting, [])
+
+        try writeTaskFile(
+            projectDir: projectDir,
+            filename: "002-second.md",
+            text: "# Second\n\n**Status:** in-progress",
+            in: "pending"
+        )
+        store.reload()
+
+        XCTAssertEqual(store.lastReloadParsedPathsForTesting, [projectDir.path])
+        let project = try XCTUnwrap(store.projects.first)
+        XCTAssertEqual(project.counts[.pending], 1)
+        XCTAssertEqual(project.counts[.inProgress], 1)
+    }
+
+    /// THE correctness case for #066 Step 3: an IN-PLACE edit to an existing task
+    /// file's contents — same filename, so the containing directory's own mtime
+    /// is not a dependable signal. The change gate must still re-parse and the
+    /// edited status must surface. If this regressed, task edits would silently
+    /// stop appearing in both surfaces.
+    func testInPlaceEditOfExistingTaskFileCausesReparseAndSurfaces() throws {
+        let projectDir = try makeProjectDir(name: "alpha")
+        try writeTaskFile(
+            projectDir: projectDir,
+            filename: "001-first.md",
+            text: "# First\n\n**Status:** pending",
+            in: "pending"
+        )
+
+        let reader = try makeReader(projectPaths: [projectDir.path])
+        let store = PlansStore(registryReader: reader)
+        store.reload()
+        store.reload()
+        XCTAssertEqual(store.lastReloadParsedPathsForTesting, [])
+        XCTAssertEqual(store.projects.first?.counts[.pending], 1)
+
+        // Rewrite the SAME file with different contents (no new/removed entry).
+        try writeTaskFile(
+            projectDir: projectDir,
+            filename: "001-first.md",
+            text: "# First\n\n**Status:** in-progress",
+            in: "pending"
+        )
+        store.reload()
+
+        XCTAssertEqual(
+            store.lastReloadParsedPathsForTesting, [projectDir.path],
+            "an in-place content edit must invalidate the change gate"
+        )
+        let project = try XCTUnwrap(store.projects.first)
+        XCTAssertNil(project.counts[.pending])
+        XCTAssertEqual(project.counts[.inProgress], 1)
+        XCTAssertEqual(project.activeTasks.first?.status, .inProgress)
+    }
+
+    /// An in-place edit that keeps the file's byte count IDENTICAL must also be
+    /// caught, so the signature cannot rely on size alone. The mtime is advanced
+    /// explicitly (as a real editor write does) to defeat sub-second filesystem
+    /// timestamp granularity.
+    func testSameLengthInPlaceEditCausesReparse() throws {
+        let projectDir = try makeProjectDir(name: "alpha")
+        try writeTaskFile(
+            projectDir: projectDir,
+            filename: "001-first.md",
+            text: "# First\n\n**Status:** review",
+            in: "pending"
+        )
+        let fileURL = projectDir
+            .appendingPathComponent(".plans")
+            .appendingPathComponent("pending")
+            .appendingPathComponent("001-first.md")
+
+        let reader = try makeReader(projectPaths: [projectDir.path])
+        let store = PlansStore(registryReader: reader)
+        store.reload()
+        store.reload()
+        XCTAssertEqual(store.lastReloadParsedPathsForTesting, [])
+
+        // "review" -> "elabor" would change length; use the same-length
+        // "**Status:** review" -> "**Status:** pendin" trick? Instead keep the
+        // total byte count equal by swapping to an equally-long valid status.
+        try "# First\n\n**Status:** in-rev".write(to: fileURL, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes(
+            [.modificationDate: Date().addingTimeInterval(60)],
+            ofItemAtPath: fileURL.path
+        )
+        store.reload()
+
+        XCTAssertEqual(
+            store.lastReloadParsedPathsForTesting, [projectDir.path],
+            "a same-length in-place edit must still invalidate the change gate"
+        )
+    }
+
+    /// Deleting a task file must re-parse and the removal must surface.
+    func testDeletedTaskFileCausesReparseAndSurfaces() throws {
+        let projectDir = try makeProjectDir(name: "alpha")
+        try writeTaskFile(
+            projectDir: projectDir,
+            filename: "001-first.md",
+            text: "# First\n\n**Status:** pending",
+            in: "pending"
+        )
+        try writeTaskFile(
+            projectDir: projectDir,
+            filename: "002-second.md",
+            text: "# Second\n\n**Status:** pending",
+            in: "pending"
+        )
+
+        let reader = try makeReader(projectPaths: [projectDir.path])
+        let store = PlansStore(registryReader: reader)
+        store.reload()
+        store.reload()
+        XCTAssertEqual(store.lastReloadParsedPathsForTesting, [])
+        XCTAssertEqual(store.projects.first?.counts[.pending], 2)
+
+        try FileManager.default.removeItem(
+            at: projectDir.appendingPathComponent(".plans/pending/002-second.md")
+        )
+        store.reload()
+
+        XCTAssertEqual(store.lastReloadParsedPathsForTesting, [projectDir.path])
+        XCTAssertEqual(store.projects.first?.counts[.pending], 1)
+    }
+
+    /// The gate is PER PROJECT: when one of two projects changes, only that one
+    /// is re-parsed; the untouched project keeps its cached result.
+    func testOnlyTheChangedProjectIsReparsed() throws {
+        let alpha = try makeProjectDir(name: "alpha")
+        let beta = try makeProjectDir(name: "beta")
+        try writeTaskFile(
+            projectDir: alpha,
+            filename: "001-a.md",
+            text: "# A\n\n**Status:** pending",
+            in: "pending"
+        )
+        try writeTaskFile(
+            projectDir: beta,
+            filename: "001-b.md",
+            text: "# B\n\n**Status:** pending",
+            in: "pending"
+        )
+
+        let reader = try makeReader(projectPaths: [alpha.path, beta.path])
+        let store = PlansStore(registryReader: reader)
+        store.reload()
+        store.reload()
+        XCTAssertEqual(store.lastReloadParsedPathsForTesting, [])
+
+        try writeTaskFile(
+            projectDir: beta,
+            filename: "002-b2.md",
+            text: "# B2\n\n**Status:** review",
+            in: "pending"
+        )
+        store.reload()
+
+        XCTAssertEqual(store.lastReloadParsedPathsForTesting, [beta.path])
+        XCTAssertEqual(store.projects.map(\.projectPath), [alpha.path, beta.path])
+        XCTAssertEqual(store.projects.first?.counts[.pending], 1)
+        XCTAssertEqual(store.projects.last?.counts[.review], 1)
+    }
+
+    /// #051 must survive the change gate: `onDidReload` fires on EVERY reload
+    /// even when all parsing is skipped, so a capture spinner can never orphan.
+    func testOnDidReloadFiresEvenWhenAllParsingIsSkipped() throws {
+        let projectDir = try makeProjectDir(name: "alpha")
+        try writeTaskFile(
+            projectDir: projectDir,
+            filename: "001-first.md",
+            text: "# First\n\n**Status:** pending",
+            in: "pending"
+        )
+
+        let reader = try makeReader(projectPaths: [projectDir.path])
+        let store = PlansStore(registryReader: reader)
+        store.reload()
+
+        var fireCount = 0
+        store.onDidReload = { fireCount += 1 }
+        store.reload()
+        store.reload()
+        store.reload()
+
+        XCTAssertEqual(store.lastReloadParsedPathsForTesting, [])
+        XCTAssertEqual(fireCount, 3, "onDidReload must fire on every tick, skipped or not")
+    }
+
+    /// A project removed from the registry must have its cache entry dropped, and
+    /// a project re-added later must be parsed fresh rather than resurrected from
+    /// a stale cached result.
+    func testProjectRemovedFromRegistryDoesNotLeakCachedResult() throws {
+        let alpha = try makeProjectDir(name: "alpha")
+        try writeTaskFile(
+            projectDir: alpha,
+            filename: "001-a.md",
+            text: "# A\n\n**Status:** pending",
+            in: "pending"
+        )
+
+        let registryURL = tempDir.appendingPathComponent("projects.json")
+        let reader = try makeReader(projectPaths: [alpha.path])
+        let store = PlansStore(registryReader: reader)
+        store.reload()
+        XCTAssertEqual(store.projects.count, 1)
+
+        // Empty the registry.
+        try #"{ "version": 1, "projects": [] }"#
+            .write(to: registryURL, atomically: true, encoding: .utf8)
+        store.reload()
+        XCTAssertEqual(store.projects.count, 0)
+
+        // Re-add it; the project must reappear with correct data.
+        _ = try makeReader(projectPaths: [alpha.path])
+        store.reload()
+        XCTAssertEqual(store.projects.count, 1)
+        XCTAssertEqual(store.projects.first?.counts[.pending], 1)
+    }
+
+    // MARK: - Equality-gated publishes (#066 Step 4)
+
+    /// An idle tick where every project came from the change-gate cache must not
+    /// PUBLISH at all: `projects` is left untouched, so `@Observable` records no
+    /// mutation and SwiftUI observers (project cards, `MenuBarView`, and
+    /// `MenuBarLabel`'s `ImageRenderer` bitmap re-bake) never invalidate.
+    ///
+    /// Note that a bare `projects = newValue` IS observable even when the value
+    /// compares equal, so this can only pass with a genuine `if new != projects`
+    /// guard around the assignment.
+    func testUnchangedReloadDoesNotPublishProjects() throws {
+        let projectDir = try makeProjectDir(name: "alpha")
+        try writeTaskFile(
+            projectDir: projectDir,
+            filename: "001-first.md",
+            text: "# First\n\n**Status:** pending",
+            in: "pending"
+        )
+
+        let reader = try makeReader(projectPaths: [projectDir.path])
+        let store = PlansStore(registryReader: reader)
+
+        store.reload()
+        XCTAssertTrue(
+            store.lastReloadDidPublishProjectsForTesting,
+            "the first reload goes from [] to one project, so it must publish"
+        )
+        let publishesAfterFirst = store.projectsPublishCountForTesting
+
+        store.reload()
+        store.reload()
+        store.reload()
+
+        XCTAssertEqual(store.lastReloadParsedPathsForTesting, [])
+        XCTAssertFalse(
+            store.lastReloadDidPublishProjectsForTesting,
+            "an idle tick producing identical projects must not publish"
+        )
+        XCTAssertEqual(
+            store.projectsPublishCountForTesting, publishesAfterFirst,
+            "three idle ticks must not have bumped the publish counter at all"
+        )
+
+        // The suppressed publish must NOT mean stale/missing data.
+        let project = try XCTUnwrap(store.projects.first)
+        XCTAssertEqual(project.projectPath, projectDir.path)
+        XCTAssertEqual(project.counts[.pending], 1)
+    }
+
+    /// The mirror of the above: a REAL change must still publish and surface.
+    /// A gate that dropped genuine changes would be far worse than the energy
+    /// cost this exists to fix, so this is the load-bearing safety test.
+    func testChangedReloadDoesPublishProjects() throws {
+        let projectDir = try makeProjectDir(name: "alpha")
+        try writeTaskFile(
+            projectDir: projectDir,
+            filename: "001-first.md",
+            text: "# First\n\n**Status:** pending",
+            in: "pending"
+        )
+
+        let reader = try makeReader(projectPaths: [projectDir.path])
+        let store = PlansStore(registryReader: reader)
+        store.reload()
+        store.reload()
+        XCTAssertFalse(store.lastReloadDidPublishProjectsForTesting)
+        let publishesBefore = store.projectsPublishCountForTesting
+
+        try writeTaskFile(
+            projectDir: projectDir,
+            filename: "001-first.md",
+            text: "# First\n\n**Status:** in-progress",
+            in: "pending"
+        )
+        store.reload()
+
+        XCTAssertTrue(
+            store.lastReloadDidPublishProjectsForTesting,
+            "a real content change must publish"
+        )
+        XCTAssertEqual(store.projectsPublishCountForTesting, publishesBefore + 1)
+        XCTAssertEqual(store.projects.first?.counts[.inProgress], 1)
+        XCTAssertNil(store.projects.first?.counts[.pending])
+    }
+
+    /// The equality gate must compare EVERY field of the value graph. A change
+    /// that alters only a deeply-nested field (a `## How` checkbox tick inside a
+    /// task's section body, which moves `howProgress` and the section text but
+    /// leaves the status counts and task ids identical) must still publish. This
+    /// is the test that would fail if `==` were hand-written sloppily and skipped
+    /// a field.
+    func testNestedOnlyChangePublishesAndSurfaces() throws {
+        let projectDir = try makeProjectDir(name: "alpha")
+        try writeTaskFile(
+            projectDir: projectDir,
+            filename: "001-first.md",
+            text: "# First\n\n**Status:** pending\n\n## How\n\n- [ ] one\n- [ ] two",
+            in: "pending"
+        )
+
+        let reader = try makeReader(projectPaths: [projectDir.path])
+        let store = PlansStore(registryReader: reader)
+        store.reload()
+        store.reload()
+        XCTAssertFalse(store.lastReloadDidPublishProjectsForTesting)
+        XCTAssertEqual(store.projects.first?.activeTasks.first?.howProgress.done, 0)
+
+        // Tick one checkbox. Same status, same id, same counts, same task count —
+        // ONLY the section body and `howProgress` move.
+        try writeTaskFile(
+            projectDir: projectDir,
+            filename: "001-first.md",
+            text: "# First\n\n**Status:** pending\n\n## How\n\n- [x] one\n- [ ] two",
+            in: "pending"
+        )
+        store.reload()
+
+        XCTAssertTrue(
+            store.lastReloadDidPublishProjectsForTesting,
+            "a change confined to a nested section body must still publish"
+        )
+        XCTAssertEqual(store.projects.first?.activeTasks.first?.howProgress.done, 1)
+        XCTAssertEqual(store.projects.first?.counts[.pending], 1)
+    }
+
+    /// The git second pass merges into `projects` on EVERY tick. When the live
+    /// git values equal what is already published, `applyGitInfo` must not
+    /// republish either — otherwise the equality gate on the parse path would be
+    /// defeated 5 seconds later by the git merge.
+    func testApplyGitInfoDoesNotPublishWhenGitValuesAreUnchanged() throws {
+        let projectDir = try makeProjectDir(name: "alpha")
+        try writeTaskFile(
+            projectDir: projectDir,
+            filename: "001-first.md",
+            text: "# First\n\n**Status:** pending",
+            in: "pending"
+        )
+
+        let reader = try makeReader(projectPaths: [projectDir.path])
+        let store = PlansStore(registryReader: reader)
+        store.reload()
+
+        // First merge: nil -> ("main", false) is a real change and must publish.
+        store.applyGitInfoForTesting([(path: projectDir.path, branch: "main", dirty: false)])
+        XCTAssertEqual(store.projects.first?.gitBranch, "main")
+        let publishesAfterFirstGit = store.projectsPublishCountForTesting
+
+        // Second merge with identical values must be a no-op publish-wise.
+        store.applyGitInfoForTesting([(path: projectDir.path, branch: "main", dirty: false)])
+        store.applyGitInfoForTesting([(path: projectDir.path, branch: "main", dirty: false)])
+        XCTAssertEqual(
+            store.projectsPublishCountForTesting, publishesAfterFirstGit,
+            "identical git results must not republish `projects`"
+        )
+        XCTAssertEqual(store.projects.first?.gitBranch, "main")
+        XCTAssertEqual(store.projects.first?.gitIsDirty, false)
+
+        // A changed git value must publish and surface.
+        store.applyGitInfoForTesting([(path: projectDir.path, branch: "feature/x", dirty: true)])
+        XCTAssertEqual(store.projectsPublishCountForTesting, publishesAfterFirstGit + 1)
+        XCTAssertEqual(store.projects.first?.gitBranch, "feature/x")
+        XCTAssertEqual(store.projects.first?.gitIsDirty, true)
+    }
+
+    /// The suppressed publish must not clobber the drill-down selection, nor be
+    /// disturbed by it: selection is independent observable state and an idle
+    /// tick must leave it exactly as the user set it.
+    func testSuppressedPublishPreservesSelectionState() throws {
+        let projectDir = try makeProjectDir(name: "alpha")
+        try writeTaskFile(
+            projectDir: projectDir,
+            filename: "001-first.md",
+            text: "# First\n\n**Status:** pending",
+            in: "pending"
+        )
+
+        let reader = try makeReader(projectPaths: [projectDir.path])
+        let store = PlansStore(registryReader: reader)
+        store.reload()
+        store.selectedProjectPath = projectDir.path
+
+        store.reload()
+        store.reload()
+
+        XCTAssertFalse(store.lastReloadDidPublishProjectsForTesting)
+        XCTAssertEqual(store.selectedProjectPath, projectDir.path)
+    }
+
+    /// A registry-level change (a project dropping out) must publish even though
+    /// no individual surviving project changed.
+    func testProjectRemovalPublishesEvenThoughSurvivorsAreUnchanged() throws {
+        let alpha = try makeProjectDir(name: "alpha")
+        let beta = try makeProjectDir(name: "beta")
+        try writeTaskFile(
+            projectDir: alpha,
+            filename: "001-a.md",
+            text: "# A\n\n**Status:** pending",
+            in: "pending"
+        )
+        try writeTaskFile(
+            projectDir: beta,
+            filename: "001-b.md",
+            text: "# B\n\n**Status:** pending",
+            in: "pending"
+        )
+
+        let registryURL = tempDir.appendingPathComponent("projects.json")
+        let reader = try makeReader(projectPaths: [alpha.path, beta.path])
+        let store = PlansStore(registryReader: reader)
+        store.reload()
+        store.reload()
+        XCTAssertFalse(store.lastReloadDidPublishProjectsForTesting)
+
+        try #"{ "version": 1, "projects": [{ "path": "\#(alpha.path)", "lastSeen": "2026-06-04T14:41:00Z" }] }"#
+            .write(to: registryURL, atomically: true, encoding: .utf8)
+        store.reload()
+
+        XCTAssertTrue(
+            store.lastReloadDidPublishProjectsForTesting,
+            "a project dropping out of the registry must publish"
+        )
+        XCTAssertEqual(store.projects.map(\.projectPath), [alpha.path])
+    }
+
+    // MARK: - Throttled git second pass (#066 Step 2)
+
+    /// A mutable, test-controlled clock. Advancing it is how a test crosses the
+    /// git throttle boundary without any real `sleep`.
+    private final class TestClock {
+        var now: Date
+        init(_ start: Date = Date(timeIntervalSince1970: 1_000_000)) { self.now = start }
+        func advance(_ seconds: TimeInterval) { now.addTimeInterval(seconds) }
+        /// The time source closure handed to `PlansStore(now:)`.
+        var source: () -> Date { { [self] in now } }
+    }
+
+    /// Consecutive idle ticks inside the throttle window must NOT re-query git
+    /// for a project already queried. The first reload queries it (no prior
+    /// timestamp); subsequent reloads a few seconds later must schedule ZERO
+    /// git work — that is the ~415k-subprocesses/day saving.
+    func testGitPassSkipsProjectsQueriedWithinThrottleWindow() throws {
+        let projectDir = try makeProjectDir(name: "alpha")
+        try writeTaskFile(
+            projectDir: projectDir,
+            filename: "001-first.md",
+            text: "# First\n\n**Status:** pending",
+            in: "pending"
+        )
+        let reader = try makeReader(projectPaths: [projectDir.path])
+        let clock = TestClock()
+        let store = PlansStore(registryReader: reader, defaults: makeDefaults(), now: clock.source)
+
+        store.reload()
+        XCTAssertEqual(
+            store.lastGitPassQueriedPathsForTesting, [projectDir.path],
+            "the first pass has no prior timestamp, so git must be queried"
+        )
+
+        // Three more poll ticks, 5s apart — all well inside the 30s window and
+        // all with an unchanged `.plans/`.
+        for _ in 0..<3 {
+            clock.advance(5)
+            store.reload()
+            XCTAssertEqual(
+                store.lastGitPassQueriedPathsForTesting, [],
+                "an unchanged project inside the throttle window must not re-query git"
+            )
+        }
+    }
+
+    /// Once the throttle interval has elapsed, git MUST be re-queried even
+    /// though nothing in `.plans/` changed — otherwise a branch switch made
+    /// outside the app would never surface.
+    func testGitPassRequeriesAfterThrottleIntervalElapses() throws {
+        let projectDir = try makeProjectDir(name: "alpha")
+        let reader = try makeReader(projectPaths: [projectDir.path])
+        let clock = TestClock()
+        let store = PlansStore(registryReader: reader, defaults: makeDefaults(), now: clock.source)
+
+        store.reload()
+        XCTAssertEqual(store.lastGitPassQueriedPathsForTesting, [projectDir.path])
+
+        clock.advance(29)
+        store.reload()
+        XCTAssertEqual(
+            store.lastGitPassQueriedPathsForTesting, [],
+            "still inside the window at 29s"
+        )
+
+        clock.advance(2) // 31s since the last query
+        store.reload()
+        XCTAssertEqual(
+            store.lastGitPassQueriedPathsForTesting, [projectDir.path],
+            "the throttle interval elapsed, so git must be re-queried"
+        )
+
+        // And the timestamp resets: the very next tick is throttled again.
+        clock.advance(5)
+        store.reload()
+        XCTAssertEqual(store.lastGitPassQueriedPathsForTesting, [])
+    }
+
+    /// A `.plans/` edit very often accompanies a branch/dirty change (a plan is
+    /// moved to in-progress as a worktree is created). A project whose parse
+    /// result changed must therefore refresh git PROMPTLY, without waiting out
+    /// the throttle — and only that project, not its unchanged neighbours.
+    func testChangedProjectRequeriesGitImmediatelyWithinThrottleWindow() throws {
+        let alpha = try makeProjectDir(name: "alpha")
+        let beta = try makeProjectDir(name: "beta")
+        try writeTaskFile(
+            projectDir: alpha,
+            filename: "001-first.md",
+            text: "# First\n\n**Status:** pending",
+            in: "pending"
+        )
+        let reader = try makeReader(projectPaths: [alpha.path, beta.path])
+        let clock = TestClock()
+        let store = PlansStore(registryReader: reader, defaults: makeDefaults(), now: clock.source)
+
+        store.reload()
+        XCTAssertEqual(
+            Set(store.lastGitPassQueriedPathsForTesting), Set([alpha.path, beta.path])
+        )
+
+        clock.advance(5)
+        store.reload()
+        XCTAssertEqual(store.lastGitPassQueriedPathsForTesting, [])
+
+        // Change ONLY alpha's `.plans/` contents.
+        clock.advance(5)
+        try writeTaskFile(
+            projectDir: alpha,
+            filename: "002-second.md",
+            text: "# Second\n\n**Status:** in-progress",
+            in: "pending"
+        )
+        store.reload()
+
+        XCTAssertEqual(
+            store.lastReloadParsedPathsForTesting, [alpha.path],
+            "only alpha's parse result changed"
+        )
+        XCTAssertEqual(
+            store.lastGitPassQueriedPathsForTesting, [alpha.path],
+            "a changed project must refresh git immediately; beta stays throttled"
+        )
+    }
+
+    /// A project that drops out of the registry must not leave a timestamp
+    /// behind that would throttle it on re-registration — a re-added project is
+    /// queried immediately so its branch is never unknown/stale on screen.
+    func testDeregisteredProjectDoesNotResurrectStaleThrottleEntry() throws {
+        let alpha = try makeProjectDir(name: "alpha")
+        let beta = try makeProjectDir(name: "beta")
+        let registryURL = tempDir.appendingPathComponent("projects.json")
+
+        _ = try makeReader(projectPaths: [alpha.path, beta.path])
+        let reader = RegistryReader(registryURL: registryURL)
+        let clock = TestClock()
+        let store = PlansStore(registryReader: reader, defaults: makeDefaults(), now: clock.source)
+
+        store.reload()
+        XCTAssertEqual(Set(store.lastGitPassQueriedPathsForTesting), Set([alpha.path, beta.path]))
+
+        // beta de-registers.
+        _ = try makeReader(projectPaths: [alpha.path])
+        clock.advance(5)
+        store.reload()
+        XCTAssertEqual(store.lastGitPassQueriedPathsForTesting, [])
+
+        // beta comes back, still inside the 30s window. It must be queried
+        // immediately rather than reusing the dropped timestamp.
+        _ = try makeReader(projectPaths: [alpha.path, beta.path])
+        clock.advance(5)
+        store.reload()
+        XCTAssertEqual(
+            store.lastGitPassQueriedPathsForTesting, [beta.path],
+            "a re-registered project must be re-queried, not throttled by a stale entry"
+        )
+    }
+
+    /// The throttle must not disturb #051: `onDidReload` still fires on EVERY
+    /// tick, including ticks where the git pass scheduled no work at all.
+    func testOnDidReloadStillFiresOnGitThrottledTicks() throws {
+        let projectDir = try makeProjectDir(name: "alpha")
+        let reader = try makeReader(projectPaths: [projectDir.path])
+        let clock = TestClock()
+        let store = PlansStore(registryReader: reader, defaults: makeDefaults(), now: clock.source)
+
+        var reloadCount = 0
+        store.onDidReload = { reloadCount += 1 }
+
+        store.reload()
+        clock.advance(5)
+        store.reload()
+        clock.advance(5)
+        store.reload()
+
+        XCTAssertEqual(store.lastGitPassQueriedPathsForTesting, [])
+        XCTAssertEqual(reloadCount, 3, "onDidReload must fire on every tick, throttled or not")
+    }
+
+    /// Throttling must never cause the git merge to publish stale values: a
+    /// project skipped by the throttle keeps its last-known branch/dirty on
+    /// screen (carried over by `performReload`) and publishes nothing.
+    func testThrottledTicksPreserveLastKnownGitValuesWithoutRepublishing() throws {
+        let projectDir = try makeProjectDir(name: "alpha")
+        let reader = try makeReader(projectPaths: [projectDir.path])
+        let clock = TestClock()
+        let store = PlansStore(registryReader: reader, defaults: makeDefaults(), now: clock.source)
+
+        store.reload()
+        store.applyGitInfoForTesting([(path: projectDir.path, branch: "feature/x", dirty: true)])
+        XCTAssertEqual(store.projects.first?.gitBranch, "feature/x")
+        let publishesBefore = store.projectsPublishCountForTesting
+
+        clock.advance(5)
+        store.reload()
+        clock.advance(5)
+        store.reload()
+
+        XCTAssertEqual(store.lastGitPassQueriedPathsForTesting, [])
+        XCTAssertEqual(
+            store.projects.first?.gitBranch, "feature/x",
+            "the last-known branch must survive throttled ticks"
+        )
+        XCTAssertEqual(store.projects.first?.gitIsDirty, true)
+        XCTAssertEqual(
+            store.projectsPublishCountForTesting, publishesBefore,
+            "throttled idle ticks must not republish `projects`"
+        )
+    }
 }
