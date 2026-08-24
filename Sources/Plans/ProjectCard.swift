@@ -68,6 +68,12 @@ struct ProjectCard: View {
     /// on each row's spinner.
     @State private var progressPopoverTaskID: String? = nil
 
+    /// #068: which plan row the pointer is currently over, by task id, or `nil`
+    /// when none is. At most one row is hovered at a time; each `planRow` reads
+    /// it to add the hover-strength background shift over its resting zebra
+    /// stripe (mirrors the single-selection `progressPopoverTaskID` pattern).
+    @State private var hoveredRowID: String? = nil
+
     /// The pending "Refine Plan" request (#056), or `nil` when no Refine sheet is
     /// open. Set by a row's Refine glyph (elaborated, non-blocked tasks only) to
     /// that row's task id + project path; an `.sheet(item:)` keyed on it presents
@@ -171,6 +177,34 @@ struct ProjectCard: View {
     /// aligns them into columns (a table look). Pinned as a constant so the
     /// per-row cell-count invariant is assertable without rendering the view.
     static let planRowCellCount = 5
+
+    /// #068: the very subtle zebra-stripe + hover-shift styling for plan-table
+    /// rows, extracted as a pure value so the exact opacities are unit-testable
+    /// without rendering the view (mirrors `titleSizing` / `planRowCellCount`).
+    /// The row background is `Color.primary.opacity(...)`, so these are the
+    /// alpha values applied. Only odd rows are tinted at rest (an every-other-row
+    /// band, not a flat wash); hovering any row shifts it to the stronger hover
+    /// alpha. Both values are held well below a flat overlay so the effect stays
+    /// "very subtle" and never dominates the card.
+    struct RowStyling {
+        /// Resting alpha for odd rows — the zebra band. Even rows get 0.
+        var stripeOpacity: Double = 0.03
+        /// Alpha for any hovered row, regardless of parity — the hover shift.
+        var hoverOpacity: Double = 0.06
+
+        /// The `Color.primary` alpha for a row: 0 for an even resting row, the
+        /// stripe alpha for an odd resting row, and the (stronger) hover alpha
+        /// for any hovered row. Hover reads at least as strong as the resting
+        /// odd stripe by construction (`hoverOpacity >= stripeOpacity`).
+        func backgroundOpacity(isEven: Bool, isHovered: Bool) -> Double {
+            if isHovered { return hoverOpacity }
+            return isEven ? 0 : stripeOpacity
+        }
+    }
+
+    /// The single source of truth for plan-row zebra + hover opacities, consumed
+    /// by `planRow` so the view and the tested decision cannot drift apart.
+    static let rowStyling = RowStyling()
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -469,8 +503,12 @@ struct ProjectCard: View {
             // row's single highlight `.background` is one continuous region with
             // no gaps for it to break across — see `planRow`.
             Grid(alignment: Alignment(horizontal: .leading, vertical: .center), horizontalSpacing: 0, verticalSpacing: 2) {
-                ForEach(rows) { row in
-                    planRow(row)
+                // #068: index-aware so each row knows its parity for the zebra
+                // stripe. Keyed on `\.element.id` (NOT `\.offset`) so a row's
+                // SwiftUI identity remains its `TaskRow.ID` — reordering/removing
+                // rows still animates and preserves per-row state correctly.
+                ForEach(Array(rows.enumerated()), id: \.element.id) { index, row in
+                    planRow(row, index: index)
                 }
             }
         }
@@ -498,9 +536,12 @@ struct ProjectCard: View {
     ///   the cardGrid wrapper Spacer) absorb all the slack and the rows stay pinned
     ///   under the header.
     @ViewBuilder
-    private func planRow(_ row: TaskRow) -> some View {
+    private func planRow(_ row: TaskRow, index: Int) -> some View {
         let indicator = row.indicator
         let typeText = row.type.map { "[\($0.label)]" } ?? ""
+        // #068: parity drives the resting zebra stripe; hover strengthens it.
+        let isEven = index.isMultiple(of: 2)
+        let isHovered = hoveredRowID == row.task.id
 
         GridRow {
             Image(systemName: indicator.symbolName)
@@ -575,6 +616,25 @@ struct ProjectCard: View {
         // independent hit target. No `.frame(maxHeight: .infinity)` so rows stay
         // content-sized and top-anchored (see the height note above).
         .padding(.vertical, 5)
+        // #068: one continuous very-subtle zebra + hover background for the whole
+        // row. Placed AFTER `.padding(.vertical, 5)` so the tint fills the full
+        // padded row region (content + its vertical padding); with the enclosing
+        // Grid at `horizontalSpacing: 0` it is one gapless region horizontally,
+        // and adjacent striped rows abut across the Grid's small `verticalSpacing`
+        // so the zebra reads as continuous bands. It sits BEHIND the cells and
+        // carries no gesture, leaving the per-cell `OpenDetailOnTap` seams and the
+        // trailing action button's own hit target untouched. `.onHover` tracks the
+        // single hovered row id; `.animation` eases the stripe/hover crossfade
+        // (mirrors `RowActionGlyph`'s hover timing).
+        .background(
+            Color.primary.opacity(
+                ProjectCard.rowStyling.backgroundOpacity(isEven: isEven, isHovered: isHovered)
+            )
+        )
+        .onHover { hovering in
+            hoveredRowID = hovering ? row.task.id : nil
+        }
+        .animation(.easeOut(duration: 0.12), value: hoveredRowID)
     }
 
     /// The trailing action cell for a plan row. While this row's task is being

@@ -152,4 +152,64 @@ final class ProjectCardTests: XCTestCase {
     func testPlanRowEmitsExactlyFiveCells() {
         XCTAssertEqual(ProjectCard.planRowCellCount, 5)
     }
+
+    // MARK: - rowStyling (very subtle zebra striping + hover shift, #068)
+
+    /// #068: plan-table rows carry a very subtle zebra stripe plus a hover shift.
+    /// The decision is a pure, view-free value (`rowStyling.backgroundOpacity`)
+    /// so the exact opacities are assertable without rendering the SwiftUI view,
+    /// mirroring `titleSizing` / `planRowCellCount`. The background is
+    /// `Color.primary.opacity(...)`, so these are the alpha values applied.
+
+    /// Even rows carry NO stripe at rest — only odd rows are tinted, so the
+    /// zebra reads as an every-other-row band rather than a flat wash.
+    func testEvenRowsHaveNoStripeAtRest() {
+        let opacity = ProjectCard.rowStyling.backgroundOpacity(isEven: true, isHovered: false)
+        XCTAssertEqual(opacity, 0, "Even rows must have no resting stripe")
+    }
+
+    /// Odd rows carry a small but nonzero stripe at rest — the zebra band.
+    func testOddRowsHaveSmallNonzeroStripeAtRest() {
+        let opacity = ProjectCard.rowStyling.backgroundOpacity(isEven: false, isHovered: false)
+        XCTAssertGreaterThan(opacity, 0, "Odd rows must have a nonzero resting stripe")
+    }
+
+    /// Hovering a row always adds an additional shift, so a hovered row reads
+    /// stronger than that same row's resting value — for BOTH parities.
+    func testHoverAddsShiftOverRestForBothParities() {
+        let evenRest = ProjectCard.rowStyling.backgroundOpacity(isEven: true, isHovered: false)
+        let evenHover = ProjectCard.rowStyling.backgroundOpacity(isEven: true, isHovered: true)
+        XCTAssertGreaterThan(evenHover, evenRest, "Hovering an even row must strengthen it")
+
+        let oddRest = ProjectCard.rowStyling.backgroundOpacity(isEven: false, isHovered: false)
+        let oddHover = ProjectCard.rowStyling.backgroundOpacity(isEven: false, isHovered: true)
+        XCTAssertGreaterThan(oddHover, oddRest, "Hovering an odd row must strengthen it")
+    }
+
+    /// Every opacity the styling returns is "very subtle" — capped well below a
+    /// flat overlay so the zebra and hover never dominate the card.
+    func testEveryOpacityIsVerySubtle() {
+        for isEven in [true, false] {
+            for isHovered in [true, false] {
+                let opacity = ProjectCard.rowStyling.backgroundOpacity(isEven: isEven, isHovered: isHovered)
+                XCTAssertLessThanOrEqual(
+                    opacity, 0.08,
+                    "Opacity for isEven=\(isEven) isHovered=\(isHovered) must stay very subtle"
+                )
+            }
+        }
+    }
+
+    /// A hovered row always reads at least as strong as the resting odd-row
+    /// stripe, so hover feedback is never weaker than the ambient zebra band.
+    func testHoveredRowIsAtLeastAsStrongAsRestingOddStripe() {
+        let oddRest = ProjectCard.rowStyling.backgroundOpacity(isEven: false, isHovered: false)
+        for isEven in [true, false] {
+            let hovered = ProjectCard.rowStyling.backgroundOpacity(isEven: isEven, isHovered: true)
+            XCTAssertGreaterThanOrEqual(
+                hovered, oddRest,
+                "A hovered row (isEven=\(isEven)) must be at least as strong as the resting odd stripe"
+            )
+        }
+    }
 }
