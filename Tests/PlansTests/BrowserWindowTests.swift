@@ -524,6 +524,60 @@ final class BrowserWindowTests: XCTestCase {
         XCTAssertEqual(BrowserWindow.columnCount(forWidth: 2000), 4)
     }
 
+    // MARK: - columnCount clamped by card count (#067 focus fills the width)
+
+    /// A single card never leaves empty columns beside it: focus mode (#067)
+    /// collapses the grid to ONE card, and the raw width-driven count (4 columns
+    /// at 2000pt) would strand it at `cardMinWidth` with three empty columns of
+    /// dead space to its right. Clamping by the rendered card count widens the
+    /// lone card to the full viewport instead.
+    func testColumnCountClampsToSingleCard() {
+        XCTAssertEqual(
+            BrowserWindow.columnCount(forWidth: 2000, cardCount: 1), 1
+        )
+    }
+
+    /// Two cards in a 4-column-wide viewport use 2 columns, not 4 — each card
+    /// takes half the width rather than a quarter with half the grid empty.
+    func testColumnCountClampsToCardCount() {
+        XCTAssertEqual(
+            BrowserWindow.columnCount(forWidth: 2000, cardCount: 2), 2
+        )
+    }
+
+    /// The clamp only ever narrows: with MORE cards than the width can fit, the
+    /// width-driven count still wins (4 columns at 2000pt for 10 cards) so cards
+    /// never shrink below `cardMinWidth`.
+    func testColumnCountNotWidenedByExtraCards() {
+        XCTAssertEqual(
+            BrowserWindow.columnCount(forWidth: 2000, cardCount: 10), 4
+        )
+    }
+
+    /// An exact match between card count and width capacity is unchanged.
+    func testColumnCountUnchangedWhenCardCountMatchesCapacity() {
+        XCTAssertEqual(
+            BrowserWindow.columnCount(forWidth: 2000, cardCount: 4), 4
+        )
+    }
+
+    /// The `max(1, …)` floor survives the clamp: an empty grid (no projects yet,
+    /// or every project hidden) must not yield 0 columns and divide by zero in
+    /// the row math.
+    func testColumnCountFloorHoldsAtZeroCards() {
+        XCTAssertEqual(
+            BrowserWindow.columnCount(forWidth: 2000, cardCount: 0), 1
+        )
+    }
+
+    /// The clamp composes with the narrow-width floor: one card in a narrow
+    /// viewport is still exactly one column.
+    func testColumnCountSingleCardInNarrowViewport() {
+        XCTAssertEqual(
+            BrowserWindow.columnCount(forWidth: 300, cardCount: 1), 1
+        )
+    }
+
     // MARK: - effectiveLayoutMode (fit collapses to scroll at one column)
 
     /// Fit-to-screen at a SINGLE column collapses to scroll: stacking full-width

@@ -74,6 +74,21 @@ struct BrowserWindow: View {
         max(1, Int((width - 2 * gridPadding) / (cardMinWidth + gridSpacing)))
     }
 
+    /// The width-driven column count CLAMPED by how many cards are actually being
+    /// rendered, so the grid never lays out more columns than it has cards to put
+    /// in them. Without the clamp a grid showing fewer cards than the viewport can
+    /// fit strands them at `cardMinWidth` against a run of empty columns — most
+    /// visibly under focus mode (#067), where collapsing to a single project left
+    /// one 400pt card in a 4-column window with three columns of dead space.
+    ///
+    /// The clamp only ever NARROWS the count: with more cards than the width can
+    /// fit, the width-driven value stands and cards keep their `cardMinWidth`
+    /// floor. The `max(1, …)` floor is preserved for an empty grid so the row math
+    /// never divides by zero. Pure, so it is directly unit-testable.
+    static func columnCount(forWidth width: CGFloat, cardCount: Int) -> Int {
+        max(1, min(columnCount(forWidth: width), cardCount))
+    }
+
     /// Resolves the EFFECTIVE card layout for a given column count (#033). Fit-to-
     /// screen only makes sense with two or more columns: at a single column (a
     /// narrow window) cards are already full-width and stacking them with stretched
@@ -304,7 +319,13 @@ struct BrowserWindow: View {
         // scroll (1→2→3→4…) — the two modes only differ in vertical sizing. The
         // column count is computed once here so the grid, the effective-mode
         // decision, and the per-row height all agree on it.
-        let columns = BrowserWindow.columnCount(forWidth: gridWidth)
+        // #067: clamp by the number of cards actually being rendered so a grid
+        // with fewer cards than the viewport can fit widens them to fill it
+        // instead of stranding them beside empty columns — the focused
+        // single-card case being the one that made this visible.
+        let columns = BrowserWindow.columnCount(
+            forWidth: gridWidth, cardCount: sortedProjects.count
+        )
         // At a single column fit-to-screen collapses to scroll (see
         // `effectiveLayoutMode`); otherwise the user's choice stands.
         let effectiveMode = BrowserWindow.effectiveLayoutMode(
