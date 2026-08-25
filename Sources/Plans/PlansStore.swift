@@ -71,42 +71,84 @@ final class PlansStore {
         /// does NOT consult property defaults for a non-Optional key and would
         /// otherwise throw `keyNotFound` when `deep` is absent.
         var deep: Bool = false
-        /// The PNG bytes of an image pasted/dropped into the form (#048), or nil
-        /// when no image is staged. Held alongside the text so a dismissed-and-
-        /// reopened sheet (or an app relaunch) restores the staged image too.
-        /// NEVER written to `.plans/` (§2 read-only); the only persistence sink is
-        /// UserDefaults (this whole draft is JSON-encoded there). The image bytes
-        /// are written to disk under Application Support — outside `.plans/` — only
-        /// at submit time by `CaptureImageStore`.
-        var imageData: Data?
+        /// The PNG bytes of the images pasted/dropped into the form (#048/#069),
+        /// in staging order — empty when nothing is staged. Held alongside the
+        /// text so a dismissed-and-reopened sheet (or an app relaunch) restores
+        /// the staged images too. NEVER written to `.plans/` (§2 read-only); the
+        /// only persistence sink is UserDefaults (this whole draft is JSON-encoded
+        /// there). The image bytes are written to disk under Application Support —
+        /// outside `.plans/` — only at submit time by `CaptureImageStore`.
+        ///
+        /// Migration (#069): a draft persisted before #069 carried a single
+        /// scalar `imageData` key; `init(from:)` below wraps that legacy value
+        /// into a one-element array so a pre-#069 staged image survives an app
+        /// upgrade. A draft with neither key decodes to `[]`.
+        var imageDatas: [Data] = []
 
         /// Memberwise init (explicit so the type can be constructed across the
         /// module without relying on the synthesized internal initializer).
-        /// `deep` defaults to false and `imageData` to nil so existing call sites
-        /// and decoding of older drafts (saved before #065 / #048, with no `deep`
-        /// or `imageData` key) still work — the synthesized `Codable` decodes an
-        /// absent `Bool`/`Data?` key defaulted here as false/nil.
-        init(text: String, execute: Bool, elaborate: Bool, deep: Bool = false, imageData: Data? = nil) {
+        /// `deep` defaults to false and `imageDatas` to `[]` so existing call
+        /// sites and decoding of older drafts (saved before #065 / #048, with no
+        /// `deep` or image key) still work.
+        init(text: String, execute: Bool, elaborate: Bool, deep: Bool = false, imageDatas: [Data] = []) {
             self.text = text
             self.execute = execute
             self.elaborate = elaborate
             self.deep = deep
-            self.imageData = imageData
+            self.imageDatas = imageDatas
         }
 
-        /// Explicit `Codable` decoding so a draft persisted before #065 (with no
-        /// `deep` key) still decodes cleanly. Swift's synthesized `init(from:)`
-        /// requires every non-Optional key to be present and would throw
-        /// `keyNotFound` for an absent `deep`; `decodeIfPresent(... ) ?? false`
-        /// restores the intended default and keeps pre-#065 drafts loadable across
-        /// an app upgrade. Encoding stays synthesized (the default `encode(to:)`).
+        /// The coding keys for the CURRENT wire form (text/execute/elaborate/
+        /// deep/imageDatas). Explicit so `encode(to:)` and the current-key decode
+        /// are pinned; the legacy scalar `imageData` key is handled separately in
+        /// `init(from:)` via `LegacyCodingKeys` so it never appears in the encoded
+        /// output.
+        private enum CodingKeys: String, CodingKey {
+            case text, execute, elaborate, deep, imageDatas
+        }
+
+        /// Decode-only keys for pre-#069 drafts, which carried a single scalar
+        /// `imageData` instead of the `imageDatas` array. Kept out of
+        /// `CodingKeys` so the synthesized-style `encode(to:)` never emits it.
+        private enum LegacyCodingKeys: String, CodingKey {
+            case imageData
+        }
+
+        /// Explicit `Codable` decoding so older drafts still decode cleanly:
+        /// - an absent `deep` key (pre-#065) defaults to false;
+        /// - `imageDatas` is taken directly when present (#069); otherwise a
+        ///   legacy scalar `imageData` (pre-#069) is wrapped into a one-element
+        ///   array; with neither key present it defaults to `[]` (pre-#048).
         init(from decoder: Decoder) throws {
             let container = try decoder.container(keyedBy: CodingKeys.self)
             self.text = try container.decode(String.self, forKey: .text)
             self.execute = try container.decode(Bool.self, forKey: .execute)
             self.elaborate = try container.decode(Bool.self, forKey: .elaborate)
             self.deep = try container.decodeIfPresent(Bool.self, forKey: .deep) ?? false
-            self.imageData = try container.decodeIfPresent(Data.self, forKey: .imageData)
+
+            if let datas = try container.decodeIfPresent([Data].self, forKey: .imageDatas) {
+                self.imageDatas = datas
+            } else {
+                let legacy = try decoder.container(keyedBy: LegacyCodingKeys.self)
+                if let single = try legacy.decodeIfPresent(Data.self, forKey: .imageData) {
+                    self.imageDatas = [single]
+                } else {
+                    self.imageDatas = []
+                }
+            }
+        }
+
+        /// Explicit `encode(to:)` matching `CodingKeys`. Written out (rather than
+        /// synthesized) because the presence of an explicit `init(from:)` plus the
+        /// decode-only `LegacyCodingKeys` means synthesis can't be relied on to
+        /// emit exactly the current keys.
+        func encode(to encoder: Encoder) throws {
+            var container = encoder.container(keyedBy: CodingKeys.self)
+            try container.encode(text, forKey: .text)
+            try container.encode(execute, forKey: .execute)
+            try container.encode(elaborate, forKey: .elaborate)
+            try container.encode(deep, forKey: .deep)
+            try container.encode(imageDatas, forKey: .imageDatas)
         }
     }
 

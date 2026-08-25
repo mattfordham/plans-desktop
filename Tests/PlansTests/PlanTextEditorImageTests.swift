@@ -138,6 +138,49 @@ final class PlanTextEditorImageTests: XCTestCase {
         XCTAssertNil(PlanNSTextView.pngData(from: pasteboard))
     }
 
+    // MARK: - Plural extraction (#069)
+
+    /// A single drop/paste carrying MULTIPLE image file URLs must yield one PNG
+    /// per file, not just the first. Fails RED until `pngDatas(from:)` exists.
+    func testExtractsMultiplePNGsFromMultipleFileURLs() throws {
+        pasteboard.clearContents()
+        let url1 = tempDir.appendingPathComponent("\(UUID().uuidString).png")
+        let url2 = tempDir.appendingPathComponent("\(UUID().uuidString).png")
+        try pngBytes().write(to: url1)
+        try pngBytes().write(to: url2)
+        pasteboard.writeObjects([url1 as NSURL, url2 as NSURL])
+
+        let results = PlanNSTextView.pngDatas(from: pasteboard)
+        XCTAssertEqual(results.count, 2, "expected one PNG per file URL")
+        for (index, data) in results.enumerated() {
+            assertValidPNG(data, "(multi file URL #\(index))")
+        }
+    }
+
+    /// A single paste carrying MULTIPLE `NSImage` objects must yield one PNG per
+    /// image.
+    func testExtractsMultiplePNGsFromMultipleNSImages() throws {
+        pasteboard.clearContents()
+        pasteboard.writeObjects([makeImage(), makeImage()])
+
+        let results = PlanNSTextView.pngDatas(from: pasteboard)
+        XCTAssertEqual(results.count, 2, "expected one PNG per NSImage object")
+        for (index, data) in results.enumerated() {
+            assertValidPNG(data, "(multi NSImage #\(index))")
+        }
+    }
+
+    /// The plural extractor returns an EMPTY ARRAY (not nil, which it can't) for a
+    /// pasteboard with no image at all.
+    func testPluralExtractorReturnsEmptyForNoImage() throws {
+        pasteboard.clearContents()
+        pasteboard.setString("just some text", forType: .string)
+        XCTAssertEqual(PlanNSTextView.pngDatas(from: pasteboard), [])
+
+        pasteboard.clearContents()
+        XCTAssertEqual(PlanNSTextView.pngDatas(from: pasteboard), [])
+    }
+
     // MARK: - Paste entry point (#062 follow-up)
 
     /// Builds a `PlanNSTextView` configured exactly as `PlanTextEditor.makeNSView`

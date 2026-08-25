@@ -246,4 +246,54 @@ final class NewPlanDraftPersistenceTests: XCTestCase {
         XCTAssertEqual(decoded.text, "old draft")
         XCTAssertTrue(decoded.elaborate)
     }
+
+    // MARK: - Multiple image attachments Codable migration (#069)
+
+    /// A draft encoded with the new `imageDatas` array round-trips: the ordered
+    /// list of image byte-blobs survives a direct `JSONEncoder`/`JSONDecoder`
+    /// pass with its elements and order preserved.
+    func testMultipleImageDatasRoundTrip() throws {
+        let a = Data([0x89, 0x50, 0x4E, 0x47])
+        let b = Data([0x01, 0x02, 0x03])
+        let draft = PlansStore.CaptureDraft(
+            text: "two images", execute: false, elaborate: false, imageDatas: [a, b]
+        )
+
+        let encoded = try JSONEncoder().encode(draft)
+        let decoded = try JSONDecoder().decode(PlansStore.CaptureDraft.self, from: encoded)
+
+        XCTAssertEqual(decoded.imageDatas, [a, b])
+        XCTAssertEqual(decoded.text, "two images")
+    }
+
+    /// The backward-compat guarantee: an OLDER draft JSON carrying a single
+    /// scalar `imageData` key (saved before #069) must decode into a
+    /// one-element `imageDatas` array, so a pre-#069 staged image survives an
+    /// app upgrade.
+    func testLegacySingleImageDataDecodesAsOneElementArray() throws {
+        // Base64 of the four PNG-magic bytes 0x89 0x50 0x4E 0x47.
+        let legacyBytes = Data([0x89, 0x50, 0x4E, 0x47])
+        let base64 = legacyBytes.base64EncodedString()
+        let legacyJSON = #"{"text":"old","execute":false,"elaborate":true,"imageData":"\#(base64)"}"#
+
+        let decoded = try JSONDecoder().decode(
+            PlansStore.CaptureDraft.self, from: Data(legacyJSON.utf8)
+        )
+
+        XCTAssertEqual(decoded.imageDatas, [legacyBytes])
+        XCTAssertEqual(decoded.text, "old")
+    }
+
+    /// A draft JSON with NEITHER `imageDatas` nor legacy `imageData` decodes to
+    /// an empty array (the property-level default), so pre-#048 drafts survive.
+    func testDraftWithoutAnyImageKeyDecodesAsEmptyArray() throws {
+        let legacyJSON = #"{"text":"old draft","execute":false,"elaborate":true}"#
+
+        let decoded = try JSONDecoder().decode(
+            PlansStore.CaptureDraft.self, from: Data(legacyJSON.utf8)
+        )
+
+        XCTAssertEqual(decoded.imageDatas, [])
+        XCTAssertEqual(decoded.text, "old draft")
+    }
 }

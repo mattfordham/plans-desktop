@@ -96,4 +96,20 @@ struct CaptureImageStore {
         guard let imageURL else { return description }
         return "\(description)\n\n![pasted image](file://\(imageURL.path))"
     }
+
+    /// Flattens MULTIPLE staged image references into a plan `description` for
+    /// submission (#069). Appends one markdown image paragraph per URL in order,
+    /// reusing the single-URL overload's exact format string, so N saved
+    /// attachments produce
+    /// `<description>\n\n![pasted image](file://p1)\n\n![pasted image](file://p2)…`.
+    /// An empty `imageURLs` list returns the description unchanged.
+    ///
+    /// Pure (no side effects): the actual file writes happen in `saveImage`. This
+    /// is the function the submit path calls ONCE with every saved URL, replacing
+    /// the previous per-image single-URL folding.
+    static func flattenDescription(_ description: String, imageURLs: [URL]) -> String {
+        imageURLs.reduce(description) { partial, url in
+            flattenDescription(partial, imageURL: url)
+        }
+    }
 }

@@ -702,34 +702,35 @@ final class PlansStoreTests: XCTestCase {
         XCTAssertNil(afterClear.draft(for: "/proj"))
     }
 
-    // MARK: - Capture draft image data (#048)
+    // MARK: - Capture draft image data (#048 / #069 multi-image)
 
-    func testCaptureDraftImageDataRoundTripsAcrossStoreInstances() throws {
+    func testCaptureDraftImageDatasRoundTripAcrossStoreInstances() throws {
         let reader = try makeReader(projectPaths: [])
         let defaults = makeDefaults()
 
-        // A small PNG magic-prefix byte sequence stands in for image bytes.
-        let pngBytes = Data([0x89, 0x50, 0x4E, 0x47])
+        // Two small byte sequences stand in for two staged images.
+        let first = Data([0x89, 0x50, 0x4E, 0x47])
+        let second = Data([0x01, 0x02, 0x03])
 
         let store = PlansStore(registryReader: reader, defaults: defaults)
         let draft = PlansStore.CaptureDraft(
             text: "hi",
             execute: false,
             elaborate: false,
-            imageData: pngBytes
+            imageDatas: [first, second]
         )
         store.setDraft(draft, for: "/proj")
 
-        // Visible immediately on the same store.
-        XCTAssertEqual(store.draft(for: "/proj")?.imageData, pngBytes)
+        // Visible immediately on the same store, order preserved.
+        XCTAssertEqual(store.draft(for: "/proj")?.imageDatas, [first, second])
 
         // A fresh store over the SAME defaults restores the image bytes.
         let reloaded = PlansStore(registryReader: reader, defaults: defaults)
         let restored = try XCTUnwrap(reloaded.draft(for: "/proj"))
-        XCTAssertEqual(restored.imageData, pngBytes)
+        XCTAssertEqual(restored.imageDatas, [first, second])
     }
 
-    func testCaptureDraftNilImageDataRoundTripsAsNil() throws {
+    func testCaptureDraftEmptyImageDatasRoundTripsAsEmpty() throws {
         let reader = try makeReader(projectPaths: [])
         let defaults = makeDefaults()
 
@@ -738,15 +739,15 @@ final class PlansStoreTests: XCTestCase {
             text: "hi",
             execute: false,
             elaborate: false,
-            imageData: nil
+            imageDatas: []
         )
         store.setDraft(draft, for: "/proj")
 
-        XCTAssertNil(store.draft(for: "/proj")?.imageData)
+        XCTAssertEqual(store.draft(for: "/proj")?.imageDatas, [])
 
         let reloaded = PlansStore(registryReader: reader, defaults: defaults)
         let restored = try XCTUnwrap(reloaded.draft(for: "/proj"))
-        XCTAssertNil(restored.imageData)
+        XCTAssertEqual(restored.imageDatas, [])
     }
 
     // MARK: - CaptureImageStore (image staging under Application Support, #048)
@@ -786,6 +787,30 @@ final class PlansStoreTests: XCTestCase {
     func testFlattenDescriptionReturnsInputUnchangedForNilURL() {
         let input = "Fix the login bug"
         let result = CaptureImageStore.flattenDescription(input, imageURL: nil)
+
+        XCTAssertEqual(result, input)
+    }
+
+    func testFlattenDescriptionAppendsOneReferencePerURLInOrder() {
+        let first = URL(fileURLWithPath: "/tmp/Plans/attachments/one.png")
+        let second = URL(fileURLWithPath: "/tmp/Plans/attachments/two.png")
+
+        let result = CaptureImageStore.flattenDescription(
+            "Fix the login bug",
+            imageURLs: [first, second]
+        )
+
+        XCTAssertEqual(
+            result,
+            "Fix the login bug"
+                + "\n\n![pasted image](file://\(first.path))"
+                + "\n\n![pasted image](file://\(second.path))"
+        )
+    }
+
+    func testFlattenDescriptionReturnsInputUnchangedForEmptyURLList() {
+        let input = "Fix the login bug"
+        let result = CaptureImageStore.flattenDescription(input, imageURLs: [])
 
         XCTAssertEqual(result, input)
     }

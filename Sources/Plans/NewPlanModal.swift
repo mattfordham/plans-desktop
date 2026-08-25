@@ -58,15 +58,16 @@ struct NewPlanModal: View {
     /// elaboration pass rather than being a run mode of its own.
     @State private var deep = false
 
-    /// The PNG bytes of an image pasted/dropped into the editor (#048), or nil
-    /// when none is staged. Persisted in the per-project draft (UserDefaults only,
-    /// never `.plans/` §2); written to disk under Application Support and appended
-    /// to the description as a markdown reference only at submit time.
-    @State private var imageData: Data?
+    /// The PNG bytes of the images pasted/dropped into the editor (#048/#069),
+    /// in staging order — empty when none are staged. Persisted in the per-project
+    /// draft (UserDefaults only, never `.plans/` §2); written to disk under
+    /// Application Support and appended to the description as markdown references
+    /// only at submit time.
+    @State private var imageDatas: [Data] = []
 
     /// Guards the project-switch draft swap: when a project change is loading the
     /// new project's draft into the fields (text, toggles, AND the staged
-    /// `imageData`), the field `.onChange` handlers must NOT persist back (that
+    /// `imageDatas`), the field `.onChange` handlers must NOT persist back (that
     /// would overwrite the new project's draft with the old project's state
     /// mid-swap). Set true around the swap.
     @State private var isSwitchingProject = false
@@ -202,7 +203,7 @@ struct NewPlanModal: View {
         .onChange(of: execute) { _, _ in persistDraft() }
         .onChange(of: elaborate) { _, _ in persistDraft() }
         .onChange(of: deep) { _, _ in persistDraft() }
-        .onChange(of: imageData) { _, _ in persistDraft() }
+        .onChange(of: imageDatas) { _, _ in persistDraft() }
     }
 
     // MARK: - Editor (auto-growing description box)
@@ -218,7 +219,7 @@ struct NewPlanModal: View {
                 text: $text,
                 font: Self.editorFont,
                 inset: Self.editorInset,
-                onImagePasted: { imageData = $0 }
+                onImagePasted: { imageDatas.append($0) }
             )
                 .frame(minHeight: Self.editorMinHeight, maxHeight: .infinity)
                 .background(
@@ -248,35 +249,52 @@ struct NewPlanModal: View {
 
     // MARK: - Image preview (#048)
 
-    /// A small thumbnail of the staged pasted/dropped image plus a Remove control,
-    /// shown only while an image is staged. When `imageData` is nil NOTHING is
-    /// rendered, so the editor/placeholder layout is unchanged for the common
-    /// no-image case. Remove drops the staged bytes and re-persists the draft
-    /// (text/toggles untouched); the on-disk write + description flattening happen
-    /// only at submit, never here.
+    /// A horizontally-scrolling row of thumbnails — one per staged pasted/dropped
+    /// image (#069) — each with its OWN Remove control, shown only while at least
+    /// one image is staged. When `imageDatas` is empty NOTHING is rendered, so the
+    /// editor/placeholder layout is unchanged for the common no-image case.
+    ///
+    /// Each Remove drops JUST that staged blob (`imageDatas.remove(at:)`, bounds-
+    /// guarded) and re-persists the draft (text/toggles untouched); the on-disk
+    /// write + description flattening happen only at submit, never here. The row
+    /// scrolls horizontally so many staged images can't blow out the modal width.
+    ///
+    /// Iterating `imageDatas.indices` is safe here: each Remove is a discrete user
+    /// action that mutates state and forces a re-render before the next removal, so
+    /// no stale index is ever used across two removals in one pass.
     @ViewBuilder
     private var imagePreview: some View {
-        if let imageData, let nsImage = NSImage(data: imageData) {
-            HStack(spacing: 12) {
-                Image(nsImage: nsImage)
-                    .resizable()
-                    .scaledToFit()
-                    .frame(maxHeight: 80)
-                    .clipShape(RoundedRectangle(cornerRadius: 6))
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 6)
-                            .stroke(Color.secondary.opacity(0.4), lineWidth: 1)
-                    )
+        if !imageDatas.isEmpty {
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 12) {
+                    ForEach(imageDatas.indices, id: \.self) { index in
+                        if let nsImage = NSImage(data: imageDatas[index]) {
+                            VStack(spacing: 4) {
+                                Image(nsImage: nsImage)
+                                    .resizable()
+                                    .scaledToFit()
+                                    .frame(maxHeight: 80)
+                                    .clipShape(RoundedRectangle(cornerRadius: 6))
+                                    .overlay(
+                                        RoundedRectangle(cornerRadius: 6)
+                                            .stroke(Color.secondary.opacity(0.4), lineWidth: 1)
+                                    )
 
-                Button {
-                    self.imageData = nil
-                    persistDraft()
-                } label: {
-                    Label("Remove", systemImage: "xmark.circle")
+                                Button {
+                                    guard imageDatas.indices.contains(index) else { return }
+                                    imageDatas.remove(at: index)
+                                    persistDraft()
+                                } label: {
+                                    Label("Remove", systemImage: "xmark.circle")
+                                        .labelStyle(.iconOnly)
+                                }
+                                .buttonStyle(.borderless)
+                                .help("Remove this staged image")
+                            }
+                        }
+                    }
                 }
-                .help("Remove the staged image")
-
-                Spacer()
+                .padding(.vertical, 2)
             }
         }
     }
@@ -307,13 +325,13 @@ struct NewPlanModal: View {
             execute = draft.execute
             elaborate = draft.elaborate
             deep = draft.deep
-            imageData = draft.imageData
+            imageDatas = draft.imageDatas
         } else {
             text = ""
             execute = false
             elaborate = false
             deep = false
-            imageData = nil
+            imageDatas = []
         }
         // Clear the guard on the next runloop tick, after the field `.onChange`
         // notifications from the assignments above have drained.
@@ -336,7 +354,7 @@ struct NewPlanModal: View {
                 execute: execute,
                 elaborate: elaborate,
                 deep: deep,
-                imageData: imageData
+                imageDatas: imageDatas
             ),
             for: projectPath
         )
@@ -348,7 +366,7 @@ struct NewPlanModal: View {
         execute = false
         elaborate = false
         deep = false
-        imageData = nil
+        imageDatas = []
         store.clearDraft(for: projectPath)
     }
 
@@ -368,19 +386,22 @@ struct NewPlanModal: View {
             store.projects.first { $0.projectPath == projectPath }?.tasks.map(\.id) ?? []
         )
 
-        // If an image is staged, persist its PNG bytes under Application Support
-        // (NEVER `.plans/`, §2) and append a markdown reference to the description.
-        // A save failure is logged and falls back to the plain trimmed
-        // description — it must never crash or block the capture.
-        var description = trimmed
-        if let imageData {
+        // If any images are staged, persist each one's PNG bytes under
+        // Application Support (NEVER `.plans/`, §2), collect the saved URLs in
+        // staging order, then append all markdown references to the description in
+        // ONE call to the multi-URL flatten helper (#069). A per-image save
+        // failure is logged and skipped — it must never crash or block the
+        // capture, so the surviving images still get referenced.
+        let imageStore = CaptureImageStore()
+        var savedURLs: [URL] = []
+        for imageData in imageDatas {
             do {
-                let imageURL = try CaptureImageStore().saveImage(imageData)
-                description = CaptureImageStore.flattenDescription(trimmed, imageURL: imageURL)
+                savedURLs.append(try imageStore.saveImage(imageData))
             } catch {
-                modalLog.error("modal Capture: failed to save staged image, capturing plain description: \(error.localizedDescription, privacy: .public)")
+                modalLog.error("modal Capture: failed to save staged image, skipping it: \(error.localizedDescription, privacy: .public)")
             }
         }
+        let description = CaptureImageStore.flattenDescription(trimmed, imageURLs: savedURLs)
 
         runner.capture(
             projectPath: projectPath,
@@ -390,9 +411,9 @@ struct NewPlanModal: View {
             deep: deep,
             knownTaskIDs: knownTaskIDs
         )
-        // Reset the staged image and drop the saved draft BEFORE closing so a
+        // Reset the staged images and drop the saved draft BEFORE closing so a
         // reopen can never restore the just-submitted draft (#064).
-        imageData = nil
+        imageDatas = []
         store.clearDraft(for: projectPath)
         // `dismiss()` is harmless belt-and-suspenders; `onClose()` — which nils
         // the presenting `.sheet(item:)` binding — is the authoritative dismissal
@@ -558,8 +579,9 @@ final class PlanNSTextView: NSTextView {
     /// through to `super` (which would insert an attachment glyph into the text).
     @discardableResult
     func captureImage(from pasteboard: NSPasteboard) -> Bool {
-        guard let data = Self.pngData(from: pasteboard) else { return false }
-        onImagePasted?(data)
+        let datas = Self.pngDatas(from: pasteboard)
+        guard !datas.isEmpty else { return false }
+        for data in datas { onImagePasted?(data) }
         return true
     }
 
@@ -622,33 +644,59 @@ final class PlanNSTextView: NSTextView {
     }
 
     /// Extracts PNG `Data` from `pasteboard`, or nil when no image is present.
-    /// Prefers a direct `.png`; otherwise re-encodes `.tiff` bitmap data (and, as
-    /// a fallback, an image file URL) into PNG via `NSBitmapImageRep`.
+    /// The single-image façade over `pngDatas(from:)`; keeps every existing
+    /// caller (`hasImage`, single-image tests) working unchanged.
     static func pngData(from pasteboard: NSPasteboard) -> Data? {
-        if let png = pasteboard.data(forType: .png) {
-            return png
+        pngDatas(from: pasteboard).first
+    }
+
+    /// Extracts EVERY image on `pasteboard` as PNG `Data`, so a single paste/drop
+    /// carrying multiple images stages all of them. Returns `[]` when no image is
+    /// present.
+    ///
+    /// Preserves the same source PRIORITY ORDER as the single-image path:
+    /// raw `.png` → `.tiff` → `NSImage` objects → file URLs. The raw `.png`/`.tiff`
+    /// branches describe a single blob and so return a one-element array; only the
+    /// object/URL branches can carry more than one image.
+    static func pngDatas(from pasteboard: NSPasteboard) -> [Data] {
+        // The raw `.png`/`.tiff` single-blob branches only describe the FIRST
+        // pasteboard item, so take them only when there is a single item. When
+        // several items each carry an image (e.g. multiple NSImage objects
+        // written together), skip straight to the object branches, which see all
+        // of them — otherwise `data(forType:)` would collapse the drop to one.
+        let itemCount = pasteboard.pasteboardItems?.count ?? 1
+        if itemCount <= 1 {
+            if let png = pasteboard.data(forType: .png) {
+                return [png]
+            }
+            if let tiff = pasteboard.data(forType: .tiff),
+               let rep = NSBitmapImageRep(data: tiff),
+               let png = rep.representation(using: .png, properties: [:]) {
+                return [png]
+            }
         }
-        if let tiff = pasteboard.data(forType: .tiff),
-           let rep = NSBitmapImageRep(data: tiff) {
-            return rep.representation(using: .png, properties: [:])
-        }
-        // Many sources (screenshots, browsers, Preview) put an NSImage object on
+        // Many sources (screenshots, browsers, Preview) put NSImage objects on
         // the pasteboard with no raw .png/.tiff readable via data(forType:).
-        // Read it as an object and re-encode. Prefer this over the file URL so
-        // in-memory images win.
-        if let image = pasteboard.readObjects(forClasses: [NSImage.self], options: nil)?.first as? NSImage,
-           let tiff = image.tiffRepresentation,
-           let rep = NSBitmapImageRep(data: tiff) {
-            return rep.representation(using: .png, properties: [:])
+        // Map EVERY image to a PNG. Prefer this over file URLs so in-memory
+        // images win.
+        if let images = pasteboard.readObjects(forClasses: [NSImage.self], options: nil) as? [NSImage] {
+            let pngs = images.compactMap { image -> Data? in
+                guard let tiff = image.tiffRepresentation,
+                      let rep = NSBitmapImageRep(data: tiff) else { return nil }
+                return rep.representation(using: .png, properties: [:])
+            }
+            if !pngs.isEmpty { return pngs }
         }
-        // A dragged image file: read its bytes and re-encode to PNG.
-        if let urls = pasteboard.readObjects(forClasses: [NSURL.self], options: nil) as? [URL],
-           let url = urls.first,
-           let fileData = try? Data(contentsOf: url),
-           let rep = NSBitmapImageRep(data: fileData) {
-            return rep.representation(using: .png, properties: [:])
+        // Dragged image files: read each one's bytes and re-encode to PNG,
+        // dropping any that are unreadable or not decodable as an image.
+        if let urls = pasteboard.readObjects(forClasses: [NSURL.self], options: nil) as? [URL] {
+            return urls.compactMap { url -> Data? in
+                guard let fileData = try? Data(contentsOf: url),
+                      let rep = NSBitmapImageRep(data: fileData) else { return nil }
+                return rep.representation(using: .png, properties: [:])
+            }
         }
-        return nil
+        return []
     }
 }
 
