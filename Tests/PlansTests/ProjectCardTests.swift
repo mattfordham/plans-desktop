@@ -212,4 +212,67 @@ final class ProjectCardTests: XCTestCase {
             )
         }
     }
+    // MARK: - rowColumns (row-owned band, #068 review fix)
+
+    /// #068 review: the zebra/hover band must be ONE rectangle spanning the full
+    /// row. A `.background` on a `GridRow` cannot do that — `GridRow` is a layout
+    /// declaration, so the modifier is propagated to each CELL and every cell's
+    /// backdrop tracks its own CONTENT rather than its allotted column width.
+    /// A short `[bug]` badge in a column sized for `[refactor]` therefore left a
+    /// wide unpainted channel, and a sparse action cell left the row's right edge
+    /// untinted. The row is now a real view (an `HStack`) that owns one
+    /// background, with the former Grid column auto-sizing replaced by pinned
+    /// widths so the id / [type] / title columns keep a consistent left edge.
+
+    /// The type column is pinned wide enough for the widest label (`[refactor]`),
+    /// so every row's badge occupies the same column width and the band behind it
+    /// is continuous regardless of which type a row carries.
+    func testTypeColumnFitsWidestLabel() {
+        let widest = TaskType.allCases.map(\.label.count).max() ?? 0
+        XCTAssertEqual(
+            TaskType.refactor.label.count, widest,
+            "[refactor] is expected to be the widest type label"
+        )
+        XCTAssertGreaterThanOrEqual(
+            ProjectCard.rowColumns.typeWidth,
+            CGFloat(widest + 2) * ProjectCard.rowColumns.monospaceCharacterWidth,
+            "Type column must fit the widest label plus its surrounding brackets"
+        )
+    }
+
+    /// The status and id columns are pinned too, so all three leading columns
+    /// align across rows exactly as the Grid used to make them.
+    func testLeadingColumnsArePinned() {
+        XCTAssertGreaterThan(ProjectCard.rowColumns.statusWidth, 0)
+        XCTAssertGreaterThan(ProjectCard.rowColumns.idWidth, 0)
+    }
+
+    /// The gap between columns is real and positive, but it is spacing INSIDE the
+    /// row's single background, so it never punches a hole through the band.
+    func testColumnGapIsPositiveAndInsideTheBand() {
+        XCTAssertGreaterThan(
+            ProjectCard.rowColumns.columnGap, 0,
+            "Columns must be visually separated"
+        )
+    }
+
+    /// The row band spans the full width: the title column flexes to absorb all
+    /// remaining space, so the background reaches the row's trailing edge even
+    /// when a row has few or no action glyphs.
+    func testTitleColumnFlexesSoBandReachesTrailingEdge() {
+        XCTAssertEqual(
+            ProjectCard.rowColumns.titleMaxWidth, .infinity,
+            "Title column must flex so the row band spans full width"
+        )
+    }
+
+    /// The band is inset from the row's content on BOTH edges, so the tint
+    /// breathes past the leading status glyph and the trailing action glyph
+    /// instead of stopping flush against them.
+    func testBandHasHorizontalPaddingOnBothEdges() {
+        XCTAssertGreaterThan(
+            ProjectCard.rowColumns.rowHorizontalPadding, 0,
+            "The band must extend past the row content on the leading/trailing edges"
+        )
+    }
 }

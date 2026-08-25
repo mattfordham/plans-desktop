@@ -172,10 +172,12 @@ struct ProjectCard: View {
     /// `planRow` so the view and the tested decision cannot drift apart.
     static let titleSizing = TitleSizing()
 
-    /// #063: a `planRow` GridRow always emits exactly these five cells —
-    /// status icon / id / [type] / title / actions — so the enclosing `Grid`
-    /// aligns them into columns (a table look). Pinned as a constant so the
-    /// per-row cell-count invariant is assertable without rendering the view.
+    /// #063: a `planRow` always emits exactly these five columns — status icon
+    /// / id / [type] / title / actions — aligned across rows into a table look.
+    /// (#068 review: the row became an `HStack` with pinned `rowColumns` widths
+    /// rather than a `GridRow`, but the five-column invariant is unchanged.)
+    /// Pinned as a constant so the per-row column-count invariant is assertable
+    /// without rendering the view.
     static let planRowCellCount = 5
 
     /// #068: the very subtle zebra-stripe + hover-shift styling for plan-table
@@ -205,6 +207,49 @@ struct ProjectCard: View {
     /// The single source of truth for plan-row zebra + hover opacities, consumed
     /// by `planRow` so the view and the tested decision cannot drift apart.
     static let rowStyling = RowStyling()
+
+    /// #068 review: pinned column widths for a plan row.
+    ///
+    /// The rows were originally a `Grid`, which auto-sized each column to the
+    /// widest cell across all rows. That gave the table look but made a
+    /// continuous row background impossible: `GridRow` is a layout declaration,
+    /// so a `.background` written on it is propagated to each CELL, and every
+    /// cell's backdrop tracks its own CONTENT rather than its allotted column
+    /// width. A short `[bug]` badge sitting in a column sized for `[refactor]`
+    /// left a wide unpainted channel, and a row with few action glyphs left its
+    /// right edge untinted.
+    ///
+    /// So each row is now a real `HStack` view that owns ONE background, and the
+    /// column alignment the Grid used to provide is reproduced with these pinned
+    /// widths. They are a pure value so the layout decision stays unit-testable
+    /// without rendering (mirrors `titleSizing` / `rowStyling`).
+    struct RowColumns {
+        /// Width of one character in the row's monospaced font (`.body`), used to
+        /// size the id / type columns from their known character counts.
+        var monospaceCharacterWidth: CGFloat = 8
+        /// The leading status-glyph column (unchanged from the Grid layout).
+        var statusWidth: CGFloat = 20
+        /// The id column — plan ids are short numeric strings; 4 characters plus
+        /// slack covers every id the parser produces.
+        var idWidth: CGFloat = 40
+        /// The `[type]` column, pinned to fit the widest label (`[refactor]` —
+        /// 8 characters plus 2 brackets) so every badge occupies the same width.
+        var typeWidth: CGFloat = 10 * 8
+        /// The title column flexes, absorbing all remaining width so the row's
+        /// single background reaches the trailing edge on every row.
+        var titleMaxWidth: CGFloat = .infinity
+        /// Spacing between columns. This is `HStack` spacing INSIDE the row's
+        /// background, so it separates columns without breaking the band.
+        var columnGap: CGFloat = 8
+        /// Horizontal inset applied INSIDE the row's background, so the band
+        /// extends past the leading status glyph and the trailing action glyph
+        /// rather than stopping flush against them.
+        var rowHorizontalPadding: CGFloat = 8
+    }
+
+    /// The single source of truth for plan-row column widths, consumed by
+    /// `planRow` so the view and the tested decision cannot drift apart.
+    static let rowColumns = RowColumns()
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -489,20 +534,23 @@ struct ProjectCard: View {
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
         } else {
-            // A `Grid` (not a VStack of HStacks) so every column auto-sizes to
-            // the widest cell ACROSS ALL ROWS — that gives the id / [type] /
-            // title columns a consistent left edge on every row (a table look).
-            // `.center` vertical alignment centers each GridRow's cells against
-            // one another, so the leading status icon sits vertically centered
-            // with the row text. (A baseline alignment would pin the icon to the
-            // text baseline near the bottom of the glyphs, leaving the circle low;
-            // `.center` is the correct primitive for centering the icon with text.)
+            // #068 review: a `VStack` of `HStack` rows, NOT a `Grid`.
             //
-            // `horizontalSpacing: 0` (the inter-column gap is recreated via
-            // per-cell trailing padding instead): with zero Grid spacing the
-            // row's single highlight `.background` is one continuous region with
-            // no gaps for it to break across — see `planRow`.
-            Grid(alignment: Alignment(horizontal: .leading, vertical: .center), horizontalSpacing: 0, verticalSpacing: 2) {
+            // The Grid auto-sized each column to the widest cell across all rows,
+            // which gave the table look — but it made a continuous row background
+            // impossible. `GridRow` is a layout declaration, so a `.background`
+            // written on it is propagated to each CELL, and each cell's backdrop
+            // tracks its own CONTENT rather than its allotted column width: a
+            // short `[bug]` badge in a column sized for `[refactor]` left a wide
+            // unpainted channel, and a row with few action glyphs left the row's
+            // right edge untinted.
+            //
+            // Each row is now a real view that owns ONE background spanning the
+            // full row, and the Grid's cross-row column alignment is reproduced by
+            // the pinned widths in `ProjectCard.rowColumns`. `spacing: 2` matches
+            // the Grid's former `verticalSpacing`, so adjacent stripes still abut
+            // into continuous zebra bands.
+            VStack(spacing: 2) {
                 // #068: index-aware so each row knows its parity for the zebra
                 // stripe. Keyed on `\.element.id` (NOT `\.offset`) so a row's
                 // SwiftUI identity remains its `TaskRow.ID` — reordering/removing
@@ -519,16 +567,17 @@ struct ProjectCard: View {
     /// and the title. The whole row is the tap target — tapping opens the plan's
     /// detail in a separate window (`openWindow(id:value:)`, §011).
     ///
-    /// Implementation notes (chosen to keep Grid's cross-row column sizing
-    /// intact — wrapping the row in a Button would defeat that):
+    /// Implementation notes (#068 review: the row is an `HStack` with pinned
+    /// `rowColumns` widths rather than a `GridRow` in a `Grid`, so it can own one
+    /// continuous background — wrapping the row in a Button would defeat that):
     ///
-    /// - The `[type]` cell is ALWAYS emitted (an empty monospaced `Text` when
+    /// - The `[type]` column is ALWAYS emitted (an empty monospaced `Text` when
     ///   `row.type` is nil) so column 3 exists in every row and stays aligned.
-    /// - The hit-test shape and tap gesture are applied ONCE to the whole
-    ///   `GridRow` (not per cell), so the entire row is a single tap target. With
-    ///   the enclosing `Grid` at `horizontalSpacing: 0`, the inter-column gap is
-    ///   recreated with per-cell `.padding(.trailing, 8)` on columns 1–3.
-    /// - `.padding(.vertical, 5)` on the GridRow sets the row's height/tap area.
+    /// - The hit-test shape and tap gesture are applied per column (see
+    ///   `OpenDetailOnTap`), leaving the trailing action button its own hit
+    ///   target. The inter-column gap is the `HStack`'s own `columnGap` spacing,
+    ///   which sits inside the row's background and so never breaks the band.
+    /// - `.padding(.vertical, 5)` on the row sets its height/tap area.
     ///   We deliberately do NOT use `.frame(maxHeight: .infinity)` here: that makes
     ///   each row a greedy vertical slack-absorber, so when LazyVGrid hands the card
     ///   a taller cell the rows expand and distribute the extra height (drifting
@@ -543,27 +592,31 @@ struct ProjectCard: View {
         let isEven = index.isMultiple(of: 2)
         let isHovered = hoveredRowID == row.task.id
 
-        GridRow {
+        // #068 review: an `HStack` (not a `GridRow`) so the row is a real view
+        // that can own ONE background spanning its full width. Column alignment
+        // across rows comes from the pinned `ProjectCard.rowColumns` widths.
+        HStack(spacing: ProjectCard.rowColumns.columnGap) {
             Image(systemName: indicator.symbolName)
                 .imageScale(.large)
                 .foregroundStyle(indicator.color)
-                .frame(width: 20, alignment: .center)
-                .padding(.trailing, 8)
+                .frame(width: ProjectCard.rowColumns.statusWidth, alignment: .center)
                 .modifier(OpenDetailOnTap(row: row, openWindow: openWindow))
 
             Text(row.task.id)
                 .font(.system(.body, design: .monospaced))
                 .foregroundStyle(.secondary)
-                .padding(.trailing, 8)
+                .frame(width: ProjectCard.rowColumns.idWidth, alignment: .leading)
                 .modifier(OpenDetailOnTap(row: row, openWindow: openWindow))
 
-            // Always-present cell (empty string when no type) so column 3 stays
-            // aligned across every row. A kept-worktree task (executed with the
-            // `keep` keyword) appends a muted house glyph after the type badge —
-            // the desktop analogue of the plans-cc dashboard TUI's `⌂ kept`
-            // marker. Only review-state tasks carry a live worktree, so it
-            // appears only there; the icon has a `help` tooltip since it renders
-            // label-free.
+            // Always-present cell (empty string when no type) so the title column
+            // starts at the same x on every row. A kept-worktree task (executed
+            // with the `keep` keyword) appends a muted house glyph after the type
+            // badge — the desktop analogue of the plans-cc dashboard TUI's
+            // `⌂ kept` marker. Only review-state tasks carry a live worktree, so
+            // it appears only there; the icon has a `help` tooltip since it
+            // renders label-free. The pinned width fits the widest label
+            // (`[refactor]`), so a short badge no longer leaves the row's
+            // background with an unpainted channel beside it.
             HStack(spacing: 4) {
                 Text(typeText)
                     .font(.system(.body, design: .monospaced))
@@ -575,30 +628,24 @@ struct ProjectCard: View {
                         .help("Kept in worktree — reviewable in isolation")
                 }
             }
-            .padding(.trailing, 8)
+            .frame(width: ProjectCard.rowColumns.typeWidth, alignment: .leading)
             .modifier(OpenDetailOnTap(row: row, openWindow: openWindow))
 
             // The title is the row's flexible column: it claims the width left
-            // after the fixed status/id/type cells and wraps only when that runs
-            // out. #063: the sizing is deterministic and no longer negotiated via
-            // a magic ideal width. The old approach pinned `idealWidth:
-            // 1_000_000` to win the Grid's flexible-column sizing, but under a
-            // wide card holding a single short row the Grid couldn't satisfy that
-            // absurd ideal — its negotiation degraded, the title collapsed to a
-            // sliver, and the row reflowed into a duplicated two-column look.
-            //
-            // Instead the title carries NO ideal width and simply stretches to
-            // `maxWidth: .infinity`, and a bounded `lineLimit(2)` + tail
-            // truncation guarantees a long title wraps at most twice and then
-            // truncates rather than forcing the column to a sliver. The sizing
-            // decision lives in the pure `ProjectCard.titleSizing` helper so the
-            // view and its unit test share one source of truth.
+            // after the pinned status/id/type columns and wraps only when that
+            // runs out. #063: the sizing is deterministic and never negotiated via
+            // a magic ideal width — the old `idealWidth: 1_000_000` hack degraded
+            // under a wide card holding a single short row, collapsing the title
+            // to a sliver. The title carries NO ideal width and simply stretches
+            // to `maxWidth: .infinity`, with a bounded `lineLimit(2)` + tail
+            // truncation so a long title wraps at most twice and then truncates.
+            // The sizing decision lives in the pure `ProjectCard.titleSizing`
+            // helper so the view and its unit test share one source of truth.
             Text(row.title ?? "(untitled)")
                 .font(.body)
                 .lineLimit(ProjectCard.titleSizing.lineLimit)
                 .truncationMode(ProjectCard.titleSizing.truncationMode)
                 .fixedSize(horizontal: false, vertical: true)
-                .gridColumnAlignment(.leading)
                 .frame(maxWidth: ProjectCard.titleSizing.maxWidth, alignment: .leading)
                 .modifier(OpenDetailOnTap(row: row, openWindow: openWindow))
 
@@ -608,24 +655,27 @@ struct ProjectCard: View {
             // (which lives on the content cells above) so the control's own tap is
             // never swallowed by a row-level gesture.
             rowActions(row)
-                .gridColumnAlignment(.trailing)
         }
         // `.padding(.vertical, 5)` sets the row's height/tap area. The open-detail
-        // tap gesture is applied per content cell (see `OpenDetailOnTap`) rather
-        // than once to the whole row, so the trailing action button keeps its own
-        // independent hit target. No `.frame(maxHeight: .infinity)` so rows stay
-        // content-sized and top-anchored (see the height note above).
+        // tap gesture is applied per column (see `OpenDetailOnTap`) rather than
+        // once to the whole row, so the trailing action button keeps its own
+        // independent hit target.
         .padding(.vertical, 5)
-        // #068: one continuous very-subtle zebra + hover background for the whole
-        // row. Placed AFTER `.padding(.vertical, 5)` so the tint fills the full
-        // padded row region (content + its vertical padding); with the enclosing
-        // Grid at `horizontalSpacing: 0` it is one gapless region horizontally,
-        // and adjacent striped rows abut across the Grid's small `verticalSpacing`
-        // so the zebra reads as continuous bands. It sits BEHIND the cells and
-        // carries no gesture, leaving the per-cell `OpenDetailOnTap` seams and the
-        // trailing action button's own hit target untouched. `.onHover` tracks the
-        // single hovered row id; `.animation` eases the stripe/hover crossfade
-        // (mirrors `RowActionGlyph`'s hover timing).
+        // #068 review: horizontal inset applied BEFORE the background, so the
+        // band extends past the row's content on both edges instead of stopping
+        // flush against the leading status glyph and the trailing action glyph.
+        .padding(.horizontal, ProjectCard.rowColumns.rowHorizontalPadding)
+        // #068: ONE very-subtle zebra + hover band for the whole row. Because the
+        // row is an `HStack` (a real view) rather than a `GridRow`, this is a
+        // single rectangle covering the full row — content plus its vertical
+        // padding, edge to edge — instead of a set of per-cell backdrops that
+        // followed each cell's own content. Adjacent striped rows abut across the
+        // enclosing `VStack(spacing: 2)` so the zebra reads as continuous bands.
+        // The tint sits BEHIND the content and carries no gesture, leaving the
+        // per-column `OpenDetailOnTap` seams and the trailing action button's own
+        // hit target untouched. `.onHover` tracks the single hovered row id;
+        // `.animation` eases the stripe/hover crossfade (mirrors
+        // `RowActionGlyph`'s hover timing).
         .background(
             Color.primary.opacity(
                 ProjectCard.rowStyling.backgroundOpacity(isEven: isEven, isHovered: isHovered)
