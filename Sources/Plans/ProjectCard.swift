@@ -225,8 +225,12 @@ struct ProjectCard: View {
     /// without rendering (mirrors `titleSizing` / `rowStyling`).
     struct RowColumns {
         /// Width of one character in the row's monospaced font (`.body`), used to
-        /// size the id / type columns from their known character counts.
-        var monospaceCharacterWidth: CGFloat = 8
+        /// size the id / type columns from their known character counts. The
+        /// measured advance of the 13pt monospaced system face is ~8.04pt, so 8
+        /// UNDER-states it: `[refactor]` came out 0.36pt wider than its pinned
+        /// 80pt column and SwiftUI wrapped the badge onto a second line. Rounded
+        /// up to 8.5 so the derived widths always have slack.
+        var monospaceCharacterWidth: CGFloat = 8.5
         /// The leading status-glyph column (unchanged from the Grid layout).
         var statusWidth: CGFloat = 20
         /// The id column — plan ids are short numeric strings; 4 characters plus
@@ -234,7 +238,7 @@ struct ProjectCard: View {
         var idWidth: CGFloat = 40
         /// The `[type]` column, pinned to fit the widest label (`[refactor]` —
         /// 8 characters plus 2 brackets) so every badge occupies the same width.
-        var typeWidth: CGFloat = 10 * 8
+        var typeWidth: CGFloat = 10 * 8.5
         /// The title column flexes, absorbing all remaining width so the row's
         /// single background reaches the trailing edge on every row.
         var titleMaxWidth: CGFloat = .infinity
@@ -621,6 +625,11 @@ struct ProjectCard: View {
                 Text(typeText)
                     .font(.system(.body, design: .monospaced))
                     .foregroundStyle(.tertiary)
+                    // The badge is a fixed short token; it must never wrap or
+                    // truncate even if the pinned column is a hair too narrow
+                    // for the rendered face (see `monospaceCharacterWidth`).
+                    .lineLimit(1)
+                    .fixedSize(horizontal: true, vertical: false)
                 if row.task.isKeptWorktree {
                     Image(systemName: TaskStatusIndicator.keptWorktreeSymbol)
                         .imageScale(.small)

@@ -1,3 +1,4 @@
+import AppKit
 import XCTest
 @testable import Plans
 
@@ -237,6 +238,29 @@ final class ProjectCardTests: XCTestCase {
             ProjectCard.rowColumns.typeWidth,
             CGFloat(widest + 2) * ProjectCard.rowColumns.monospaceCharacterWidth,
             "Type column must fit the widest label plus its surrounding brackets"
+        )
+    }
+
+    /// The nominal `monospaceCharacterWidth` must not UNDER-state the real
+    /// advance width of the `.body` monospaced face the row actually renders in.
+    /// It did (8.0 assumed vs ~8.4 measured at the 13pt system body size), so
+    /// `[refactor]` overflowed its pinned column by a fraction of a character and
+    /// SwiftUI wrapped it onto a second line — visibly breaking the badge as
+    /// `[refactor` / `]` and making that row taller than its neighbours.
+    func testTypeColumnFitsMeasuredWidestLabel() {
+        let font = NSFont.monospacedSystemFont(
+            ofSize: NSFont.preferredFont(forTextStyle: .body).pointSize,
+            weight: .regular
+        )
+        let widest = "[\(TaskType.refactor.label)]"
+        let measured = (widest as NSString)
+            .size(withAttributes: [.font: font])
+            .width
+
+        XCTAssertGreaterThanOrEqual(
+            ProjectCard.rowColumns.typeWidth, measured,
+            "Type column must fit the MEASURED width of [refactor], not an "
+                + "under-estimated nominal character width, or the badge wraps"
         )
     }
 
