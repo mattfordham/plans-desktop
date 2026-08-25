@@ -72,6 +72,16 @@ struct NewPlanModal: View {
     /// mid-swap). Set true around the swap.
     @State private var isSwitchingProject = false
 
+    /// Guards the submit turn against a stale-draft resurrection (#070). `submit()`
+    /// clears the saved draft, but its `imageDatas = []` (and `text = ""`) fire the
+    /// field `.onChange` handlers → `persistDraft()`, which — if unguarded — would
+    /// re-arm a debounced write AFTER the `clearDraft`, carrying the just-submitted
+    /// text. `.onDisappear`'s `flushPendingDraft()` would then commit that re-armed
+    /// draft, so the next open restored stale text. Set true for the submit turn so
+    /// no `.onChange`-driven persist can re-create the draft; reset on the next
+    /// runloop tick (mirrors `isSwitchingProject`).
+    @State private var isSubmitting = false
+
     /// A local snapshot of the staleness-ordered project list driving the picker
     /// (#036). The body must NOT read `store.projects` directly: the store
     /// reassigns `projects` on every 5s poll, which would invalidate this view —
@@ -347,7 +357,7 @@ struct NewPlanModal: View {
     /// pending write: `submit`/`clear` via their `setDraft`/`clearDraft` calls,
     /// project switch and dismissal via `flushPendingDraft`.
     private func persistDraft() {
-        guard !isSwitchingProject else { return }
+        guard !isSwitchingProject && !isSubmitting else { return }
         store.setDraftDebounced(
             PlansStore.CaptureDraft(
                 text: text,
@@ -377,6 +387,12 @@ struct NewPlanModal: View {
     private func submit() {
         let trimmed = trimmedText
         guard !trimmed.isEmpty else { return }
+        // Suppress `.onChange`-driven persistence for the whole submit turn (#070):
+        // the field resets below (`text = ""`, `imageDatas = []`) fire persistDraft,
+        // which would otherwise re-arm a debounced write AFTER clearDraft and let
+        // `.onDisappear`'s flush resurrect the just-submitted draft. Cleared on the
+        // next runloop tick (mirrors `isSwitchingProject`).
+        isSubmitting = true
         modalLog.notice("modal Capture submitted: project=\(self.projectPath, privacy: .public) execute=\(self.execute) elaborate=\(self.elaborate) deep=\(self.deep)")
         // Snapshot the project's CURRENT task ids as the reconciliation baseline,
         // so the run-finish hand-off (#051) can detect the genuinely-new id once
@@ -411,8 +427,12 @@ struct NewPlanModal: View {
             deep: deep,
             knownTaskIDs: knownTaskIDs
         )
-        // Reset the staged images and drop the saved draft BEFORE closing so a
-        // reopen can never restore the just-submitted draft (#064).
+        // Reset the editor and staged images and drop the saved draft BEFORE closing
+        // so a reopen can never restore the just-submitted draft (#064, #070).
+        // `text = ""` clears the editor @State first; the `.onChange` persist these
+        // resets trigger is suppressed by `isSubmitting` (set above), so nothing
+        // re-arms a debounced write after the `clearDraft` below.
+        text = ""
         imageDatas = []
         store.clearDraft(for: projectPath)
         // `dismiss()` is harmless belt-and-suspenders; `onClose()` — which nils
@@ -420,6 +440,10 @@ struct NewPlanModal: View {
         // and the FINAL mutation of the turn.
         dismiss()
         onClose()
+        // Clear the submit guard on the next runloop tick, after the field
+        // `.onChange` notifications from the resets above have drained — so a
+        // subsequent reopen persists normally (mirrors `isSwitchingProject`).
+        DispatchQueue.main.async { isSubmitting = false }
     }
 }
 

@@ -210,6 +210,52 @@ final class NewPlanDraftPersistenceTests: XCTestCase {
         XCTAssertEqual(restored.text, "authoritative")
     }
 
+    /// Regression for #070: the New Plan sheet "remembers old text after
+    /// submission". The view-level defect is that `submit()` clears the draft, but
+    /// its `imageData = nil` fires `.onChange(of: imageData) → persistDraft()` on a
+    /// LATER runloop turn — AFTER `clearDraft` already ran — re-arming a debounced
+    /// write that still carries the old text. The sheet's `.onDisappear` then
+    /// `flushPendingDraft()`s, committing that re-armed draft back into the store,
+    /// so the next `loadDraft(for:)` restores stale text.
+    ///
+    /// This pins the store contract the view fix relies on: once a debounced write
+    /// is re-armed AFTER `clearDraft`, a `flushPendingDraft()` DOES resurrect it —
+    /// so the invariant the view guard must uphold is "do not re-arm a debounced
+    /// write during the submit turn". The store itself has no way to distinguish a
+    /// legitimate post-clear keystroke from the accidental submit-turn re-arm, so
+    /// this test documents the resurrection as EXPECTED store behavior; the fix
+    /// lives in `NewPlanModal` (the `isSubmitting` guard).
+    func testFlushResurrectsDraftReArmedAfterClear() throws {
+        let reader = try makeReader(projectPaths: [])
+        let defaults = makeDefaults()
+        let store = PlansStore(registryReader: reader, defaults: defaults)
+
+        // 1. A debounced write for the draft the user is submitting.
+        store.setDraftDebounced(
+            PlansStore.CaptureDraft(text: "submitted text", execute: false, elaborate: false),
+            for: "/proj",
+            interval: 5.0
+        )
+        // 2. submit() drops the saved draft (cancels the pending write).
+        store.clearDraft(for: "/proj")
+        // 3. The accidental `.onChange`-driven re-arm on a later turn, still
+        //    carrying the old text (this is exactly what the view guard suppresses).
+        store.setDraftDebounced(
+            PlansStore.CaptureDraft(text: "submitted text", execute: false, elaborate: false),
+            for: "/proj",
+            interval: 5.0
+        )
+        // 4. `.onDisappear` flushes the pending write.
+        store.flushPendingDraft()
+
+        // With the re-arm present, the store resurrects the stale draft — this is
+        // the resurrection #070 must prevent AT THE VIEW LAYER. If a future store
+        // change made the re-arm impossible to observe, this would be nil.
+        XCTAssertEqual(store.draft(for: "/proj")?.text, "submitted text")
+        let reloaded = PlansStore(registryReader: reader, defaults: defaults)
+        XCTAssertEqual(reloaded.draft(for: "/proj")?.text, "submitted text")
+    }
+
     // MARK: - Deep toggle Codable round-trip (#065)
 
     /// A draft with `deep: true` encodes and decodes back with the flag
