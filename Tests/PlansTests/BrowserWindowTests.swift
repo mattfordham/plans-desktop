@@ -783,6 +783,51 @@ final class BrowserWindowTests: XCTestCase {
         XCTAssertEqual(result, [400, 400])
     }
 
+    // MARK: - isFocusedSingleCard (#071: the full-height focused-card case)
+    //
+    // Focus mode (#067) collapses the grid to a single project's card. #071 makes
+    // that lone card stretch to fill the whole viewport height. `isFocusedSingleCard`
+    // is the pure predicate that decides whether the dedicated full-height render
+    // path applies: it must be TRUE only when a project is focused (non-nil path)
+    // AND exactly one card is being rendered, and FALSE otherwise.
+
+    /// A focused path with exactly one rendered card IS the full-height case.
+    func testIsFocusedSingleCardTrueWhenFocusedAndOneCard() {
+        XCTAssertTrue(
+            BrowserWindow.isFocusedSingleCard(focusedProjectPath: "/p", cardCount: 1)
+        )
+    }
+
+    /// No focus (nil path) is never the full-height case, even with one card (e.g.
+    /// a single-project registry that isn't in focus mode scrolls normally).
+    func testIsFocusedSingleCardFalseWhenNoFocusEvenWithOneCard() {
+        XCTAssertFalse(
+            BrowserWindow.isFocusedSingleCard(focusedProjectPath: nil, cardCount: 1)
+        )
+    }
+
+    /// A focused path with more than one rendered card is not the single-card case.
+    func testIsFocusedSingleCardFalseWhenFocusedButMultipleCards() {
+        XCTAssertFalse(
+            BrowserWindow.isFocusedSingleCard(focusedProjectPath: "/p", cardCount: 2)
+        )
+    }
+
+    /// A focused path with zero rendered cards (e.g. the focused project filtered
+    /// away) is not the single-card case.
+    func testIsFocusedSingleCardFalseWhenFocusedButNoCards() {
+        XCTAssertFalse(
+            BrowserWindow.isFocusedSingleCard(focusedProjectPath: "/p", cardCount: 0)
+        )
+    }
+
+    /// No focus and no cards is likewise false.
+    func testIsFocusedSingleCardFalseWhenNoFocusAndNoCards() {
+        XCTAssertFalse(
+            BrowserWindow.isFocusedSingleCard(focusedProjectPath: nil, cardCount: 0)
+        )
+    }
+
     // MARK: - applyManualOrder (manual override ordering)
 
     /// Projects are ordered exactly as the `order` array dictates when every

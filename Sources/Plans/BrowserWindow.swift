@@ -89,6 +89,18 @@ struct BrowserWindow: View {
         max(1, min(columnCount(forWidth: width), cardCount))
     }
 
+    /// Whether the grid is in the FULL-HEIGHT focused single-card case (#071):
+    /// focus mode (#067) has collapsed the grid to exactly one rendered card, so
+    /// that lone card should stretch to fill the entire viewport height (rather
+    /// than sitting at its natural content height in the ordinary scroll/masonry
+    /// path). True only when a project is focused (`focusedProjectPath` non-nil)
+    /// AND exactly one card is being rendered; false for no focus, or any card
+    /// count other than one. Pure (no view-state reads) so it is directly
+    /// unit-testable without instantiating the view.
+    static func isFocusedSingleCard(focusedProjectPath: String?, cardCount: Int) -> Bool {
+        focusedProjectPath != nil && cardCount == 1
+    }
+
     /// Resolves the EFFECTIVE card layout for a given column count (#033). Fit-to-
     /// screen only makes sense with two or more columns: at a single column (a
     /// narrow window) cards are already full-width and stacking them with stretched
@@ -370,6 +382,18 @@ struct BrowserWindow: View {
         let effectiveMode = BrowserWindow.effectiveLayoutMode(
             store.cardLayoutMode, columnCount: columns
         )
+        // #071: resolve the effective focus the SAME defensive way `sortedProjects`
+        // does — a `focusedProjectPath` naming a project that is no longer live is
+        // treated as no focus at all — so the full-height branch only fires when a
+        // live project is actually focused.
+        let effectiveFocus = store.focusedProjectPath.flatMap { path in
+            store.projects.contains { $0.projectPath == path } ? path : nil
+        }
+        // #071: whether the grid has collapsed to a single focused card, which gets
+        // a dedicated full-viewport-height render path (`focusCardGrid`).
+        let focusedSingleCard = BrowserWindow.isFocusedSingleCard(
+            focusedProjectPath: effectiveFocus, cardCount: sortedProjects.count
+        )
         return ScrollViewReader { proxy in
             ScrollView {
                 // #039/#057: fit-to-screen mode renders UNIFORM-HEIGHT rows
@@ -380,7 +404,14 @@ struct BrowserWindow: View {
                 // the masonry `variableCardGrid` so short cards leave no gap below
                 // them. Both share the same width-driven `columns` count and the same
                 // per-card chrome via `cardCell(for:)`.
-                if effectiveMode == .fit {
+                // #071: a single focused card stretches to fill the whole viewport
+                // height via its dedicated path; otherwise the normal fit/scroll
+                // dispatch stands unchanged. The outer ScrollView (+ .basedOnSize
+                // bounce) is kept in every case so an over-tall focused card scrolls
+                // internally without empty overscroll bounce.
+                if focusedSingleCard {
+                    focusCardGrid()
+                } else if effectiveMode == .fit {
                     fitCardGrid(columns: columns)
                 } else {
                     variableCardGrid(columns: columns)
@@ -541,6 +572,52 @@ struct BrowserWindow: View {
         // #046: extra trailing inset so the rightmost cards' action buttons clear
         // the macOS overlay scroller. Applied on top of the symmetric gridPadding
         // so only the trailing edge gains the extra space.
+        .padding(.trailing, Self.scrollerClearance)
+    }
+
+    /// The full-height focused single-card grid (#071): when focus mode (#067) has
+    /// collapsed the grid to exactly one project's card, render that card stretched
+    /// to fill the whole viewport height instead of sitting at its natural content
+    /// height with dead space below. Reuses `evenRowHeights(rowCount: 1, …)` — the
+    /// same viewport-filling math the fit grid uses for a single row — as the card's
+    /// `constrainedHeight`, so an over-tall card scrolls its plan list internally
+    /// (#038) and the surrounding `ScrollView` absorbs any overflow (mirrors the fit
+    /// grid's clamp-to-floor contract). Before the viewport height is measured,
+    /// `evenRowHeights` falls back to `fitRowMinHeight` for a sensible first paint.
+    ///
+    /// Padding matches `fitCardGrid`/`variableCardGrid` (symmetric `gridPadding`
+    /// plus the trailing `scrollerClearance` so the card's action buttons clear the
+    /// overlay scroller). The container fills width AND height, top-aligned, so the
+    /// card anchors to the top when it does overflow.
+    private func focusCardGrid() -> some View {
+        // #040: snapshot `sortedProjects` ONCE (see `fitCardGrid`) so the guard and
+        // the render read the SAME array — the computed property can shrink mid-
+        // render (e.g. the focus auto-clears when its project disappears), and an
+        // unguarded first-element read would trap on an emptied snapshot.
+        let projects = sortedProjects
+        // #071: the single full-viewport-height value a focused card should occupy.
+        // `rowCount: 1` yields one height == the viewport minus its outer padding
+        // (no inter-row gutter), clamped to `fitRowMinHeight` and letting the
+        // ScrollView absorb any overflow.
+        let constrainedHeight = Self.evenRowHeights(
+            rowCount: 1,
+            viewportHeight: gridHeight,
+            spacing: Self.gridSpacing,
+            padding: Self.gridPadding,
+            minRowHeight: Self.fitRowMinHeight
+        ).first
+        return VStack(spacing: 0) {
+            // Guard for the single element: if the snapshot is unexpectedly empty
+            // (focus resolved away mid-render), render nothing gracefully.
+            if let project = projects.first {
+                cardCell(for: project, constrainedHeight: constrainedHeight)
+                    .frame(maxWidth: .infinity)
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+        .padding(Self.gridPadding)
+        // #046: match the other grids — extra trailing inset so the card's action
+        // buttons clear the macOS overlay scroller.
         .padding(.trailing, Self.scrollerClearance)
     }
 
