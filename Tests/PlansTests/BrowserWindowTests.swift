@@ -492,6 +492,19 @@ final class BrowserWindowTests: XCTestCase {
         XCTAssertNil(BrowserViewModel.resolveRow(in: twoProjectFixture(), id: "/proj1/999"))
     }
 
+    /// #073: the detail pane feeds `BrowserWindow`'s optional `detailRowID`
+    /// straight into `PlanDetailView(rowID:)`, so resolution must stay total over
+    /// EVERY id the pane can hold, including ids that go stale while the pane is
+    /// open (the store re-reads on a 5s poll and a task can complete underneath
+    /// it). Resolving against an empty project list — the worst case, every
+    /// project gone — must yield `nil` rather than trapping, so the pane falls
+    /// back to its "Plan not found" placeholder instead of crashing.
+    func testResolveRowReturnsNilWhenEveryProjectDisappears() {
+        let id = BrowserViewModel.activeRows(twoProjectFixture()[0])[0].id
+        XCTAssertNotNil(BrowserViewModel.resolveRow(in: twoProjectFixture(), id: id))
+        XCTAssertNil(BrowserViewModel.resolveRow(in: [], id: id))
+    }
+
     // MARK: - How checklist parsing (read-only render support)
 
     func testHowStepsParsesDoneAndNotDoneAndStripsPrefix() {

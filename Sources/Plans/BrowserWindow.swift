@@ -6,10 +6,13 @@ import SwiftUI
 /// first). Each card shows the project name, a per-status count summary, and its
 /// outstanding (non-completed) plan rows.
 ///
-/// Tapping a plan row opens that plan's detail in a SEPARATE WINDOW (§011, via
-/// `ProjectCard`'s `openWindow(id: "plan-detail", value:)`) rather than an
-/// inline drawer — this window has no detail pane, no `HSplitView`, and holds no
-/// selection state.
+/// Tapping a plan row opens that plan's detail as an IN-WINDOW MODAL OVERLAY
+/// PANE (#073, via `ProjectCard`'s `onOpenDetail` closure setting `detailRowID`)
+/// rather than an inline drawer or a separate window — the dashboard keeps no
+/// `HSplitView` and no selection state; `detailRowID` is the sole presentation
+/// state. The pane dismisses by clicking the scrim or pressing Esc. This
+/// replaces the former standalone per-plan detail window (§011), whose scene has
+/// been removed from `PlansApp`.
 ///
 /// The view ONLY reads from the injected `PlansStore` — it never writes,
 /// creates, moves, or deletes any `.plans/` data (§2 read-only).
@@ -65,6 +68,14 @@ struct BrowserWindow: View {
     /// `Identifiable`) so `.sheet(item:)` drives presentation and a fresh `id`
     /// re-presents even for the same project path.
     @State private var newPlanRequest: NewPlanRequest? = nil
+
+    /// #073: the plan whose detail is shown as an in-window modal overlay pane,
+    /// keyed on the tapped row's composite `TaskRow.ID`, or `nil` when no pane is
+    /// open. Set by a card row tap (threaded in via `ProjectCard`'s `onOpenDetail`
+    /// closure) and cleared by a click on the dimming scrim behind the pane.
+    /// UI-only, transient presentation state — deliberately NOT persisted to
+    /// UserDefaults, mirroring `newPlanRequest`.
+    @State private var detailRowID: TaskRow.ID? = nil
 
     /// Pure width → column-count function: fits as many `cardMinWidth` columns
     /// (plus a `gridSpacing` gutter each) into the padded content width as will
@@ -252,7 +263,7 @@ struct BrowserWindow: View {
 
     var body: some View {
         // A pure, full-width card dashboard. Tapping a plan row opens that plan's
-        // detail in a separate window (§011); this window has no detail pane.
+        // detail as a modal overlay pane over this window (#073, `detailOverlay`).
         cardGrid
             .frame(minWidth: 480, minHeight: 520)
             // #031: the shared "New Plan" modal, presented over the whole window.
@@ -271,6 +282,19 @@ struct BrowserWindow: View {
                     newPlanRequest = nil
                 }
             }
+            // #073: the plan-detail modal overlay pane. Replaces the standalone
+            // per-plan detail WINDOW: tapping a card row sets `detailRowID`, which
+            // presents `PlanDetailView` here as a dimmed in-window overlay instead
+            // of opening a separate window. Rendered inside an `.overlay` so it
+            // floats over the whole card grid without affecting its layout.
+            .overlay {
+                if detailRowID != nil {
+                    detailOverlay
+                }
+            }
+            // Animate the pane in/out with the presentation-state change so both
+            // the scrim and the pane fade/scale together.
+            .animation(.easeInOut(duration: 0.18), value: detailRowID)
             // #034: the app-wide ⌘N command (in `PlansApp`) can't reach this
             // window's `@State`, so it bumps `store.newPlanTrigger` and we open
             // the modal here — opening it IDENTICALLY to the toolbar button.
@@ -360,6 +384,55 @@ struct BrowserWindow: View {
                     .help("Toggle between scrolling and fit-to-screen card layout")
                 }
             }
+    }
+
+    // MARK: - Plan-detail modal overlay pane (#073)
+
+    /// #073: the in-window plan-detail overlay — a dimming scrim behind a large
+    /// rounded card holding `PlanDetailView`. Replaces the standalone detail
+    /// window (§011). Presented over the whole card grid via `body`'s `.overlay`
+    /// whenever `detailRowID != nil`.
+    ///
+    /// "Blur closes it": the SCRIM alone carries the click-away `onTapGesture`
+    /// that clears `detailRowID`. The pane sits ABOVE the scrim with its own
+    /// opaque background + `.contentShape(Rectangle())` so taps inside it are
+    /// absorbed by the pane and never fall through to the scrim (a tap inside the
+    /// pane must NOT dismiss). The pane carries a `.scale + .opacity` transition so
+    /// it grows/fades in with the `body`-level `.animation(value: detailRowID)`.
+    private var detailOverlay: some View {
+        ZStack {
+            // The dimming scrim: click-away dismissal lives HERE only.
+            Color.black.opacity(0.35)
+                .ignoresSafeArea()
+                .contentShape(Rectangle())
+                .onTapGesture { detailRowID = nil }
+                .transition(.opacity)
+
+            // The detail pane: an opaque rounded card, clamped to the window with
+            // generous padding so it never fills the whole surface, sized toward
+            // the removed scene's 900×600 intent but bounded by the window.
+            PlanDetailView(rowID: detailRowID)
+                .frame(maxWidth: 900, maxHeight: 600)
+                .background(.background, in: RoundedRectangle(cornerRadius: 16))
+                .clipShape(RoundedRectangle(cornerRadius: 16))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 16)
+                        .stroke(.separator, lineWidth: 1)
+                )
+                .shadow(radius: 30)
+                // Absorb taps so clicks inside the pane never reach the scrim
+                // behind it (only the scrim dismisses).
+                .contentShape(Rectangle())
+                .padding(40)
+                .transition(.scale(scale: 0.96).combined(with: .opacity))
+        }
+        // #073: keyboard dismissal — Esc closes the pane, matching the
+        // scrim's click-away. Per the task's Assumptions the pane is scrim +
+        // Esc only (no always-visible Close button). Attached on the whole
+        // overlay (scrim + pane) so it is active for the full time the pane is
+        // shown. A bare `detailRowID = nil` suffices: `body`'s
+        // `.animation(value: detailRowID)` already animates the dismissal.
+        .onExitCommand { detailRowID = nil }
     }
 
     // MARK: - Content: the recency-sorted card grid (dashboard)
@@ -743,11 +816,20 @@ struct BrowserWindow: View {
     @ViewBuilder
     private func cardCell(for project: ProjectTasks, constrainedHeight: CGFloat? = nil) -> some View {
         // #031: the card's "+" glyph opens the shared modal pre-selected to THIS
-        // card's project via this closure (a fresh `NewPlanRequest` id so
+        // card's project via `onNewPlan` (a fresh `NewPlanRequest` id so
         // `.sheet(item:)` fires).
-        ProjectCard(project: project, constrainedHeight: constrainedHeight) { path in
-            newPlanRequest = NewPlanRequest(projectPath: path)
-        }
+        // #073: a plan-row tap opens the in-window detail overlay by setting
+        // `detailRowID` via `onOpenDetail` (mirrors the `onNewPlan` plumbing).
+        ProjectCard(
+            project: project,
+            constrainedHeight: constrainedHeight,
+            onNewPlan: { path in
+                newPlanRequest = NewPlanRequest(projectPath: path)
+            },
+            onOpenDetail: { id in
+                detailRowID = id
+            }
+        )
         // #004 drill-down target: the ScrollViewReader scrolls to this id.
         .id(project.projectPath)
         // #017 drop indicator: while a card is dragged over this cell, paint a
@@ -901,8 +983,8 @@ enum BrowserViewModel {
     /// re-sort — it preserves `TaskParser`'s order — and performs no I/O or
     /// SwiftUI work.
     /// Resolves a composite row id to its `TaskRow` by scanning EVERY project's
-    /// active rows (the same cross-project lookup the browser window and the
-    /// standalone plan-detail window both need). Flattens `activeRows` over all
+    /// active rows (the same cross-project lookup the card grid and the
+    /// plan-detail overlay pane both need). Flattens `activeRows` over all
     /// projects and returns the first row whose `id` matches; `nil` when no
     /// active row across any project matches (e.g. a completed/closed task or a
     /// project that disappeared). Pure value work — no I/O, no SwiftUI.

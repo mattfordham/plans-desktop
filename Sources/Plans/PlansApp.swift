@@ -16,10 +16,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// The shared, observable store, created once and injected into both scenes.
     let store = PlansStore()
 
-    /// The shared task-run coordinator, created once and injected into the
-    /// browser + plan-detail scenes. It tracks one `TaskRun` per active task, so
-    /// multiple tasks can run concurrently while card rows / detail windows each
-    /// observe the run for their own task. Created here on the main actor.
+    /// The shared task-run coordinator, created once and injected into the menu
+    /// bar + browser scenes. It tracks one `TaskRun` per active task, so multiple
+    /// tasks can run concurrently while card rows / the plan-detail overlay pane
+    /// each observe the run for their own task. Created here on the main actor.
     let taskRunner = TaskRunner()
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -93,7 +93,7 @@ struct PlansApp: App {
     private var store: PlansStore { appDelegate.store }
 
     /// The shared "Work this task" runner, owned by the delegate so a single
-    /// instance is shared across every plan-detail window.
+    /// instance is shared across every surface that can observe a run.
     private var taskRunner: TaskRunner { appDelegate.taskRunner }
 
     var body: some Scene {
@@ -137,20 +137,9 @@ struct PlansApp: App {
                     .disabled(store.projects.isEmpty)
             }
         }
-
-        // Surface B detail — a standalone, value-based window per plan (§011).
-        // Tapping a plan row in the browser opens this via `openWindow(id:value:)`,
-        // keyed on the row's composite `TaskRow.ID`. `PlanDetailView` resolves the
-        // id back to a row against the shared store and renders its body; passing a
-        // value lets SwiftUI dedupe/reuse a window per plan id.
-        WindowGroup("Plan", id: "plan-detail", for: TaskRow.ID.self) { $rowID in
-            PlanDetailView(rowID: rowID)
-                .environment(store)
-                .environment(taskRunner)
-        }
-        // A roomy default so the detail body (header + markdown sections +
-        // read-only How checklist) is comfortably visible without resizing on
-        // first open — wide enough that markdown lines don't wrap prematurely.
-        .defaultSize(width: 900, height: 600)
+        // #073: the standalone per-plan detail window (§011) was removed —
+        // plan detail now renders as an in-window modal overlay pane in
+        // `BrowserWindow` (see `detailOverlay`), so there is no separate
+        // detail scene here anymore.
     }
 }

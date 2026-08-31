@@ -19,14 +19,15 @@ private let cardLog = Logger(subsystem: "com.plans.desktop", category: "ProjectC
 ///   `TaskParser`). Each row shows the task's status icon via the symbol-based
 ///   `TaskStatusIndicator` (blocked takes precedence), the short 3-char task id,
 ///   an optional `[type.label]` tag (`TaskType.label`), and the title. Tapping a
-///   row opens that plan's detail in a separate window (`openWindow(id:value:)`,
-///   §011) — it no longer sets a selection. Tapping the header project name
+///   row opens that plan's detail in the browser window's in-window modal overlay
+///   pane (#073, via the injected `onOpenDetail` closure) — it no longer sets a
+///   selection or opens a separate window. Tapping the header project name
 ///   reveals the project's nested `.plans` directory in Finder (#047). When
 ///   there are no active plans the body shows a muted empty state.
 ///
 /// The card is strictly READ-ONLY (§2): it only reads from the injected
-/// `ProjectTasks` and opens a detail window on tap. It has NO toggles, status
-/// pickers, How checkboxes, or any FS-mutating calls.
+/// `ProjectTasks` and requests the detail overlay on tap. It has NO toggles,
+/// status pickers, How checkboxes, or any FS-mutating calls.
 struct ProjectCard: View {
     /// The project this card renders. Read-only; never mutated.
     let project: ProjectTasks
@@ -49,9 +50,13 @@ struct ProjectCard: View {
     /// inline capture popover this card used to host itself.
     let onNewPlan: (String) -> Void
 
-    /// Opens the standalone plan-detail window (§011) for a tapped row, keyed on
-    /// the row's composite `TaskRow.ID`.
-    @Environment(\.openWindow) private var openWindow
+    /// #073: opens the plan-detail modal overlay pane in the browser window for a
+    /// tapped row, keyed on the row's composite `TaskRow.ID`. The presenting
+    /// `BrowserWindow` owns the pane state (`detailRowID`); this closure just sets
+    /// it. Replaces the former `openWindow(id:value:)` that opened a standalone
+    /// detail WINDOW. Declared as a stored `let` alongside `onNewPlan` so the
+    /// synthesized memberwise init threads it through.
+    let onOpenDetail: (TaskRow.ID) -> Void
 
     /// The shared task store, re-read after a run's progress popover closes so the
     /// task's new status is surfaced by the existing read path. Read-only (§2).
@@ -570,7 +575,8 @@ struct ProjectCard: View {
     /// A single tappable plan row as a `GridRow`: the status icon (blocked takes
     /// precedence), the short 3-char task id, an always-present `[type]` cell,
     /// and the title. The whole row is the tap target — tapping opens the plan's
-    /// detail in a separate window (`openWindow(id:value:)`, §011).
+    /// detail in the browser window's in-window modal overlay pane (#073, via the
+    /// injected `onOpenDetail` closure).
     ///
     /// Implementation notes (#068 review: the row is an `HStack` with pinned
     /// `rowColumns` widths rather than a `GridRow` in a `Grid`, so it can own one
@@ -605,13 +611,13 @@ struct ProjectCard: View {
                 .imageScale(.large)
                 .foregroundStyle(indicator.color)
                 .frame(width: ProjectCard.rowColumns.statusWidth, alignment: .center)
-                .modifier(OpenDetailOnTap(row: row, openWindow: openWindow))
+                .modifier(OpenDetailOnTap(row: row, onOpenDetail: onOpenDetail))
 
             Text(row.task.id)
                 .font(.system(.body, design: .monospaced))
                 .foregroundStyle(.secondary)
                 .frame(width: ProjectCard.rowColumns.idWidth, alignment: .leading)
-                .modifier(OpenDetailOnTap(row: row, openWindow: openWindow))
+                .modifier(OpenDetailOnTap(row: row, onOpenDetail: onOpenDetail))
 
             // Always-present cell (empty string when no type) so the title column
             // starts at the same x on every row. A kept-worktree task (executed
@@ -639,7 +645,7 @@ struct ProjectCard: View {
                 }
             }
             .frame(width: ProjectCard.rowColumns.typeWidth, alignment: .leading)
-            .modifier(OpenDetailOnTap(row: row, openWindow: openWindow))
+            .modifier(OpenDetailOnTap(row: row, onOpenDetail: onOpenDetail))
 
             // The title is the row's flexible column: it claims the width left
             // after the pinned status/id/type columns and wraps only when that
@@ -657,7 +663,7 @@ struct ProjectCard: View {
                 .truncationMode(ProjectCard.titleSizing.truncationMode)
                 .fixedSize(horizontal: false, vertical: true)
                 .frame(maxWidth: ProjectCard.titleSizing.maxWidth, alignment: .leading)
-                .modifier(OpenDetailOnTap(row: row, openWindow: openWindow))
+                .modifier(OpenDetailOnTap(row: row, onOpenDetail: onOpenDetail))
 
             // Trailing per-row action: the single status-relevant Elaborate /
             // Execute icon button (or an inline spinner while THIS row is being
@@ -703,7 +709,7 @@ struct ProjectCard: View {
     /// an `elaborated`/`in-progress` task, and an empty spacer for any other
     /// status. Every state is pinned to the same fixed height so the row's line
     /// height never shifts when the spinner/glyph appears or disappears. The full
-    /// live log is available by opening the row's detail window.
+    /// live log is available by opening the row's detail overlay pane (#073).
     @ViewBuilder
     private func rowActions(_ row: TaskRow) -> some View {
         Group {
@@ -987,18 +993,23 @@ private struct CaptureGlyph: View {
     }
 }
 
-/// Applies "open this plan's detail window on tap" to a single row content cell.
+/// Applies "open this plan's detail pane on tap" to a single row content cell.
 /// Used per content cell (id / type / title / status icon) rather than once on
 /// the whole `GridRow`, so the trailing action button keeps an independent hit
 /// target instead of competing with a row-wide tap gesture.
+///
+/// #073: taps invoke the injected `onOpenDetail(row.id)` closure, which sets the
+/// browser window's `detailRowID` to present the in-window modal overlay pane.
+/// This replaced the earlier design, in which the tap called `openWindow(id:value:)`
+/// to open a standalone detail window; that window's scene no longer exists.
 private struct OpenDetailOnTap: ViewModifier {
     let row: TaskRow
-    let openWindow: OpenWindowAction
+    let onOpenDetail: (TaskRow.ID) -> Void
 
     func body(content: Content) -> some View {
         content
             .contentShape(Rectangle())
-            .onTapGesture { openWindow(id: "plan-detail", value: row.id) }
+            .onTapGesture { onOpenDetail(row.id) }
     }
 }
 
@@ -1046,7 +1057,7 @@ private struct OpenDetailOnTap: ViewModifier {
         gitBranch: "main",
         gitIsDirty: false
     )
-    return ProjectCard(project: project, onNewPlan: { _ in })
+    return ProjectCard(project: project, onNewPlan: { _ in }, onOpenDetail: { _ in })
         .environment(PlansStore())
         .environment(TaskRunner())
         // The WIDE frame is the load-bearing part of the repro: a narrow card
