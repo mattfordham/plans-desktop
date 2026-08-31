@@ -828,6 +828,42 @@ final class BrowserWindowTests: XCTestCase {
         )
     }
 
+    // MARK: - focusedCardHeight (#071: the height the focused card must be given)
+
+    // The focus branch must IMPOSE a concrete height on the card. `ProjectCard`
+    // treats `constrainedHeight` only as a boolean signal (switch to the inner
+    // ScrollView layout) and deliberately sets no frame of its own, so a caller
+    // that forgets the frame leaves the card hugging its content — the #071 bug.
+    // `focusedCardHeight` is that value, and it must be non-nil whenever a card
+    // is focused so the caller always has a height to apply.
+
+    /// With a measured viewport the focused card fills it minus the outer padding
+    /// (chrome == 2*padding; a single row has no inter-row gutter).
+    func testFocusedCardHeightFillsViewportMinusPadding() {
+        let h = BrowserWindow.focusedCardHeight(viewportHeight: 900)
+        XCTAssertEqual(h, 900 - 2 * BrowserWindow.gridPadding, accuracy: 0.001)
+    }
+
+    /// Before the viewport is measured (height 0) it falls back to the row floor
+    /// rather than nil, so first paint still gets a real frame.
+    func testFocusedCardHeightFallsBackToFloorBeforeMeasurement() {
+        XCTAssertEqual(
+            BrowserWindow.focusedCardHeight(viewportHeight: 0),
+            BrowserWindow.fitRowMinHeight,
+            accuracy: 0.001
+        )
+    }
+
+    /// A viewport too short for the floor clamps to the floor and lets the
+    /// surrounding ScrollView absorb the overflow (clamp-to-floor contract).
+    func testFocusedCardHeightClampsToFloorOnShortViewport() {
+        XCTAssertEqual(
+            BrowserWindow.focusedCardHeight(viewportHeight: 50),
+            BrowserWindow.fitRowMinHeight,
+            accuracy: 0.001
+        )
+    }
+
     // MARK: - applyManualOrder (manual override ordering)
 
     /// Projects are ordered exactly as the `order` array dictates when every

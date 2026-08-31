@@ -101,6 +101,30 @@ struct BrowserWindow: View {
         focusedProjectPath != nil && cardCount == 1
     }
 
+    /// The concrete height a focused single card must be GIVEN (#071). `ProjectCard`
+    /// uses `constrainedHeight` only as a boolean signal to switch to its internal
+    /// scrolling layout — it deliberately applies no frame of its own (see the
+    /// "card's frame sets NO maxHeight" note there) — so the caller has to impose
+    /// the height, exactly as `fitCardGrid` does with `.frame(height:)` per row.
+    /// A `maxHeight: .infinity` inside the grid's `ScrollView` is NOT enough: scroll
+    /// content is sized to its natural height, so the card would keep hugging its
+    /// content and strand dead space below it.
+    ///
+    /// Wraps `evenRowHeights(rowCount: 1, …)` — the viewport minus the outer padding
+    /// (a single row has no inter-row gutter) — and returns a non-optional so there
+    /// is always a height to apply: before the viewport is measured, and on a
+    /// viewport too short for the floor, it clamps to `fitRowMinHeight` and lets the
+    /// surrounding ScrollView absorb the overflow (the clamp-to-floor contract).
+    static func focusedCardHeight(viewportHeight: CGFloat) -> CGFloat {
+        evenRowHeights(
+            rowCount: 1,
+            viewportHeight: viewportHeight,
+            spacing: gridSpacing,
+            padding: gridPadding,
+            minRowHeight: fitRowMinHeight
+        ).first ?? fitRowMinHeight
+    }
+
     /// Resolves the EFFECTIVE card layout for a given column count (#033). Fit-to-
     /// screen only makes sense with two or more columns: at a single column (a
     /// narrow window) cards are already full-width and stacking them with stretched
@@ -599,22 +623,24 @@ struct BrowserWindow: View {
         // `rowCount: 1` yields one height == the viewport minus its outer padding
         // (no inter-row gutter), clamped to `fitRowMinHeight` and letting the
         // ScrollView absorb any overflow.
-        let constrainedHeight = Self.evenRowHeights(
-            rowCount: 1,
-            viewportHeight: gridHeight,
-            spacing: Self.gridSpacing,
-            padding: Self.gridPadding,
-            minRowHeight: Self.fitRowMinHeight
-        ).first
+        let constrainedHeight = Self.focusedCardHeight(viewportHeight: gridHeight)
         return VStack(spacing: 0) {
             // Guard for the single element: if the snapshot is unexpectedly empty
             // (focus resolved away mid-render), render nothing gracefully.
             if let project = projects.first {
+                // Hand the card the SAME height the frame below imposes, exactly as
+                // `fitCardGrid` does per row: `constrainedHeight` flips ProjectCard
+                // into its internal-scrolling layout (header pinned top, footer
+                // pinned bottom) while the `.frame(height:)` is what actually makes
+                // the card fill the viewport. `maxHeight: .infinity` alone does
+                // nothing here — the enclosing ScrollView sizes its content to the
+                // natural height, leaving the card hugging its content.
                 cardCell(for: project, constrainedHeight: constrainedHeight)
                     .frame(maxWidth: .infinity)
+                    .frame(height: constrainedHeight)
             }
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+        .frame(maxWidth: .infinity, alignment: .top)
         .padding(Self.gridPadding)
         // #046: match the other grids — extra trailing inset so the card's action
         // buttons clear the macOS overlay scroller.
