@@ -257,6 +257,16 @@ struct BrowserWindow: View {
         }
     }
 
+    /// How many LIVE projects are hidden (#072) — drives both the toolbar reveal
+    /// control's count and its zero-count suppression. Resolved against
+    /// `store.projects` so stale paths in the persisted set never inflate it.
+    private var hiddenCount: Int {
+        BrowserViewModel.hiddenProjectCount(
+            projects: store.projects,
+            hiddenProjectPaths: store.hiddenProjectPaths
+        )
+    }
+
     var body: some View {
         // A pure, full-width card dashboard. Tapping a plan row opens that plan's
         // detail in a separate window (§011); this window has no detail pane.
@@ -333,27 +343,45 @@ struct BrowserWindow: View {
                     .foregroundStyle(store.hideEmptyProjects ? AnyShapeStyle(.tint) : AnyShapeStyle(.primary))
                     .help("Hide projects with no outstanding plans")
                 }
-                // #072: reveal explicitly-hidden projects. Mirrors the "Hide
-                // Empty" chrome exactly — a plain `Button` sharing the identical
-                // square toolbar footprint, accent-tinted while active. Flipping
+                // #072: reveal explicitly-hidden projects. Flipping
                 // `store.showHidden` re-derives `sortedProjects` (whose hidden
                 // filter is suppressed while the flag is on), which is the ONLY
                 // route back for a hidden card: revealing it re-renders its
-                // footer hide glyph so it can be un-hidden. Placed beside "Hide
-                // Empty" because the two read as a pair, but the underlying state
-                // is independent — `showHidden` is deliberately transient
-                // (per-session), unlike the persisted `hideEmptyProjects`.
-                ToolbarItem {
-                    Button {
-                        store.showHidden.toggle()
-                    } label: {
-                        Label(
-                            "Show Hidden",
-                            systemImage: store.showHidden ? "eye.slash" : "eye"
+                // footer hide glyph so it can be un-hidden.
+                //
+                // It deliberately does NOT mirror the "Hide Empty" chrome, which
+                // is what shipped first and what the user flagged as confusing:
+                // two unlabeled `eye`/`eye.slash` glyphs sat ADJACENT meaning
+                // unrelated things, and some toggle combinations rendered two
+                // IDENTICAL glyphs side by side. So this control owns a distinct
+                // metaphor — `rectangle`/`rectangle.slash`, hiding a CARD rather
+                // than an eyeball — leaving the eye pair to the incumbent "Hide
+                // Empty". (The per-card footer glyph keeps `eye.slash`: it is
+                // unambiguous in local context.)
+                //
+                // It also always reports the hidden COUNT, because a hidden card
+                // isn't rendered at all — without a count, its own hide glyph
+                // only exists while `showHidden` is on, so a hidden project just
+                // looks gone. At zero the ToolbarItem is omitted entirely, so the
+                // common case costs nothing visually. Still a TOGGLE, not a
+                // separate action: the count is displayed, not clicked.
+                if hiddenCount > 0 {
+                    ToolbarItem {
+                        Button {
+                            store.showHidden.toggle()
+                        } label: {
+                            Label(
+                                "\(hiddenCount)",
+                                systemImage: store.showHidden ? "rectangle" : "rectangle.slash"
+                            )
+                        }
+                        .foregroundStyle(store.showHidden ? AnyShapeStyle(.tint) : AnyShapeStyle(.primary))
+                        .help(
+                            store.showHidden
+                                ? "Hide revealed projects"
+                                : "Reveal \(hiddenCount) hidden \(hiddenCount == 1 ? "project" : "projects")"
                         )
                     }
-                    .foregroundStyle(store.showHidden ? AnyShapeStyle(.tint) : AnyShapeStyle(.primary))
-                    .help("Reveal hidden projects")
                 }
                 // #033: card-layout toggle. Mirrors the "Hide Empty" chrome
                 // exactly — a plain `Button` (not a button-styled `Toggle`) so it
@@ -968,6 +996,21 @@ enum BrowserViewModel {
         hiddenProjectPaths: Set<String>
     ) -> Bool {
         !hiddenProjectPaths.contains(project.projectPath)
+    }
+
+    /// How many LIVE projects are currently hidden (#072) — the count the
+    /// toolbar reveal control reports (and whose zero case suppresses it
+    /// entirely). Deliberately NOT `hiddenProjectPaths.count`: that persisted set
+    /// can retain paths for projects since unregistered or deleted, which would
+    /// report a phantom count and offer to reveal nothing. So the set is resolved
+    /// against `projects` exactly as `sortedProjects` resolves a stale
+    /// `focusedProjectPath`. Independent of emptiness, starred, and focus state,
+    /// matching `visibleUnderHidden`. Pure value work — no I/O, no SwiftUI.
+    static func hiddenProjectCount(
+        projects: [ProjectTasks],
+        hiddenProjectPaths: Set<String>
+    ) -> Int {
+        projects.filter { hiddenProjectPaths.contains($0.projectPath) }.count
     }
 
     /// Splits a section body into paragraphs on blank lines for per-paragraph

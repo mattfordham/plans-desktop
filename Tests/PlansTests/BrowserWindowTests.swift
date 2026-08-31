@@ -451,6 +451,71 @@ final class BrowserWindowTests: XCTestCase {
         )
     }
 
+    // MARK: - hiddenProjectCount (#072: count for the toolbar reveal control)
+
+    /// An empty hidden set counts nothing — the toolbar control is suppressed.
+    func testHiddenProjectCountZeroWhenNothingHidden() {
+        let projects = [makeProject(path: "/a", name: "a")]
+        XCTAssertEqual(
+            BrowserViewModel.hiddenProjectCount(projects: projects, hiddenProjectPaths: []),
+            0
+        )
+    }
+
+    /// One live project whose path is hidden counts once.
+    func testHiddenProjectCountOneForSingleHiddenLiveProject() {
+        let projects = [makeProject(path: "/a", name: "a"), makeProject(path: "/b", name: "b")]
+        XCTAssertEqual(
+            BrowserViewModel.hiddenProjectCount(projects: projects, hiddenProjectPaths: ["/a"]),
+            1
+        )
+    }
+
+    /// Two live projects hidden count twice.
+    func testHiddenProjectCountTwoForTwoHiddenLiveProjects() {
+        let projects = [makeProject(path: "/a", name: "a"), makeProject(path: "/b", name: "b")]
+        XCTAssertEqual(
+            BrowserViewModel.hiddenProjectCount(
+                projects: projects,
+                hiddenProjectPaths: ["/a", "/b"]
+            ),
+            2
+        )
+    }
+
+    /// THE CRUX — a STALE hidden path (a project since unregistered or deleted,
+    /// so no live `ProjectTasks` carries it) must NOT be counted. Counting the
+    /// raw set would report a phantom and render a reveal control that reveals
+    /// nothing. Mirrors the defensive stale-`focusedProjectPath` resolution in
+    /// `sortedProjects`: the hidden set is always resolved against LIVE projects.
+    func testHiddenProjectCountIgnoresStalePathWithNoLiveProject() {
+        let projects = [makeProject(path: "/a", name: "a")]
+        XCTAssertEqual(
+            BrowserViewModel.hiddenProjectCount(
+                projects: projects,
+                hiddenProjectPaths: ["/a", "/gone"]
+            ),
+            1
+        )
+    }
+
+    /// Hiding is independent of emptiness, so a hidden project brimming with
+    /// outstanding work counts exactly like an empty one.
+    func testHiddenProjectCountCountsNonEmptyHiddenProject() {
+        let projects = [
+            makeProject(
+                path: "/a",
+                name: "a",
+                tasks: [makeTask(id: "001", status: .inProgress)],
+                activeTasks: [makeTask(id: "001", status: .inProgress)]
+            )
+        ]
+        XCTAssertEqual(
+            BrowserViewModel.hiddenProjectCount(projects: projects, hiddenProjectPaths: ["/a"]),
+            1
+        )
+    }
+
     // MARK: - Cross-project selected-row resolution (mirrors the view)
 
     /// The view resolves `selectedRowID` by scanning EVERY project's active rows.
