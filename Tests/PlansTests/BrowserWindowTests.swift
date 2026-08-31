@@ -407,6 +407,50 @@ final class BrowserWindowTests: XCTestCase {
         )
     }
 
+    // MARK: - visibleUnderHidden (#072: hide independent of emptiness)
+
+    /// A project whose path the user HID is not visible, regardless of anything
+    /// else — the hidden set alone removes it from the dashboard.
+    func testVisibleUnderHiddenFalseForHiddenProject() {
+        let project = makeProject(path: "/p", name: "p")
+        XCTAssertFalse(
+            BrowserViewModel.visibleUnderHidden(project, hiddenProjectPaths: ["/p"])
+        )
+    }
+
+    /// A project whose path is NOT in the hidden set is visible.
+    func testVisibleUnderHiddenTrueForAbsentProject() {
+        let project = makeProject(path: "/p", name: "p")
+        XCTAssertTrue(
+            BrowserViewModel.visibleUnderHidden(project, hiddenProjectPaths: [])
+        )
+    }
+
+    /// THE CRUX — hide is decoupled from the empty-project gate. A NON-empty
+    /// project that HAS outstanding active work is STILL hidden when its path is
+    /// in the hidden set. Unlike `visibleUnderHideEmpty` (which only ever removes
+    /// EMPTY projects and rescues starred ones), hiding must apply even to a
+    /// project brimming with work — proving the two mechanisms are independent.
+    func testVisibleUnderHiddenFalseForNonEmptyProjectInSet() {
+        let project = makeProject(
+            path: "/p",
+            name: "p",
+            tasks: [makeTask(id: "001", status: .inProgress)],
+            activeTasks: [makeTask(id: "001", status: .inProgress)]
+        )
+        XCTAssertFalse(
+            BrowserViewModel.visibleUnderHidden(project, hiddenProjectPaths: ["/p"])
+        )
+    }
+
+    /// Hiding a DIFFERENT project does not hide this one.
+    func testVisibleUnderHiddenTrueWhenOnlyAnotherProjectHidden() {
+        let project = makeProject(path: "/p", name: "p")
+        XCTAssertTrue(
+            BrowserViewModel.visibleUnderHidden(project, hiddenProjectPaths: ["/other"])
+        )
+    }
+
     // MARK: - Cross-project selected-row resolution (mirrors the view)
 
     /// The view resolves `selectedRowID` by scanning EVERY project's active rows.

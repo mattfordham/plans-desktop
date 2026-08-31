@@ -209,6 +209,14 @@ struct BrowserWindow: View {
     /// empty project's card survives the filter — preserving order.
     /// `store.projects` is never mutated — only this derived view is filtered.
     ///
+    /// Next, the "hidden projects" filter (#072) removes any project whose path
+    /// the user has hidden (`store.hiddenProjectPaths`). This step is applied
+    /// UNCONDITIONALLY and is DELIBERATELY decoupled from the "Hide Empty" gate
+    /// above — it runs whether or not `hideEmptyProjects` is on, so a project
+    /// with active work can still be hidden (the crux of #072). It is suppressed
+    /// only when `store.showHidden` is true (the transient "reveal hidden cards"
+    /// toggle), which reveals the hidden cards so they can be un-hidden.
+    ///
     /// Finally, "Focus" mode (#067) collapses the result to the single focused
     /// project's card. The focus is resolved defensively: a `focusedProjectPath`
     /// naming a project that is no longer live is treated as no focus at all, so
@@ -232,12 +240,19 @@ struct BrowserWindow: View {
         } else {
             hideEmptyResolved = sorted
         }
+        // #072: filter out hidden projects, independent of the empty-gate above.
+        // Suppressed while `showHidden` is on so hidden cards can be revealed.
+        let hiddenResolved = store.showHidden
+            ? hideEmptyResolved
+            : hideEmptyResolved.filter {
+                BrowserViewModel.visibleUnderHidden($0, hiddenProjectPaths: store.hiddenProjectPaths)
+            }
         // Auto-clear a stale focus: only honor the focused path when some live
         // project actually carries it, otherwise fall back to showing everything.
         let effectiveFocus = store.focusedProjectPath.flatMap { path in
             store.projects.contains { $0.projectPath == path } ? path : nil
         }
-        return hideEmptyResolved.filter {
+        return hiddenResolved.filter {
             BrowserViewModel.visibleUnderFocus($0, focusedProjectPath: effectiveFocus)
         }
     }
@@ -317,6 +332,28 @@ struct BrowserWindow: View {
                     }
                     .foregroundStyle(store.hideEmptyProjects ? AnyShapeStyle(.tint) : AnyShapeStyle(.primary))
                     .help("Hide projects with no outstanding plans")
+                }
+                // #072: reveal explicitly-hidden projects. Mirrors the "Hide
+                // Empty" chrome exactly — a plain `Button` sharing the identical
+                // square toolbar footprint, accent-tinted while active. Flipping
+                // `store.showHidden` re-derives `sortedProjects` (whose hidden
+                // filter is suppressed while the flag is on), which is the ONLY
+                // route back for a hidden card: revealing it re-renders its
+                // footer hide glyph so it can be un-hidden. Placed beside "Hide
+                // Empty" because the two read as a pair, but the underlying state
+                // is independent — `showHidden` is deliberately transient
+                // (per-session), unlike the persisted `hideEmptyProjects`.
+                ToolbarItem {
+                    Button {
+                        store.showHidden.toggle()
+                    } label: {
+                        Label(
+                            "Show Hidden",
+                            systemImage: store.showHidden ? "eye.slash" : "eye"
+                        )
+                    }
+                    .foregroundStyle(store.showHidden ? AnyShapeStyle(.tint) : AnyShapeStyle(.primary))
+                    .help("Reveal hidden projects")
                 }
                 // #033: card-layout toggle. Mirrors the "Hide Empty" chrome
                 // exactly — a plain `Button` (not a button-styled `Toggle`) so it
@@ -919,6 +956,18 @@ enum BrowserViewModel {
     ) -> Bool {
         guard let focusedProjectPath else { return true }
         return project.projectPath == focusedProjectPath
+    }
+
+    /// Whether `project` survives the "hidden projects" filter (#072): a project
+    /// whose path is in `hiddenProjectPaths` is filtered out of the dashboard
+    /// regardless of its emptiness, starred, or focus state — hiding is fully
+    /// decoupled from the "Hide Empty" gate. Pure value work — no I/O, no
+    /// SwiftUI; drives `BrowserWindow.sortedProjects`.
+    static func visibleUnderHidden(
+        _ project: ProjectTasks,
+        hiddenProjectPaths: Set<String>
+    ) -> Bool {
+        !hiddenProjectPaths.contains(project.projectPath)
     }
 
     /// Splits a section body into paragraphs on blank lines for per-paragraph
