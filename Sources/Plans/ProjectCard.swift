@@ -87,6 +87,15 @@ struct ProjectCard: View {
     /// right row even if several elaborated rows are present.
     @State private var reElaborateRequest: ReElaborateRequest? = nil
 
+    /// The pending "Elaborate" request (#074), or `nil` when no Elaborate sheet
+    /// is open. Set by a row's Elaborate glyph (pending, non-blocked tasks only)
+    /// to that row's task id + project path; an `.sheet(item:)` keyed on it
+    /// presents the `ElaborateModal` for exactly that task. Mirrors
+    /// `reElaborateRequest` — an `Identifiable` struct rather than a bare bool +
+    /// separate id, so the sheet always targets the right row even if several
+    /// pending rows are present.
+    @State private var elaborateRequest: ElaborateRequest? = nil
+
     /// A per-task `Binding<Bool>` for the run-progress popover: it reads `true`
     /// only when `progressPopoverTaskID` is this `taskID`, and on set assigns the
     /// id when raised / clears it when lowered — so opening one row's popover (or
@@ -339,6 +348,13 @@ struct ProjectCard: View {
         // `.reElaborate` mode (the sole `.plans/` writer, §2).
         .sheet(item: $reElaborateRequest) { request in
             ReElaborateModal(taskID: request.taskID, projectPath: request.projectPath)
+        }
+        // The "Elaborate" sheet (#074), keyed on the requesting row's task the
+        // same way the Refine sheet above is. The `ElaborateModal` hands the
+        // user's OPTIONAL guidance plus the Deep flag to the runner in
+        // `.elaborate` mode (the sole `.plans/` writer, §2).
+        .sheet(item: $elaborateRequest) { request in
+            ElaborateModal(taskID: request.taskID, projectPath: request.projectPath)
         }
     }
 
@@ -752,9 +768,17 @@ struct ProjectCard: View {
                     .help("Show progress")
             } else if PlanDetailView.canElaborate(status: row.task.status,
                                                   isBlocked: row.task.isBlocked) {
+                // Elaborate now opens the `ElaborateModal` via the card's
+                // `.sheet(item:)` rather than firing the run straight off the
+                // glyph (#074), so the user can attach optional guidance and
+                // pick Deep first. Submitting the sheet with an empty box
+                // reproduces the previous fire-and-forget behaviour exactly.
                 RowActionGlyph(systemImage: "sparkles", help: "Elaborate this plan") {
                     cardLog.notice("card Elaborate clicked: task=\(row.task.id, privacy: .public)")
-                    runner.run(projectPath: row.projectPath, taskID: row.task.id, mode: .elaborate)
+                    elaborateRequest = ElaborateRequest(
+                        taskID: row.task.id,
+                        projectPath: row.projectPath
+                    )
                 }
             } else if PlanDetailView.canWork(status: row.task.status,
                                              isBlocked: row.task.isBlocked) {
@@ -837,6 +861,16 @@ struct ProjectCard: View {
 /// glyph targets, driving the card's `.sheet(item:)`. `Identifiable` on the task
 /// id so SwiftUI presents (and re-targets) the sheet for the right row.
 private struct ReElaborateRequest: Identifiable {
+    let taskID: String
+    let projectPath: String
+    var id: String { taskID }
+}
+
+/// A pending "Elaborate" request (#074): the task + project a tapped Elaborate
+/// glyph targets, driving the card's second `.sheet(item:)`. A distinct type
+/// from `ReElaborateRequest` (rather than a shared one) so the two sheets stay
+/// independently keyed and can never be presented against each other's state.
+private struct ElaborateRequest: Identifiable {
     let taskID: String
     let projectPath: String
     var id: String { taskID }

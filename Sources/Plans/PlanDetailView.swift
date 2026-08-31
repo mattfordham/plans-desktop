@@ -67,6 +67,13 @@ struct PlanDetailView: View {
     /// `ReElaborateModal` for THIS view's task.
     @State private var showReElaborate = false
 
+    /// Whether the "Elaborate" sheet (#074) is presented. Raised by the
+    /// "Elaborate" header action (only shown for a pending, non-blocked task)
+    /// and lowered by the sheet's own Cancel/Elaborate. Drives the
+    /// `ElaborateModal` for THIS view's task. Kept separate from
+    /// `showReElaborate` since the two actions are gated to disjoint statuses.
+    @State private var showElaborate = false
+
     /// The resolved row for `rowID` across all projects' active rows, or `nil`
     /// when absent. Re-derived from the live store on each render.
     private var row: TaskRow? {
@@ -130,6 +137,15 @@ struct PlanDetailView: View {
                 ReElaborateModal(taskID: row.task.id, projectPath: row.projectPath)
             }
         }
+        // The "Elaborate" sheet (#074). Presented only when a row is resolved
+        // (the Elaborate action that raises this only renders inside the `if let
+        // row` header), so the unwrap is safe; if the row vanished mid-sheet we
+        // render nothing rather than crash — same shape as the Refine sheet.
+        .sheet(isPresented: $showElaborate) {
+            if let row {
+                ElaborateModal(taskID: row.task.id, projectPath: row.projectPath)
+            }
+        }
         // NOTE: dismissing the detail pane deliberately does NOT stop the run.
         // Runs are independent of any presentation (they can be launched straight
         // from a card), so a run survives closing the detail; stop it explicitly
@@ -190,11 +206,13 @@ struct PlanDetailView: View {
                 } else {
                     // "Elaborate" — hands a pending plan off to the bundled
                     // runner in autonomous `plan-elaborate` mode. Available only
-                    // for a pending, non-blocked task.
+                    // for a pending, non-blocked task. Since #074 it opens the
+                    // `ElaborateModal` first (optional guidance + Deep) instead
+                    // of firing the run straight off the button; submitting the
+                    // sheet with an empty box behaves exactly as before.
                     if Self.canElaborate(status: row.task.status, isBlocked: row.task.isBlocked) {
                         Button {
-                            runner.run(projectPath: row.projectPath,
-                                       taskID: row.task.id, mode: .elaborate)
+                            showElaborate = true
                         } label: {
                             Label("Elaborate", systemImage: "sparkles")
                         }

@@ -6,11 +6,13 @@
  *   - `execute`  (default): drives `plan-execute` to implement the task,
  *                always in `worktree` isolation, leaving it in `review`.
  *   - `elaborate`: drives `plan-elaborate` to research/flesh out a pending
- *                task autonomously (no interactive prompts).
+ *                task autonomously (no interactive prompts). Accepts an OPTIONAL
+ *                `--description` folded in as the user's guidance for the pass.
  *   - `reElaborate`: drives `plan-elaborate` (Path C, further elaboration) on an
  *                already-elaborated task, folding in user-provided `--description`
  *                guidance to refine/add to the plan, leaving it `elaborated`. This
- *                is the only mode that needs BOTH `--task-id` AND `--description`.
+ *                is the only mode that REQUIRES both `--task-id` and
+ *                `--description`.
  *   - `capture`: drives `plan-capture` to record a new task from a free-text
  *                `--description`, leaving it in `pending` (no chaining).
  *   - `captureElaborate`: drives `plan-capture` then chains into
@@ -69,7 +71,11 @@ interface Args {
   /** Required for execute/elaborate/reElaborate/delete; undefined for capture/captureElaborate/executeYolo (no task exists yet). */
   taskId?: string;
   mode: Mode;
-  /** Required for capture/captureElaborate/executeYolo AND reElaborate: the free-text description/guidance to act on. */
+  /**
+   * The free-text description/guidance to act on. Required for
+   * capture/captureElaborate/executeYolo AND reElaborate; OPTIONAL for
+   * elaborate (folded into the prompt as user guidance when present).
+   */
   description?: string;
   /**
    * Optional (#065). When true, the elaborate-bearing prompt builders
@@ -153,10 +159,17 @@ function parseArgs(argv: string[]): Args | null {
     return { projectRoot, taskId, mode, description, deep };
   }
 
-  // execute / elaborate / delete operate on an existing task, identified by id
-  // alone — no description.
+  // execute / elaborate / delete operate on an existing task, so a task id is
+  // the only REQUIRED argument. elaborate additionally accepts an OPTIONAL
+  // `--description` (the user's guidance for the pass); it is folded in when
+  // present and simply absent otherwise, so a bare `--mode elaborate
+  // --task-id <id>` behaves exactly as before. execute / delete carry no free
+  // text at all.
   if (!taskId) {
     return null;
+  }
+  if (mode === "elaborate") {
+    return { projectRoot, taskId, mode, description, deep };
   }
   return { projectRoot, taskId, mode, deep };
 }
@@ -219,8 +232,28 @@ function buildExecutePrompt(taskId: string): string {
  * interactive (it asks design questions via AskUserQuestion); since this is an
  * unattended hand-off with no UI to answer prompts, we instruct the agent to
  * elaborate autonomously, recording reasonable assumptions instead of asking.
+ *
+ * `description` is OPTIONAL user guidance for this pass. When present it is
+ * folded in as a `"""`-delimited block (mirroring buildReElaboratePrompt) to
+ * steer what the elaboration focuses on; when absent the prompt is emitted
+ * unchanged, exactly as a bare `/plan-elaborate <id>` hand-off always was.
  */
-function buildElaboratePrompt(taskId: string, deep: boolean): string {
+function buildElaboratePrompt(
+  taskId: string,
+  deep: boolean,
+  description?: string,
+): string {
+  const guidance = description?.trim()
+    ? [
+        `The user has provided the following guidance for this elaboration — fold`,
+        `it into the plan as the direction for this pass:`,
+        "",
+        `"""`,
+        description.trim(),
+        `"""`,
+        "",
+      ]
+    : [];
   return [
     `Use the \`plan-elaborate\` skill to research and flesh out the plans-cc`,
     `task with id ${taskId}:`,
@@ -230,6 +263,7 @@ function buildElaboratePrompt(taskId: string, deep: boolean): string {
     // matching the other two elaborate-bearing builders.
     `/plan-elaborate ${taskId}${deep ? " deep" : ""}`,
     "",
+    ...guidance,
     "Requirements:",
     "1. Work fully autonomously. Do NOT ask the user any questions — there is",
     "   no interactive UI to answer them. Where the skill would prompt for a",
@@ -453,7 +487,11 @@ function buildPrompt(args: Args): string {
     );
   }
   if (args.mode === "elaborate") {
-    return buildElaboratePrompt(args.taskId ?? "", args.deep ?? false);
+    return buildElaboratePrompt(
+      args.taskId ?? "",
+      args.deep ?? false,
+      args.description,
+    );
   }
   if (args.mode === "delete") {
     return buildDeletePrompt(args.taskId ?? "");

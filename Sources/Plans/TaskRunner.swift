@@ -118,7 +118,8 @@ enum RunEvent: Codable, Equatable {
 ///
 /// Mirrors the Node script's `--mode` flag (`run-task.ts`). `execute` runs
 /// `plan-execute` in mandatory worktree isolation; `elaborate` runs
-/// `plan-elaborate` autonomously to flesh out a pending task; `capture` runs
+/// `plan-elaborate` autonomously to flesh out a pending task, OPTIONALLY folding
+/// in a free-text `--description` as the user's guidance for the pass; `capture` runs
 /// `plan-capture` autonomously to record a new task from a free-text
 /// description (no existing task id); `captureElaborate` runs `plan-capture`
 /// then chains into `plan-elaborate` autonomously to record AND flesh out a new
@@ -129,7 +130,7 @@ enum RunEvent: Codable, Equatable {
 /// task id), leaving it in `review`; `reElaborate` runs `plan-elaborate` in
 /// Path-C further-elaboration mode on an EXISTING already-elaborated task,
 /// folding a free-text `--description` in as the user's refinement guidance —
-/// the only mode that carries BOTH an existing task id AND a description;
+/// the mode that REQUIRES both an existing task id and a description;
 /// `delete` runs `plan-delete` autonomously to permanently remove an EXISTING
 /// task's plan file (the in-app confirm having already stood in for the skill's
 /// interactive gate), deliberately KEEPING the task's git branch so a single
@@ -150,9 +151,10 @@ enum RunMode: String {
     /// `.executeYolo`), whose task does not exist yet. Pure flag (no I/O) so the
     /// arg-shape contract is unit-testable without spawning a `node` process.
     ///
-    /// This is INDEPENDENT of `usesDescription`: `.reElaborate` is the one mode
-    /// where both are true (it refines an existing task using free-text
-    /// guidance), so `spawn` emits `--task-id` AND `--description` for it.
+    /// This is INDEPENDENT of `usesDescription`: `.reElaborate` and `.elaborate`
+    /// are the modes where both are true (they work an existing task and may
+    /// carry free-text guidance), so `spawn` can emit `--task-id` AND
+    /// `--description` for them.
     var usesTaskID: Bool {
         switch self {
         case .execute, .elaborate, .reElaborate, .delete:
@@ -164,21 +166,28 @@ enum RunMode: String {
 
     /// Whether this mode carries a free-text `--description`, so `TaskRun.spawn`
     /// passes `--description <text>`. True for the description-driven modes
-    /// (`.capture` / `.captureElaborate` / `.executeYolo`) AND for `.reElaborate`
-    /// (which folds the user's refinement guidance in alongside its `--task-id`).
-    /// False for the plain existing-task modes `.execute` / `.elaborate` /
+    /// (`.capture` / `.captureElaborate` / `.executeYolo`), for `.reElaborate`
+    /// (which folds the user's refinement guidance in alongside its `--task-id`),
+    /// and for `.elaborate`. False for the plain existing-task modes `.execute` /
     /// `.delete`, which are fully identified by their task id alone. Pure flag
     /// (no I/O) so the arg-shape contract is unit-testable without spawning a
     /// `node` process.
     ///
-    /// This is INDEPENDENT of `usesTaskID`: a mode can need both (`.reElaborate`)
-    /// or just one — they are not an either/or, so `spawn` consults each flag on
-    /// its own.
+    /// This flag says the description CHANNEL is open, not that a description is
+    /// mandatory: `spawn` emits `--description` only when a non-empty one is
+    /// actually present. For the capture modes and `.reElaborate` the caller
+    /// always supplies one (they are meaningless without it), but `.elaborate`'s
+    /// description is OPTIONAL — a bare `/plan-elaborate <id>` run passes `nil`
+    /// and simply omits the flag, exactly as before.
+    ///
+    /// This is INDEPENDENT of `usesTaskID`: a mode can need both (`.reElaborate`,
+    /// `.elaborate`) or just one — they are not an either/or, so `spawn` consults
+    /// each flag on its own.
     var usesDescription: Bool {
         switch self {
-        case .capture, .captureElaborate, .executeYolo, .reElaborate:
+        case .capture, .captureElaborate, .executeYolo, .reElaborate, .elaborate:
             return true
-        case .execute, .elaborate, .delete:
+        case .execute, .delete:
             return false
         }
     }
@@ -220,8 +229,9 @@ final class TaskRun {
     let mode: RunMode
 
     /// Free-text description for a `.capture` run, threaded to the Node runner's
-    /// `--description` flag. `nil` for `.execute` / `.elaborate` runs (which
-    /// operate on an existing task id instead).
+    /// `--description` flag. Also carries `.reElaborate`'s required refinement
+    /// guidance and `.elaborate`'s OPTIONAL guidance. `nil` for `.execute` runs
+    /// and for a bare `.elaborate` (identified by their task id alone).
     let description: String?
 
     /// The project path this run operates in. Set for description-driven capture
@@ -429,9 +439,11 @@ final class TaskRun {
         // The two arg flags are INDEPENDENT, not either/or. Existing-task modes
         // (execute / elaborate / reElaborate) pass `--task-id`; description-driven
         // modes (capture / captureElaborate / executeYolo) pass `--description`.
-        // reElaborate is the one hybrid that passes BOTH (it refines an existing
-        // task using free-text guidance). The two flag sets are centralized in
-        // `RunMode.usesTaskID` / `RunMode.usesDescription` so the arg-shape
+        // reElaborate and elaborate are the hybrids that can pass BOTH (they work
+        // an existing task using free-text guidance) — reElaborate always carries
+        // one, elaborate's is optional, and the `let description` binding below
+        // omits the flag when none was supplied. The two flag sets are centralized
+        // in `RunMode.usesTaskID` / `RunMode.usesDescription` so the arg-shape
         // contract is unit-testable without spawning a process.
         if mode.usesTaskID {
             arguments += ["--task-id", taskID]
@@ -745,16 +757,22 @@ final class TaskRunner {
     /// this task is already in flight, this is a no-op; otherwise it replaces any
     /// prior finished run for the task and starts a fresh one. `description` is
     /// the free-text guidance threaded to the runner's `--description` flag for a
-    /// `.reElaborate` refinement of an existing task; it defaults to `nil` so the
-    /// plain existing-task modes (`.execute` / `.elaborate`) and all existing call
+    /// `.reElaborate` refinement of an existing task, or the OPTIONAL guidance an
+    /// `.elaborate` run may carry; it defaults to `nil` so the plain
+    /// existing-task modes (`.execute` / bare `.elaborate`) and all existing call
     /// sites compile unchanged.
+    /// `deep` (#065) is orthogonal to mode selection: when true it rides through
+    /// to the `TaskRun`'s `--deep` process flag so the run's elaborate pass goes
+    /// deep. It has no effect on modes without an elaborate pass (`.execute` /
+    /// `.delete`). Defaulted false to keep existing call sites compiling.
     func run(projectPath: String, taskID: String, mode: RunMode = .execute,
-             description: String? = nil) {
+             description: String? = nil, deep: Bool = false) {
         if let existing = runs[taskID], existing.isRunning {
             runnerLog.notice("run ignored: task \(taskID, privacy: .public) is already running")
             return
         }
-        let taskRun = TaskRun(taskID: taskID, mode: mode, description: description)
+        let taskRun = TaskRun(taskID: taskID, mode: mode, description: description,
+                              deep: deep)
         runs[taskID] = taskRun
         taskRun.start(projectPath: projectPath) { [weak self] in
             self?.onAnyRunFinished?()

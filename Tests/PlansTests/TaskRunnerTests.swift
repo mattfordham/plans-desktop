@@ -481,6 +481,56 @@ final class TaskRunnerTests: XCTestCase {
         XCTAssertEqual(TaskRunner.captureMode(execute: false, elaborate: false), .capture)
     }
 
+    // MARK: - Optional elaborate guidance + Deep (#074)
+
+    /// The Elaborate dialog's fullest submission: an `.elaborate` run carrying
+    /// BOTH the user's optional free-text guidance AND `deep: true` retains each
+    /// independently, so `TaskRun.spawn` emits `--task-id` + `--description` +
+    /// the valueless `--deep` together. This is the composition #074 opened up —
+    /// before it, `.elaborate` was id-only and the two channels could never be
+    /// exercised at once. Asserted on the stored properties rather than by
+    /// spawning a process (the `testDeepRunCarriesDeepFlag` precedent).
+    @MainActor
+    func testElaborateRunCarriesDescriptionAndDeepTogether() {
+        let run = TaskRun(taskID: "074", mode: .elaborate,
+                          description: "Focus on the offline path", deep: true)
+        XCTAssertEqual(run.taskID, "074")
+        XCTAssertEqual(run.mode, .elaborate)
+        XCTAssertEqual(run.description, "Focus on the offline path")
+        XCTAssertTrue(run.deep)
+        XCTAssertFalse(run.isRunning)
+    }
+
+    /// The dialog's OTHER first-class path: submitting an empty guidance box maps
+    /// to `nil` (not `""`), and the bare-elaborate run is byte-for-byte what the
+    /// old button fired — a nil description and `deep` false. `spawn`'s
+    /// `let description, !description.isEmpty` binding then omits `--description`
+    /// entirely, so the pre-#074 arg shape is preserved for the common case.
+    @MainActor
+    func testBareElaborateRunHasNilDescriptionAndNoDeep() {
+        let run = TaskRun(taskID: "074", mode: .elaborate)
+        XCTAssertNil(run.description)
+        XCTAssertFalse(run.deep)
+    }
+
+    /// Deep is orthogonal to guidance: an `.elaborate` run may go deep with NO
+    /// description at all (ticking only the sheet's Deep box), and may carry
+    /// guidance WITHOUT going deep. Pins that #074 did not accidentally couple
+    /// the two dialog controls into a single flag.
+    @MainActor
+    func testElaborateDeepAndDescriptionAreIndependent() {
+        // Deep only — no guidance typed.
+        let deepOnly = TaskRun(taskID: "074", mode: .elaborate, deep: true)
+        XCTAssertNil(deepOnly.description)
+        XCTAssertTrue(deepOnly.deep)
+
+        // Guidance only — Deep left off.
+        let guidanceOnly = TaskRun(taskID: "074", mode: .elaborate,
+                                   description: "Cover the retry case")
+        XCTAssertEqual(guidanceOnly.description, "Cover the retry case")
+        XCTAssertFalse(guidanceOnly.deep)
+    }
+
     // MARK: - Multiple back-to-back captures (task #029)
 
     /// `capture(...)` now keys every submission under a UNIQUE per-run id of the
@@ -539,20 +589,24 @@ final class TaskRunnerTests: XCTestCase {
     }
 
     /// `RunMode.usesDescription` is the pure flag `TaskRun.spawn` consults to pass
-    /// `--description <text>` (and omit `--task-id`): true for the three
-    /// description-driven modes (`.capture`, `.captureElaborate`, `.executeYolo`),
-    /// false for the existing-task modes (`.execute`, `.elaborate`, `.delete`).
-    /// Asserting it directly verifies the `.captureElaborate` description wiring
-    /// without spawning a real `node` process.
+    /// `--description <text>`: true for the three description-driven modes
+    /// (`.capture`, `.captureElaborate`, `.executeYolo`) and for the two
+    /// existing-task modes that can carry guidance (`.reElaborate`,
+    /// `.elaborate`); false for `.execute` / `.delete`, which are fully
+    /// identified by their task id alone. Asserting it directly verifies the
+    /// description wiring without spawning a real `node` process.
     func testRunModeUsesDescriptionFlag() {
         XCTAssertTrue(RunMode.capture.usesDescription)
         XCTAssertTrue(RunMode.captureElaborate.usesDescription)
         XCTAssertTrue(RunMode.executeYolo.usesDescription)
         // reElaborate is the hybrid: it carries a description alongside its id.
         XCTAssertTrue(RunMode.reElaborate.usesDescription)
+        // elaborate opens the same channel, but its description is OPTIONAL —
+        // the flag only says `spawn` MAY emit `--description`, and it does so
+        // solely when a non-empty one was actually supplied.
+        XCTAssertTrue(RunMode.elaborate.usesDescription)
 
         XCTAssertFalse(RunMode.execute.usesDescription)
-        XCTAssertFalse(RunMode.elaborate.usesDescription)
         // delete names an EXISTING task by id; there is no free text to pass.
         XCTAssertFalse(RunMode.delete.usesDescription)
     }
@@ -575,17 +629,35 @@ final class TaskRunnerTests: XCTestCase {
         XCTAssertFalse(RunMode.executeYolo.usesTaskID)
     }
 
-    /// `.reElaborate` is the ONE mode where both arg flags are true: it refines an
+    /// `.reElaborate` is the mode that REQUIRES both arg flags: it refines an
     /// EXISTING already-elaborated task (so `spawn` emits `--task-id`) using the
     /// user's free-text guidance (so `spawn` also emits `--description`). The two
     /// flags are independent — this is the hybrid that proves they are not an
-    /// either/or. It round-trips its raw value (the `--mode` flag) too.
+    /// either/or (`.elaborate` is the other both-true mode, but its description is
+    /// optional). It round-trips its raw value (the `--mode` flag) too.
     func testReElaborateModeUsesBothTaskIDAndDescription() {
         XCTAssertEqual(RunMode.reElaborate.rawValue, "reElaborate")
         XCTAssertEqual(RunMode(rawValue: "reElaborate"), .reElaborate)
 
         XCTAssertTrue(RunMode.reElaborate.usesTaskID)
         XCTAssertTrue(RunMode.reElaborate.usesDescription)
+    }
+
+    /// `.elaborate` is the OTHER both-flags-true mode (#074), and the only one
+    /// where the description is OPTIONAL rather than required: it always names an
+    /// existing pending task (`--task-id`) and MAY carry the dialog's free-text
+    /// guidance (`--description`). `usesDescription` opens the channel; whether
+    /// the flag is actually emitted is decided per-run by `spawn`'s non-nil,
+    /// non-empty check — which is why a bare elaborate still spawns id-only. Its
+    /// raw value is the literal `run-task.ts` switches on for its `--mode` flag,
+    /// so the round-trip pins the Swift-TypeScript contract against that file's
+    /// `elaborate` branch (which now returns `description` too).
+    func testElaborateModeUsesTaskIDAndOptionalDescription() {
+        XCTAssertEqual(RunMode.elaborate.rawValue, "elaborate")
+        XCTAssertEqual(RunMode(rawValue: "elaborate"), .elaborate)
+
+        XCTAssertTrue(RunMode.elaborate.usesTaskID)
+        XCTAssertTrue(RunMode.elaborate.usesDescription)
     }
 
     /// `.delete` is id-only: it names an EXISTING task (so `spawn` emits
