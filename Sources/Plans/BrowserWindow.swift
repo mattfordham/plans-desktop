@@ -233,11 +233,20 @@ struct BrowserWindow: View {
         }
         // Auto-clear a stale focus: only honor the focused path when some live
         // project actually carries it, otherwise fall back to showing everything.
-        let effectiveFocus = store.focusedProjectPath.flatMap { path in
-            store.projects.contains { $0.projectPath == path } ? path : nil
-        }
         return modeResolved.filter {
-            BrowserViewModel.visibleUnderFocus($0, focusedProjectPath: effectiveFocus)
+            BrowserViewModel.visibleUnderFocus($0, focusedProjectPath: effectiveFocusPath)
+        }
+    }
+
+    /// The focused project path, resolved DEFENSIVELY: a `focusedProjectPath`
+    /// naming a project that is no longer live (unregistered, deleted) is treated
+    /// as no focus at all, so a stale value can never strand the grid on an empty
+    /// focus or leave the exit-focus control stranded on screen. Single source of
+    /// truth for "is a live project actually focused" — used by `sortedProjects`,
+    /// the full-height single-card branch (#071), and the toolbar's exit control.
+    private var effectiveFocusPath: String? {
+        store.focusedProjectPath.flatMap { path in
+            store.projects.contains { $0.projectPath == path } ? path : nil
         }
     }
 
@@ -425,13 +434,10 @@ struct BrowserWindow: View {
         // does — a `focusedProjectPath` naming a project that is no longer live is
         // treated as no focus at all — so the full-height branch only fires when a
         // live project is actually focused.
-        let effectiveFocus = store.focusedProjectPath.flatMap { path in
-            store.projects.contains { $0.projectPath == path } ? path : nil
-        }
         // #071: whether the grid has collapsed to a single focused card, which gets
         // a dedicated full-viewport-height render path (`focusCardGrid`).
         let focusedSingleCard = BrowserWindow.isFocusedSingleCard(
-            focusedProjectPath: effectiveFocus, cardCount: sortedProjects.count
+            focusedProjectPath: effectiveFocusPath, cardCount: sortedProjects.count
         )
         return ScrollViewReader { proxy in
             ScrollView {
@@ -489,24 +495,27 @@ struct BrowserWindow: View {
                     .disabled(!store.manualOrderActive)
                     .help("Discard the manual card order and sort by recency.")
                 }
-                // #067: exit "Focus" mode. Mirrors the recency-revert precedent
-                // above — a persistent toolbar control that is ALWAYS present (so
-                // its placement never shifts) and simply DISABLED when nothing is
-                // focused. Tinted while focus is active. Tapping it clears
+                // #067: exit "Focus" mode. Rendered ONLY while a live project is
+                // actually focused — it is the way out of a single-card view, so
+                // outside focus mode it has nothing to do and would just cost
+                // permanent toolbar width (it previously sat there always-present
+                // but disabled). Gated on `effectiveFocusPath`, not the raw stored
+                // path, so a focus naming a project that is no longer live cannot
+                // strand a dead control on screen. Tapping it clears
                 // `store.focusedProjectPath` so `sortedProjects` re-derives to the
-                // full grid — the guaranteed way out of a single-card view. Pure
-                // store call; never writes `.plans/` (§2).
-                ToolbarItem(placement: .automatic) {
-                    Button {
-                        store.clearFocus()
-                    } label: {
-                        Label("Show All Projects", systemImage: "rectangle.3.group")
-                            .labelStyle(.titleAndIcon)
+                // full grid. Pure store call; never writes `.plans/` (§2).
+                if effectiveFocusPath != nil {
+                    ToolbarItem(placement: .automatic) {
+                        Button {
+                            store.clearFocus()
+                        } label: {
+                            Label("Show All Projects", systemImage: "rectangle.3.group")
+                                .labelStyle(.titleAndIcon)
+                        }
+                        .buttonStyle(.borderless)
+                        .foregroundStyle(.tint)
+                        .help("Exit focus mode and show every project.")
                     }
-                    .buttonStyle(.borderless)
-                    .foregroundStyle(store.focusedProjectPath != nil ? AnyShapeStyle(.tint) : AnyShapeStyle(.primary))
-                    .disabled(store.focusedProjectPath == nil)
-                    .help("Exit focus mode and show every project.")
                 }
             }
             // Width-probe approach (low-confidence layout choice, see §009
