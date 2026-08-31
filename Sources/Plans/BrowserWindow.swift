@@ -202,20 +202,19 @@ struct BrowserWindow: View {
     /// (`applyManualOrder`, new project paths to the top); otherwise it falls
     /// back to the automatic recency sort (`sortByStaleness`) exactly as before.
     ///
-    /// After the order is resolved, the "Hide Empty" toolbar toggle (#021) is
-    /// applied: when `store.hideEmptyProjects` is true the result is filtered to
-    /// projects with outstanding work (`hasOutstandingWork`) OR whose path the
-    /// user has STARRED (#035, `store.starredProjectPaths`) — so a starred but
-    /// empty project's card survives the filter — preserving order.
+    /// After the order is resolved, the "view mode" toolbar control (#072) is
+    /// applied: `store.projectViewMode` filters the result to everything
+    /// (`.all`), to projects with outstanding work (`.active`), or to starred
+    /// projects (`.starred`) via `visibleUnderViewMode`, preserving order.
     /// `store.projects` is never mutated — only this derived view is filtered.
     ///
     /// Next, the "hidden projects" filter (#072) removes any project whose path
     /// the user has hidden (`store.hiddenProjectPaths`). This step is applied
-    /// UNCONDITIONALLY and is DELIBERATELY decoupled from the "Hide Empty" gate
-    /// above — it runs whether or not `hideEmptyProjects` is on, so a project
-    /// with active work can still be hidden (the crux of #072). It is suppressed
-    /// only when `store.showHidden` is true (the transient "reveal hidden cards"
-    /// toggle), which reveals the hidden cards so they can be un-hidden.
+    /// UNCONDITIONALLY and is DELIBERATELY decoupled from the view mode above —
+    /// it runs in EVERY mode, so a project with active work can still be hidden
+    /// and an explicit hide always wins. It is suppressed only when
+    /// `store.showHidden` is true (the transient "reveal hidden cards" toggle),
+    /// which reveals the hidden cards so they can be un-hidden.
     ///
     /// Finally, "Focus" mode (#067) collapses the result to the single focused
     /// project's card. The focus is resolved defensively: a `focusedProjectPath`
@@ -232,19 +231,20 @@ struct BrowserWindow: View {
         } else {
             sorted = BrowserViewModel.sortByStaleness(store.projects)
         }
-        let hideEmptyResolved: [ProjectTasks]
-        if store.hideEmptyProjects {
-            hideEmptyResolved = sorted.filter {
-                BrowserViewModel.visibleUnderHideEmpty($0, starredProjectPaths: store.starredProjectPaths)
-            }
-        } else {
-            hideEmptyResolved = sorted
+        // #072: the single labelled view mode — `.all`, `.active` or `.starred`.
+        let modeResolved = sorted.filter {
+            BrowserViewModel.visibleUnderViewMode(
+                $0,
+                mode: store.projectViewMode,
+                starredProjectPaths: store.starredProjectPaths
+            )
         }
-        // #072: filter out hidden projects, independent of the empty-gate above.
-        // Suppressed while `showHidden` is on so hidden cards can be revealed.
+        // #072: filter out hidden projects, independent of the view mode above —
+        // an explicit hide overrides every mode. Suppressed while `showHidden` is
+        // on so hidden cards can be revealed.
         let hiddenResolved = store.showHidden
-            ? hideEmptyResolved
-            : hideEmptyResolved.filter {
+            ? modeResolved
+            : modeResolved.filter {
                 BrowserViewModel.visibleUnderHidden($0, hiddenProjectPaths: store.hiddenProjectPaths)
             }
         // Auto-clear a stale focus: only honor the focused path when some live
@@ -320,28 +320,44 @@ struct BrowserWindow: View {
                     }
                     .help("Link a plans-cc project folder")
                 }
-                // #021: hide projects with no outstanding plans. A persistent
-                // toolbar toggle bound to `store.hideEmptyProjects`; flipping it
+                // #072: the project view mode — ONE labelled control replacing
+                // the unlabeled "Hide Empty" eye toggle (and the star's old role
+                // as a mere exception to it). Setting `store.projectViewMode`
                 // re-derives `sortedProjects` (the filter lives there) so the grid
                 // reflows. Pure store/UserDefaults state — never writes `.plans/`.
                 ToolbarItem {
-                    // A plain `Button` (not a button-styled `Toggle`) so this
-                    // control shares the IDENTICAL toolbar chrome as the "+"
-                    // button beside it — same square hover/active footprint and
-                    // no persistent background box (the `.toggleStyle(.button)`
-                    // pill made the two look inconsistent). The on/off state is
-                    // conveyed by the glyph itself: `eye.slash` (accent-tinted)
-                    // while empty projects are hidden, plain `eye` when shown.
-                    Button {
-                        store.hideEmptyProjects.toggle()
+                    // A `Menu` rather than a cycling button: with THREE named
+                    // states, a click-to-cycle control makes the user step through
+                    // modes they didn't want to reach the one they did, and can't
+                    // show what the other options even are. The menu names all
+                    // three up front and jumps straight to one.
+                    //
+                    // Crucially the menu's own label renders the current mode's
+                    // `label` as visible TEXT beside its symbol — the entire point
+                    // of this redesign was that three adjacent unlabeled glyphs
+                    // were unreadable at a glance. Accent-tinted while a filter is
+                    // actually narrowing the grid (i.e. any mode but `.all`).
+                    Menu {
+                        ForEach(ProjectViewMode.allCases, id: \.rawValue) { mode in
+                            Button {
+                                store.projectViewMode = mode
+                            } label: {
+                                Label(mode.label, systemImage: mode.symbolName)
+                            }
+                        }
                     } label: {
                         Label(
-                            "Hide Empty",
-                            systemImage: store.hideEmptyProjects ? "eye.slash" : "eye"
+                            store.projectViewMode.label,
+                            systemImage: store.projectViewMode.symbolName
                         )
+                        .labelStyle(.titleAndIcon)
                     }
-                    .foregroundStyle(store.hideEmptyProjects ? AnyShapeStyle(.tint) : AnyShapeStyle(.primary))
-                    .help("Hide projects with no outstanding plans")
+                    .foregroundStyle(
+                        store.projectViewMode == .all
+                            ? AnyShapeStyle(.primary)
+                            : AnyShapeStyle(.tint)
+                    )
+                    .help("Show all projects, only active ones, or only starred ones")
                 }
                 // #072: reveal explicitly-hidden projects. Flipping
                 // `store.showHidden` re-derives `sortedProjects` (whose hidden
@@ -349,15 +365,14 @@ struct BrowserWindow: View {
                 // route back for a hidden card: revealing it re-renders its
                 // footer hide glyph so it can be un-hidden.
                 //
-                // It deliberately does NOT mirror the "Hide Empty" chrome, which
-                // is what shipped first and what the user flagged as confusing:
-                // two unlabeled `eye`/`eye.slash` glyphs sat ADJACENT meaning
-                // unrelated things, and some toggle combinations rendered two
-                // IDENTICAL glyphs side by side. So this control owns a distinct
-                // metaphor — `rectangle`/`rectangle.slash`, hiding a CARD rather
-                // than an eyeball — leaving the eye pair to the incumbent "Hide
-                // Empty". (The per-card footer glyph keeps `eye.slash`: it is
-                // unambiguous in local context.)
+                // Its `rectangle`/`rectangle.slash` metaphor — hiding a CARD
+                // rather than an eyeball — dates from when an unlabeled
+                // `eye`/`eye.slash` "Hide Empty" toggle sat adjacent and the two
+                // were indistinguishable at a glance. That toggle is gone (the
+                // labelled view-mode menu replaced it), but the card metaphor is
+                // kept: it is the more literal reading of "reveal hidden cards".
+                // (The per-card footer glyph keeps `eye.slash`: it is unambiguous
+                // in local context.)
                 //
                 // It also always reports the hidden COUNT, because a hidden card
                 // isn't rendered at all — without a count, its own hide glyph
@@ -383,9 +398,9 @@ struct BrowserWindow: View {
                         )
                     }
                 }
-                // #033: card-layout toggle. Mirrors the "Hide Empty" chrome
-                // exactly — a plain `Button` (not a button-styled `Toggle`) so it
-                // shares the IDENTICAL square toolbar footprint. The glyph/label
+                // #033: card-layout toggle. A plain `Button` (not a button-styled
+                // `Toggle`) so it shares the IDENTICAL square toolbar footprint as
+                // the "+" button and the reveal control. The glyph/label
                 // come from `CardLayoutMode`; the control is accent-tinted while
                 // fit-to-screen is the active mode.
                 ToolbarItem {
@@ -612,8 +627,8 @@ struct BrowserWindow: View {
     private func fitCardGrid(columns: Int) -> some View {
         // #040: snapshot `sortedProjects` ONCE so every index below indexes the
         // SAME array the row indices were computed from. `sortedProjects` is a
-        // computed property whose length SHRINKS when the "Hide Empty" toggle
-        // flips mid-render; the `ForEach` closures re-evaluate lazily, so without
+        // computed property whose length SHRINKS when the view-mode filter
+        // changes mid-render; the `ForEach` closures re-evaluate lazily, so without
         // a stable snapshot a stale index would trap ("Index out of range").
         let projects = sortedProjects
         let rows = Self.rowIndices(count: projects.count, columns: columns)
@@ -963,15 +978,27 @@ enum BrowserViewModel {
         }
     }
 
-    /// Whether `project` survives the "Hide Empty" filter (#035): a project is
-    /// kept when it has outstanding work OR the user has STARRED its path (so a
-    /// starred but otherwise-empty project's card stays in the dashboard). Pure
-    /// value work — no I/O, no SwiftUI; drives `BrowserWindow.sortedProjects`.
-    static func visibleUnderHideEmpty(
+    /// Whether `project` survives the current project view mode (#072): `.all`
+    /// keeps everything, `.active` keeps only projects with outstanding work, and
+    /// `.starred` keeps only projects whose path the user has starred.
+    ///
+    /// Note the deliberate behavior change from the "Hide Empty" gate this
+    /// replaced: that gate rescued a starred-but-empty project via an
+    /// `|| isStarred` clause, so star was only ever an EXCEPTION to a rule rather
+    /// than a filter. There is no such clause here — `.active` means exactly
+    /// "has outstanding work", and curated projects are found under `.starred`.
+    ///
+    /// Pure value work — no I/O, no SwiftUI; drives `BrowserWindow.sortedProjects`.
+    static func visibleUnderViewMode(
         _ project: ProjectTasks,
+        mode: ProjectViewMode,
         starredProjectPaths: Set<String>
     ) -> Bool {
-        project.hasOutstandingWork || starredProjectPaths.contains(project.projectPath)
+        switch mode {
+        case .all: return true
+        case .active: return project.hasOutstandingWork
+        case .starred: return starredProjectPaths.contains(project.projectPath)
+        }
     }
 
     /// Whether `project` is visible under focus mode (#067): when
@@ -988,8 +1015,9 @@ enum BrowserViewModel {
 
     /// Whether `project` survives the "hidden projects" filter (#072): a project
     /// whose path is in `hiddenProjectPaths` is filtered out of the dashboard
-    /// regardless of its emptiness, starred, or focus state — hiding is fully
-    /// decoupled from the "Hide Empty" gate. Pure value work — no I/O, no
+    /// regardless of its emptiness, starred, or focus state — an explicit hide is
+    /// the strongest signal and overrides EVERY `ProjectViewMode`. Pure value
+    /// work — no I/O, no
     /// SwiftUI; drives `BrowserWindow.sortedProjects`.
     static func visibleUnderHidden(
         _ project: ProjectTasks,
@@ -1004,7 +1032,7 @@ enum BrowserViewModel {
     /// can retain paths for projects since unregistered or deleted, which would
     /// report a phantom count and offer to reveal nothing. So the set is resolved
     /// against `projects` exactly as `sortedProjects` resolves a stale
-    /// `focusedProjectPath`. Independent of emptiness, starred, and focus state,
+    /// `focusedProjectPath`. Independent of view mode and focus state,
     /// matching `visibleUnderHidden`. Pure value work — no I/O, no SwiftUI.
     static func hiddenProjectCount(
         projects: [ProjectTasks],

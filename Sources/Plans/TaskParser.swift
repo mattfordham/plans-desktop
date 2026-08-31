@@ -194,8 +194,8 @@ struct ProjectTasks: Equatable {
     /// Whether the project has any outstanding work — i.e. at least one active
     /// (non-completed, non-`nil`-status) task. `false` for a project whose tasks
     /// are all completed or have unrecognized statuses. Drives the browser's
-    /// "Hide Empty" toolbar filter (#021); mirrors the "No outstanding plans"
-    /// terminology shown on an empty `ProjectCard`.
+    /// browser's `.active` project view mode (#072); mirrors the "No outstanding
+    /// plans" terminology shown on an empty `ProjectCard`.
     var hasOutstandingWork: Bool { !activeTasks.isEmpty }
 
     /// The currently checked-out git branch name for the project (#024), or

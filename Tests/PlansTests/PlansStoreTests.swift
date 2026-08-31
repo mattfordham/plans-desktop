@@ -851,6 +851,27 @@ final class PlansStoreTests: XCTestCase {
         XCTAssertEqual(reloaded.cardLayoutMode, .fit)
     }
 
+    // MARK: - Project view mode (#072, persisted to injected UserDefaults)
+
+    func testProjectViewModeDefaultsToAll() throws {
+        let reader = try makeReader(projectPaths: [])
+        let store = PlansStore(registryReader: reader, defaults: makeDefaults())
+
+        XCTAssertEqual(store.projectViewMode, .all)
+    }
+
+    func testSettingProjectViewModePersistsAcrossStoreInstances() throws {
+        let reader = try makeReader(projectPaths: [])
+        let defaults = makeDefaults()
+
+        let store = PlansStore(registryReader: reader, defaults: defaults)
+        store.projectViewMode = .starred
+
+        // A fresh store over the SAME defaults reads the saved mode back.
+        let reloaded = PlansStore(registryReader: reader, defaults: defaults)
+        XCTAssertEqual(reloaded.projectViewMode, .starred)
+    }
+
     // MARK: - Starred project paths (#035, persisted to injected UserDefaults)
 
     func testStarredProjectPathsDefaultToEmpty() throws {

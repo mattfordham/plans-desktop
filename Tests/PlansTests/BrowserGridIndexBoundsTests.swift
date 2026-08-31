@@ -3,8 +3,8 @@ import XCTest
 
 /// Regression tests for #040 ("Clicking the eye icon crashes the app"): the card
 /// grid's pure index helpers must never emit an index outside `0..<count`. The
-/// crash was a stale-index race where `sortedProjects` shrank (the "Hide Empty"
-/// toggle filters it) while a `ForEach` re-evaluated cached indices against the
+/// crash was a stale-index race where `sortedProjects` shrank (the project view
+/// mode filters it) while a `ForEach` re-evaluated cached indices against the
 /// smaller array. The view-level fix snapshots `sortedProjects` and bounds-guards
 /// each subscript; these tests pin the contract of the underlying pure helpers —
 /// every index they emit is in range, and together the emitted indices cover

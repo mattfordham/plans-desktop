@@ -326,11 +326,10 @@ final class BrowserWindowTests: XCTestCase {
         XCTAssertEqual(row?.id, "/p/001")
     }
 
-    // MARK: - visibleUnderHideEmpty (#035: keep starred projects past the hide-empty filter)
+    // MARK: - visibleUnderViewMode (#072: one labelled three-state view mode)
 
-    /// A project with NO outstanding work whose path the user STARRED survives
-    /// the hide-empty filter, so its (empty) card stays in the dashboard.
-    func testVisibleUnderHideEmptyTrueForStarredEmptyProject() {
+    /// `.all` keeps every project, including one with NO outstanding work.
+    func testVisibleUnderViewModeAllKeepsEmptyProject() {
         let project = makeProject(
             path: "/p",
             name: "p",
@@ -338,25 +337,12 @@ final class BrowserWindowTests: XCTestCase {
             activeTasks: []
         )
         XCTAssertTrue(
-            BrowserViewModel.visibleUnderHideEmpty(project, starredProjectPaths: ["/p"])
+            BrowserViewModel.visibleUnderViewMode(project, mode: .all, starredProjectPaths: [])
         )
     }
 
-    /// A project with NO outstanding work and NOT starred is hidden by the filter.
-    func testVisibleUnderHideEmptyFalseForUnstarredEmptyProject() {
-        let project = makeProject(
-            path: "/p",
-            name: "p",
-            tasks: [makeTask(id: "099", status: .completed)],
-            activeTasks: []
-        )
-        XCTAssertFalse(
-            BrowserViewModel.visibleUnderHideEmpty(project, starredProjectPaths: [])
-        )
-    }
-
-    /// A project with outstanding work is always kept, starred or not.
-    func testVisibleUnderHideEmptyTrueForProjectWithOutstandingWork() {
+    /// `.active` keeps a project that HAS outstanding work.
+    func testVisibleUnderViewModeActiveKeepsProjectWithOutstandingWork() {
         let project = makeProject(
             path: "/p",
             name: "p",
@@ -364,12 +350,12 @@ final class BrowserWindowTests: XCTestCase {
             activeTasks: [makeTask(id: "001", status: .inProgress)]
         )
         XCTAssertTrue(
-            BrowserViewModel.visibleUnderHideEmpty(project, starredProjectPaths: [])
+            BrowserViewModel.visibleUnderViewMode(project, mode: .active, starredProjectPaths: [])
         )
     }
 
-    /// Starring a DIFFERENT project does not rescue this empty, unstarred one.
-    func testVisibleUnderHideEmptyFalseWhenOnlyAnotherProjectStarred() {
+    /// `.active` filters out a project with NO outstanding work.
+    func testVisibleUnderViewModeActiveFiltersEmptyProject() {
         let project = makeProject(
             path: "/p",
             name: "p",
@@ -377,7 +363,69 @@ final class BrowserWindowTests: XCTestCase {
             activeTasks: []
         )
         XCTAssertFalse(
-            BrowserViewModel.visibleUnderHideEmpty(project, starredProjectPaths: ["/other"])
+            BrowserViewModel.visibleUnderViewMode(project, mode: .active, starredProjectPaths: [])
+        )
+    }
+
+    /// THE BEHAVIOR-CHANGE CRUX — under the OLD "Hide Empty" gate a STARRED but
+    /// empty project was rescued by an `|| isStarred` exception. That exception
+    /// is deliberately GONE: `.active` means exactly "has outstanding work", so a
+    /// starred-but-empty project is filtered out. Curated projects now live in
+    /// `.starred`, which is a filter in its own right.
+    func testVisibleUnderViewModeActiveFiltersStarredButEmptyProject() {
+        let project = makeProject(
+            path: "/p",
+            name: "p",
+            tasks: [makeTask(id: "099", status: .completed)],
+            activeTasks: []
+        )
+        XCTAssertFalse(
+            BrowserViewModel.visibleUnderViewMode(project, mode: .active, starredProjectPaths: ["/p"])
+        )
+    }
+
+    /// `.starred` keeps a starred project, even one with no outstanding work.
+    func testVisibleUnderViewModeStarredKeepsStarredProject() {
+        let project = makeProject(
+            path: "/p",
+            name: "p",
+            tasks: [makeTask(id: "099", status: .completed)],
+            activeTasks: []
+        )
+        XCTAssertTrue(
+            BrowserViewModel.visibleUnderViewMode(project, mode: .starred, starredProjectPaths: ["/p"])
+        )
+    }
+
+    /// `.starred` filters out an UNSTARRED project even when it HAS outstanding
+    /// work — starred is a curation filter, not an activity filter.
+    func testVisibleUnderViewModeStarredFiltersUnstarredProjectWithWork() {
+        let project = makeProject(
+            path: "/p",
+            name: "p",
+            tasks: [makeTask(id: "001", status: .inProgress)],
+            activeTasks: [makeTask(id: "001", status: .inProgress)]
+        )
+        XCTAssertFalse(
+            BrowserViewModel.visibleUnderViewMode(project, mode: .starred, starredProjectPaths: ["/other"])
+        )
+    }
+
+    /// An explicit per-project HIDE is the strongest signal and overrides any
+    /// view mode: the project passes `.all` but is still removed by the hidden
+    /// filter, which runs unconditionally in every mode.
+    func testHiddenProjectIsFilteredEvenUnderAllViewMode() {
+        let project = makeProject(
+            path: "/p",
+            name: "p",
+            tasks: [makeTask(id: "001", status: .inProgress)],
+            activeTasks: [makeTask(id: "001", status: .inProgress)]
+        )
+        XCTAssertTrue(
+            BrowserViewModel.visibleUnderViewMode(project, mode: .all, starredProjectPaths: [])
+        )
+        XCTAssertFalse(
+            BrowserViewModel.visibleUnderHidden(project, hiddenProjectPaths: ["/p"])
         )
     }
 
@@ -428,9 +476,9 @@ final class BrowserWindowTests: XCTestCase {
 
     /// THE CRUX — hide is decoupled from the empty-project gate. A NON-empty
     /// project that HAS outstanding active work is STILL hidden when its path is
-    /// in the hidden set. Unlike `visibleUnderHideEmpty` (which only ever removes
-    /// EMPTY projects and rescues starred ones), hiding must apply even to a
-    /// project brimming with work — proving the two mechanisms are independent.
+    /// in the hidden set. Unlike `visibleUnderViewMode` (which filters on activity or
+    /// starred state), hiding must apply even to a project brimming with work —
+    /// proving the two mechanisms are independent.
     func testVisibleUnderHiddenFalseForNonEmptyProjectInSet() {
         let project = makeProject(
             path: "/p",

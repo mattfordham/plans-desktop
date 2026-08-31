@@ -104,8 +104,8 @@ struct ProjectCard: View {
 
     /// The clickable plan rows for this card: the active plans in `TaskParser`'s
     /// active order. Starring is now a PROJECT-level concern (#035) — it keeps an
-    /// empty card visible under "Hide Empty" but does not inject completed plans
-    /// into the body — so this is just the active rows.
+    /// empty card visible under the `.starred` view mode but does not inject
+    /// completed plans into the body — so this is just the active rows.
     private var rows: [TaskRow] {
         BrowserViewModel.activeRows(project)
     }
@@ -795,8 +795,8 @@ struct ProjectCard: View {
     /// this project's path is in `store.starredProjectPaths`, otherwise an outline
     /// `star`. Tapping toggles membership of `project.projectPath` in the persisted
     /// set (`insert`/`remove` triggers the store's `didSet` persistence). Starring
-    /// keeps the card visible in the dashboard past the "Hide Empty" filter even
-    /// when the project has no outstanding work.
+    /// is a filter input in its own right (#072): the `.starred` project view mode
+    /// shows exactly the starred projects, empty or not.
     @ViewBuilder
     private var starToggle: some View {
         let isStarred = store.starredProjectPaths.contains(project.projectPath)
@@ -833,8 +833,9 @@ struct ProjectCard: View {
     /// Tapping toggles membership of `project.projectPath` in the persisted set
     /// (`store.toggleHidden`), which the browser's `sortedProjects` reacts to by
     /// dropping the card from the grid. Hiding is DELIBERATELY independent of the
-    /// "Hide Empty" gate and of starred state: a project with outstanding work can
-    /// be hidden, and the only way back is the toolbar's "Show Hidden" reveal.
+    /// project view mode and of starred state, and overrides both: a project with
+    /// outstanding work can be hidden, and the only way back is the toolbar's
+    /// "Show Hidden" reveal.
     @ViewBuilder
     private var hideToggle: some View {
         let isHidden = store.hiddenProjectPaths.contains(project.projectPath)

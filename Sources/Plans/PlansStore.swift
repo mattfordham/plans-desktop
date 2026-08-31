@@ -41,15 +41,6 @@ final class PlansStore {
         didSet { defaults.set(manualOrderActive, forKey: Self.activeKey) }
     }
 
-    /// Whether the browser hides projects with no outstanding plans (#021). When
-    /// true, `BrowserWindow.sortedProjects` filters out projects whose
-    /// `hasOutstandingWork` is false; when false every project is shown. Persisted
-    /// on every set so the preference survives app restarts. NEVER written to
-    /// `.plans/` (§2 read-only) — UserDefaults is the only persistence sink.
-    var hideEmptyProjects: Bool = false {
-        didSet { defaults.set(hideEmptyProjects, forKey: Self.hideEmptyKey) }
-    }
-
     /// A persisted, unsubmitted plan-capture draft for one project (#031). Holds
     /// the in-flight description text plus the two run toggles so the "New Plan"
     /// sheet can restore exactly what the user was typing if it is dismissed and
@@ -167,10 +158,11 @@ final class PlansStore {
         }
     }
 
-    /// The set of "starred" project paths the user has pinned to keep visible
-    /// (#035), keyed by `ProjectTasks.projectPath`. A starred project's card
-    /// stays in the dashboard even when it has no outstanding work and the
-    /// "Hide Empty" filter is on (see `BrowserWindow.sortedProjects`). Persisted
+    /// The set of "starred" project paths the user has curated (#035), keyed by
+    /// `ProjectTasks.projectPath`. Starring is a first-class filter INPUT: the
+    /// `.starred` project view mode (#072) shows exactly these projects (see
+    /// `BrowserWindow.sortedProjects`). It is no longer a mere exception to an
+    /// empty-project gate, so it now means something in every mode. Persisted
     /// on every set by writing `Array(starredProjectPaths)` to
     /// `starredProjectsKey` in `defaults` (UserDefaults stores arrays, not Sets).
     /// NEVER written to `.plans/` (§2 read-only) — UserDefaults is the only sink.
@@ -181,8 +173,9 @@ final class PlansStore {
     /// The set of "hidden" project paths the user has chosen to conceal (#072),
     /// keyed by `ProjectTasks.projectPath`. A hidden project's card is filtered
     /// out of the dashboard regardless of whether it has outstanding work — this
-    /// is DELIBERATELY independent of the "Hide Empty" gate, so a project with
-    /// active tasks can still be hidden (see `BrowserWindow.sortedProjects` and
+    /// is DELIBERATELY independent of `projectViewMode`, so a project with active
+    /// tasks can still be hidden, and an explicit hide overrides EVERY view mode
+    /// (see `BrowserWindow.sortedProjects` and
     /// `BrowserViewModel.visibleUnderHidden`). Persisted on every set by writing
     /// `Array(hiddenProjectPaths)` to `hiddenProjectsKey` in `defaults`
     /// (UserDefaults stores arrays, not Sets). NEVER written to `.plans/`
@@ -238,17 +231,27 @@ final class PlansStore {
         didSet { defaults.set(cardLayoutMode.rawValue, forKey: Self.cardLayoutKey) }
     }
 
+    /// Which projects the browser dashboard shows (#072): `.all` (the default),
+    /// `.active` (outstanding work only) or `.starred` (curated only). The single
+    /// labelled control that replaced the old "Hide Empty" toggle and the star
+    /// exception. Persisted on every set (its `rawValue` is the wire form) so the
+    /// choice survives app restarts. NEVER written to `.plans/` (§2 read-only) —
+    /// UserDefaults is the only persistence sink.
+    var projectViewMode: ProjectViewMode = .all {
+        didSet { defaults.set(projectViewMode.rawValue, forKey: Self.projectViewModeKey) }
+    }
+
     /// UserDefaults key for the persisted manual card order (array of paths).
     private static let orderKey = "cardOrderOverride"
 
     /// UserDefaults key for the persisted manual-order-active flag.
     private static let activeKey = "cardOrderManualActive"
 
-    /// UserDefaults key for the persisted hide-empty-projects flag (#021).
-    private static let hideEmptyKey = "hideEmptyProjects"
-
     /// UserDefaults key for the persisted card layout mode (#033).
     private static let cardLayoutKey = "cardLayoutMode"
+
+    /// UserDefaults key for the persisted project view mode (#072).
+    private static let projectViewModeKey = "projectViewMode"
 
     /// UserDefaults key for the persisted starred project paths (#035). The
     /// stored value is `Array(starredProjectPaths)` (UserDefaults stores arrays).
@@ -411,8 +414,8 @@ final class PlansStore {
         // re-persisting (the `didSet` would write the just-read value back).
         _projectOrderOverride = defaults.stringArray(forKey: Self.orderKey) ?? []
         _manualOrderActive = defaults.bool(forKey: Self.activeKey)
-        _hideEmptyProjects = defaults.bool(forKey: Self.hideEmptyKey)
         _cardLayoutMode = CardLayoutMode(rawValue: defaults.string(forKey: Self.cardLayoutKey) ?? "") ?? .scroll
+        _projectViewMode = ProjectViewMode(rawValue: defaults.string(forKey: Self.projectViewModeKey) ?? "") ?? .all
         // Load persisted starred project paths (#035): the stored array round-trips
         // back into the `Set`. Assigning the backing field avoids the `didSet`
         // re-persisting the just-read value.
@@ -554,7 +557,7 @@ final class PlansStore {
 
     /// Toggles the hidden state for `path` (#072): hides the project when it is
     /// not already hidden, or reveals it when it already is (a second toggle
-    /// un-hides the card). Independent of the "Hide Empty" gate — a project with
+    /// un-hides the card). Independent of `projectViewMode` — a project with
     /// active work can still be hidden. Persisted via the `hiddenProjectPaths`
     /// setter. UI-only state — never touches `.plans/` (§2 read-only).
     func toggleHidden(_ path: String) {
