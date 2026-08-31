@@ -911,64 +911,6 @@ final class PlansStoreTests: XCTestCase {
         XCTAssertEqual(reloaded.starredProjectPaths, ["/proj2"])
     }
 
-    // MARK: - Hidden project paths (#072, persisted to injected UserDefaults)
-
-    func testHiddenProjectPathsDefaultToEmpty() throws {
-        let reader = try makeReader(projectPaths: [])
-        let store = PlansStore(registryReader: reader, defaults: makeDefaults())
-
-        XCTAssertTrue(store.hiddenProjectPaths.isEmpty)
-    }
-
-    func testHiddenProjectPathsPersistAcrossStoreInstances() throws {
-        let reader = try makeReader(projectPaths: [])
-        let defaults = makeDefaults()
-
-        let store = PlansStore(registryReader: reader, defaults: defaults)
-        store.hiddenProjectPaths.insert("/proj1")
-        store.hiddenProjectPaths.insert("/proj2")
-
-        XCTAssertEqual(store.hiddenProjectPaths, ["/proj1", "/proj2"])
-
-        // A fresh store over the SAME defaults restores the hidden set.
-        let reloaded = PlansStore(registryReader: reader, defaults: defaults)
-        XCTAssertEqual(reloaded.hiddenProjectPaths, ["/proj1", "/proj2"])
-    }
-
-    func testRemovingHiddenProjectPathPersistsAcrossStoreInstances() throws {
-        let reader = try makeReader(projectPaths: [])
-        let defaults = makeDefaults()
-
-        let store = PlansStore(registryReader: reader, defaults: defaults)
-        store.hiddenProjectPaths = ["/proj1", "/proj2"]
-        store.hiddenProjectPaths.remove("/proj1")
-
-        XCTAssertEqual(store.hiddenProjectPaths, ["/proj2"])
-
-        // A fresh store over the SAME defaults reflects the removal.
-        let reloaded = PlansStore(registryReader: reader, defaults: defaults)
-        XCTAssertEqual(reloaded.hiddenProjectPaths, ["/proj2"])
-    }
-
-    func testToggleHiddenInsertsThenRemoves() throws {
-        let reader = try makeReader(projectPaths: [])
-        let store = PlansStore(registryReader: reader, defaults: makeDefaults())
-
-        // Toggling an unhidden path hides it.
-        store.toggleHidden("/proj1")
-        XCTAssertTrue(store.hiddenProjectPaths.contains("/proj1"))
-
-        // Toggling the SAME (already-hidden) path unhides it.
-        store.toggleHidden("/proj1")
-        XCTAssertFalse(store.hiddenProjectPaths.contains("/proj1"))
-
-        // Toggling two distinct paths leaves both present.
-        store.toggleHidden("/a")
-        store.toggleHidden("/b")
-        XCTAssertTrue(store.hiddenProjectPaths.contains("/a"))
-        XCTAssertTrue(store.hiddenProjectPaths.contains("/b"))
-    }
-
     // MARK: - Focused project (#067, persisted to injected UserDefaults)
 
     func testFocusedProjectPathDefaultsToNil() throws {

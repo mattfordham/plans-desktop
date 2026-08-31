@@ -492,14 +492,11 @@ struct ProjectCard: View {
     /// pinned bottom-LEFT and the project toggles bottom-RIGHT, across from
     /// each other. Git status is leading-aligned and the `Spacer` pushes the
     /// toggles to the trailing edge; a non-git project simply shows the toggles
-    /// alone. The trailing cluster reads hide → focus → star (#072 slots the hide
-    /// toggle at the leading edge of the cluster so the long-standing focus/star
-    /// pair keeps its established position).
+    /// alone. The trailing cluster reads focus → star.
     private var footer: some View {
         HStack(spacing: 8) {
             gitFooter
             Spacer(minLength: 8)
-            hideToggle
             focusToggle
             starToggle
         }
@@ -828,24 +825,6 @@ struct ProjectCard: View {
         }
     }
 
-    /// The project hide/unhide toggle (#072). An `eye.slash` glyph, opaque when
-    /// this project's path is in `store.hiddenProjectPaths` and muted otherwise.
-    /// Tapping toggles membership of `project.projectPath` in the persisted set
-    /// (`store.toggleHidden`), which the browser's `sortedProjects` reacts to by
-    /// dropping the card from the grid. Hiding is DELIBERATELY independent of the
-    /// project view mode and of starred state, and overrides both: a project with
-    /// outstanding work can be hidden, and the only way back is the toolbar's
-    /// "Show Hidden" reveal.
-    @ViewBuilder
-    private var hideToggle: some View {
-        let isHidden = store.hiddenProjectPaths.contains(project.projectPath)
-        HideToggleGlyph(
-            isHidden: isHidden,
-            help: isHidden ? "Unhide project" : "Hide project"
-        ) {
-            store.toggleHidden(project.projectPath)
-        }
-    }
 }
 
 /// A pending "Refine Plan" request (#056): the task + project a tapped Refine
@@ -905,38 +884,6 @@ private struct FocusToggleGlyph: View {
             Image(systemName: "viewfinder")
                 .imageScale(.medium)
                 .foregroundStyle(Color.white.opacity(isFocused ? 0.6 : (hovering ? 0.35 : 0.15)))
-                .frame(width: 22, height: 22)
-                .background(
-                    RoundedRectangle(cornerRadius: 5)
-                        .fill(Color.primary.opacity(hovering ? 0.10 : 0))
-                )
-                .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-        .animation(.easeOut(duration: 0.12), value: hovering)
-        .onHover { hovering = $0 }
-        .help(help)
-    }
-}
-
-/// The project hide glyph (#072). Mirrors `StarToggleGlyph`/`FocusToggleGlyph`:
-/// a `.plain` `Button` showing a solid `eye.slash` whose white opacity conveys
-/// state — medium while this project is hidden, very low otherwise (brightening
-/// slightly on hover) — over the same subtle hover background and cursor
-/// treatment. The hidden state is only ever visible on-card while the toolbar's
-/// "Show Hidden" reveal is on, since an unrevealed hidden card is not rendered.
-private struct HideToggleGlyph: View {
-    let isHidden: Bool
-    let help: String
-    let action: () -> Void
-
-    @State private var hovering = false
-
-    var body: some View {
-        Button(action: action) {
-            Image(systemName: "eye.slash")
-                .imageScale(.medium)
-                .foregroundStyle(Color.white.opacity(isHidden ? 0.6 : (hovering ? 0.35 : 0.15)))
                 .frame(width: 22, height: 22)
                 .background(
                     RoundedRectangle(cornerRadius: 5)

@@ -11,10 +11,6 @@ import Foundation
 /// own right, and `.active` means exactly what it says — outstanding work, with
 /// no starred rescue clause. Curated projects live under `.starred` instead.
 ///
-/// Per-project hide (`PlansStore.hiddenProjectPaths` /
-/// `BrowserViewModel.visibleUnderHidden`) is DELIBERATELY not folded in here: an
-/// explicit hide is the strongest signal and overrides every mode.
-///
 /// Persisted on `PlansStore.projectViewMode` (its `rawValue` is the wire form)
 /// and driven from a browser-window toolbar control that renders `label` as
 /// visible TEXT — the readability of the current state is the whole point.

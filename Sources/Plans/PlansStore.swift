@@ -170,20 +170,6 @@ final class PlansStore {
         didSet { defaults.set(Array(starredProjectPaths), forKey: Self.starredProjectsKey) }
     }
 
-    /// The set of "hidden" project paths the user has chosen to conceal (#072),
-    /// keyed by `ProjectTasks.projectPath`. A hidden project's card is filtered
-    /// out of the dashboard regardless of whether it has outstanding work — this
-    /// is DELIBERATELY independent of `projectViewMode`, so a project with active
-    /// tasks can still be hidden, and an explicit hide overrides EVERY view mode
-    /// (see `BrowserWindow.sortedProjects` and
-    /// `BrowserViewModel.visibleUnderHidden`). Persisted on every set by writing
-    /// `Array(hiddenProjectPaths)` to `hiddenProjectsKey` in `defaults`
-    /// (UserDefaults stores arrays, not Sets). NEVER written to `.plans/`
-    /// (§2 read-only) — UserDefaults is the only sink.
-    var hiddenProjectPaths: Set<String> = [] {
-        didSet { defaults.set(Array(hiddenProjectPaths), forKey: Self.hiddenProjectsKey) }
-    }
-
     /// The path of the single project the dashboard is "focused" on (#067), or
     /// `nil` when focus mode is off and every project is shown. When set, the
     /// browser filters the grid down to just this project's card (see
@@ -202,14 +188,6 @@ final class PlansStore {
     /// deliberately NOT UserDefaults-backed (no `didSet`, never loaded in `init`),
     /// since "open a form" is a transient action, not persisted preference.
     var newPlanTrigger: Int = 0
-
-    /// Transient "reveal hidden cards" flag (#072) driving the toolbar toggle:
-    /// when `true`, the browser stops filtering out `hiddenProjectPaths` so the
-    /// user can see and un-hide those cards. Pure in-memory view state —
-    /// deliberately NOT UserDefaults-backed (no `didSet`, never loaded in
-    /// `init`), since revealing hidden cards is a transient action, not a saved
-    /// preference (it resets to hidden on the next launch).
-    var showHidden: Bool = false
 
     /// Requests that the New Plan form open (#034). Increments `newPlanTrigger`
     /// (overflow-safe) so any observer reacts to the change even on repeated
@@ -256,10 +234,6 @@ final class PlansStore {
     /// UserDefaults key for the persisted starred project paths (#035). The
     /// stored value is `Array(starredProjectPaths)` (UserDefaults stores arrays).
     private static let starredProjectsKey = "starredProjects"
-
-    /// UserDefaults key for the persisted hidden project paths (#072). The stored
-    /// value is `Array(hiddenProjectPaths)` (UserDefaults stores arrays).
-    private static let hiddenProjectsKey = "hiddenProjects"
 
     /// UserDefaults key for the persisted focused project path (#067).
     private static let focusedProjectKey = "focusedProject"
@@ -420,10 +394,6 @@ final class PlansStore {
         // back into the `Set`. Assigning the backing field avoids the `didSet`
         // re-persisting the just-read value.
         _starredProjectPaths = Set(defaults.stringArray(forKey: Self.starredProjectsKey) ?? [])
-        // Load persisted hidden project paths (#072): the stored array round-trips
-        // back into the `Set`. Assigning the backing field avoids the `didSet`
-        // re-persisting the just-read value.
-        _hiddenProjectPaths = Set(defaults.stringArray(forKey: Self.hiddenProjectsKey) ?? [])
         // Load persisted focused project path (#067): assigning the backing field
         // avoids the `didSet` re-persisting the just-read value.
         _focusedProjectPath = defaults.string(forKey: Self.focusedProjectKey)
@@ -553,19 +523,6 @@ final class PlansStore {
     /// never touches `.plans/` (§2 read-only).
     func clearFocus() {
         focusedProjectPath = nil
-    }
-
-    /// Toggles the hidden state for `path` (#072): hides the project when it is
-    /// not already hidden, or reveals it when it already is (a second toggle
-    /// un-hides the card). Independent of `projectViewMode` — a project with
-    /// active work can still be hidden. Persisted via the `hiddenProjectPaths`
-    /// setter. UI-only state — never touches `.plans/` (§2 read-only).
-    func toggleHidden(_ path: String) {
-        if hiddenProjectPaths.contains(path) {
-            hiddenProjectPaths.remove(path)
-        } else {
-            hiddenProjectPaths.insert(path)
-        }
     }
 
     /// Errors surfaced by `linkProject(at:)` so the UI can present a message.

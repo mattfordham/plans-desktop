@@ -208,14 +208,6 @@ struct BrowserWindow: View {
     /// projects (`.starred`) via `visibleUnderViewMode`, preserving order.
     /// `store.projects` is never mutated — only this derived view is filtered.
     ///
-    /// Next, the "hidden projects" filter (#072) removes any project whose path
-    /// the user has hidden (`store.hiddenProjectPaths`). This step is applied
-    /// UNCONDITIONALLY and is DELIBERATELY decoupled from the view mode above —
-    /// it runs in EVERY mode, so a project with active work can still be hidden
-    /// and an explicit hide always wins. It is suppressed only when
-    /// `store.showHidden` is true (the transient "reveal hidden cards" toggle),
-    /// which reveals the hidden cards so they can be un-hidden.
-    ///
     /// Finally, "Focus" mode (#067) collapses the result to the single focused
     /// project's card. The focus is resolved defensively: a `focusedProjectPath`
     /// naming a project that is no longer live is treated as no focus at all, so
@@ -239,32 +231,14 @@ struct BrowserWindow: View {
                 starredProjectPaths: store.starredProjectPaths
             )
         }
-        // #072: filter out hidden projects, independent of the view mode above —
-        // an explicit hide overrides every mode. Suppressed while `showHidden` is
-        // on so hidden cards can be revealed.
-        let hiddenResolved = store.showHidden
-            ? modeResolved
-            : modeResolved.filter {
-                BrowserViewModel.visibleUnderHidden($0, hiddenProjectPaths: store.hiddenProjectPaths)
-            }
         // Auto-clear a stale focus: only honor the focused path when some live
         // project actually carries it, otherwise fall back to showing everything.
         let effectiveFocus = store.focusedProjectPath.flatMap { path in
             store.projects.contains { $0.projectPath == path } ? path : nil
         }
-        return hiddenResolved.filter {
+        return modeResolved.filter {
             BrowserViewModel.visibleUnderFocus($0, focusedProjectPath: effectiveFocus)
         }
-    }
-
-    /// How many LIVE projects are hidden (#072) — drives both the toolbar reveal
-    /// control's count and its zero-count suppression. Resolved against
-    /// `store.projects` so stale paths in the persisted set never inflate it.
-    private var hiddenCount: Int {
-        BrowserViewModel.hiddenProjectCount(
-            projects: store.projects,
-            hiddenProjectPaths: store.hiddenProjectPaths
-        )
     }
 
     var body: some View {
@@ -358,45 +332,6 @@ struct BrowserWindow: View {
                             : AnyShapeStyle(.tint)
                     )
                     .help("Show all projects, only active ones, or only starred ones")
-                }
-                // #072: reveal explicitly-hidden projects. Flipping
-                // `store.showHidden` re-derives `sortedProjects` (whose hidden
-                // filter is suppressed while the flag is on), which is the ONLY
-                // route back for a hidden card: revealing it re-renders its
-                // footer hide glyph so it can be un-hidden.
-                //
-                // Its `rectangle`/`rectangle.slash` metaphor — hiding a CARD
-                // rather than an eyeball — dates from when an unlabeled
-                // `eye`/`eye.slash` "Hide Empty" toggle sat adjacent and the two
-                // were indistinguishable at a glance. That toggle is gone (the
-                // labelled view-mode menu replaced it), but the card metaphor is
-                // kept: it is the more literal reading of "reveal hidden cards".
-                // (The per-card footer glyph keeps `eye.slash`: it is unambiguous
-                // in local context.)
-                //
-                // It also always reports the hidden COUNT, because a hidden card
-                // isn't rendered at all — without a count, its own hide glyph
-                // only exists while `showHidden` is on, so a hidden project just
-                // looks gone. At zero the ToolbarItem is omitted entirely, so the
-                // common case costs nothing visually. Still a TOGGLE, not a
-                // separate action: the count is displayed, not clicked.
-                if hiddenCount > 0 {
-                    ToolbarItem {
-                        Button {
-                            store.showHidden.toggle()
-                        } label: {
-                            Label(
-                                "\(hiddenCount)",
-                                systemImage: store.showHidden ? "rectangle" : "rectangle.slash"
-                            )
-                        }
-                        .foregroundStyle(store.showHidden ? AnyShapeStyle(.tint) : AnyShapeStyle(.primary))
-                        .help(
-                            store.showHidden
-                                ? "Hide revealed projects"
-                                : "Reveal \(hiddenCount) hidden \(hiddenCount == 1 ? "project" : "projects")"
-                        )
-                    }
                 }
                 // #033: card-layout toggle. A plain `Button` (not a button-styled
                 // `Toggle`) so it shares the IDENTICAL square toolbar footprint as
@@ -1011,34 +946,6 @@ enum BrowserViewModel {
     ) -> Bool {
         guard let focusedProjectPath else { return true }
         return project.projectPath == focusedProjectPath
-    }
-
-    /// Whether `project` survives the "hidden projects" filter (#072): a project
-    /// whose path is in `hiddenProjectPaths` is filtered out of the dashboard
-    /// regardless of its emptiness, starred, or focus state — an explicit hide is
-    /// the strongest signal and overrides EVERY `ProjectViewMode`. Pure value
-    /// work — no I/O, no
-    /// SwiftUI; drives `BrowserWindow.sortedProjects`.
-    static func visibleUnderHidden(
-        _ project: ProjectTasks,
-        hiddenProjectPaths: Set<String>
-    ) -> Bool {
-        !hiddenProjectPaths.contains(project.projectPath)
-    }
-
-    /// How many LIVE projects are currently hidden (#072) — the count the
-    /// toolbar reveal control reports (and whose zero case suppresses it
-    /// entirely). Deliberately NOT `hiddenProjectPaths.count`: that persisted set
-    /// can retain paths for projects since unregistered or deleted, which would
-    /// report a phantom count and offer to reveal nothing. So the set is resolved
-    /// against `projects` exactly as `sortedProjects` resolves a stale
-    /// `focusedProjectPath`. Independent of view mode and focus state,
-    /// matching `visibleUnderHidden`. Pure value work — no I/O, no SwiftUI.
-    static func hiddenProjectCount(
-        projects: [ProjectTasks],
-        hiddenProjectPaths: Set<String>
-    ) -> Int {
-        projects.filter { hiddenProjectPaths.contains($0.projectPath) }.count
     }
 
     /// Splits a section body into paragraphs on blank lines for per-paragraph
