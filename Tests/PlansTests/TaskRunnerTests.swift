@@ -687,6 +687,32 @@ final class TaskRunnerTests: XCTestCase {
         XCTAssertFalse(run.isRunning)
     }
 
+    /// The Refine dialog's fullest submission (#075): a `.reElaborate` run may go
+    /// deep, carrying its refinement `description` AND `deep: true` independently,
+    /// so `TaskRun.spawn` emits `--task-id` + `--description` + the valueless
+    /// `--deep` together. `deep` composes orthogonally with `.reElaborate` — this
+    /// codifies the contract the sheet's new Deep checkbox relies on. Asserted on
+    /// the stored properties rather than by spawning a process (the
+    /// `testDeepRunCarriesDeepFlag` precedent).
+    @MainActor
+    func testReElaborateRunCarriesDeepFlag() {
+        let run = TaskRun(taskID: "075", mode: .reElaborate,
+                          description: "Cover the offline case", deep: true)
+        XCTAssertEqual(run.mode, .reElaborate)
+        XCTAssertTrue(run.deep)
+        XCTAssertEqual(run.description, "Cover the offline case")
+        XCTAssertFalse(run.isRunning)
+    }
+
+    /// The common Refine path leaves the Deep box unticked: a `.reElaborate` run
+    /// built WITHOUT `deep:` defaults `deep` to false, so `spawn` omits `--deep`
+    /// and the pre-#075 arg shape is preserved.
+    @MainActor
+    func testReElaborateRunDefaultsDeepToFalse() {
+        let run = TaskRun(taskID: "075", mode: .reElaborate, description: "Cover the offline case")
+        XCTAssertFalse(run.deep)
+    }
+
     // MARK: - Hand-off reconciliation (task #051)
 
     /// Builds a bare `Task` fixture (only `id` matters for reconciliation, which

@@ -36,6 +36,12 @@ struct ReElaborateModal: View {
     /// The in-flight guidance text. Not persisted — this sheet keeps no draft.
     @State private var text = ""
 
+    /// Whether the "Deep" toggle is on (#075): draft the refinement pass via a
+    /// reasoning sub-agent (plans-cc `deep` mode). Unlike `NewPlanModal` there is
+    /// no Elaborate toggle here, so Deep is unconditional — it drives the
+    /// `.reElaborate` run's `--deep` flag and composes orthogonally with it.
+    @State private var deep = false
+
     /// The minimum editor height (one comfortable multi-line box) before it
     /// stretches to fill the remaining sheet space. Matches `NewPlanModal`.
     private static let editorMinHeight: CGFloat = 160
@@ -65,6 +71,9 @@ struct ReElaborateModal: View {
 
             HStack {
                 Spacer()
+                Toggle("Deep", isOn: $deep)
+                    .toggleStyle(.checkbox)
+                    .help("Draft the elaboration via a reasoning sub-agent (plans-cc `deep` mode)")
                 Button("Cancel") { dismiss() }
                     .keyboardShortcut(.cancelAction)
                 // ⌘↩ submits (a bare Return inserts a newline in the multi-line
@@ -129,12 +138,13 @@ struct ReElaborateModal: View {
     private func submit() {
         let trimmed = trimmedText
         guard !trimmed.isEmpty else { return }
-        reElaborateLog.notice("modal Refine submitted: task=\(self.taskID, privacy: .public)")
+        reElaborateLog.notice("modal Refine submitted: task=\(self.taskID, privacy: .public) deep=\(self.deep)")
         runner.run(
             projectPath: projectPath,
             taskID: taskID,
             mode: .reElaborate,
-            description: trimmed
+            description: trimmed,
+            deep: deep
         )
         dismiss()
     }
