@@ -96,6 +96,15 @@ struct ProjectCard: View {
     /// pending rows are present.
     @State private var elaborateRequest: ElaborateRequest? = nil
 
+    /// #076: the active per-card task-type filter, or `nil` for "All" (no
+    /// filtering). Purely view-local transient state (like `hoveredRowID` and the
+    /// sheet requests) — it narrows only the body rows shown by this card and is
+    /// NEVER persisted and NEVER mutates `.plans/` (§2 read-only). The header
+    /// status counts stay unfiltered regardless of its value. Driven by the header
+    /// filter `Menu`; consumed by the `rows` computed property through the pure
+    /// `BrowserViewModel.activeRows(_:matchingType:)` helper.
+    @State private var typeFilter: TaskType? = nil
+
     /// A per-task `Binding<Bool>` for the run-progress popover: it reads `true`
     /// only when `progressPopoverTaskID` is this `taskID`, and on set assigns the
     /// id when raised / clears it when lowered — so opening one row's popover (or
@@ -121,7 +130,7 @@ struct ProjectCard: View {
     /// empty card visible under the `.starred` view mode but does not inject
     /// completed plans into the body — so this is just the active rows.
     private var rows: [TaskRow] {
-        BrowserViewModel.activeRows(project)
+        BrowserViewModel.activeRows(project, matchingType: typeFilter)
     }
 
     // MARK: - Layout decision (scroll the body when height-constrained)
@@ -416,7 +425,51 @@ struct ProjectCard: View {
                         .foregroundStyle(entry.count == 0 ? Color.white.opacity(0.1) : Color.secondary)
                 }
             }
+
+            typeFilterMenu
         }
+    }
+
+    /// #076: the per-card task-type filter control, placed at the trailing edge of
+    /// the header after the (unfiltered) status count badges. A small `Menu`
+    /// mirroring the `ProjectViewMode` toolbar menu in `BrowserWindow`: an "All"
+    /// reset entry (clears the filter) plus one entry per `TaskType.allCases`,
+    /// each labelled with the type's emoji `.glyph` + `.label`. The menu's own
+    /// label reflects the active filter — the selected type's glyph + label, or a
+    /// neutral filter glyph (`line.3.horizontal.decrease.circle`) when unfiltered
+    /// — and is accent-tinted while a filter is actually narrowing the list.
+    ///
+    /// Purely view state (§2 read-only): selecting an entry only sets the local
+    /// `typeFilter`, which the `rows` computed property feeds through the pure
+    /// `BrowserViewModel.activeRows(_:matchingType:)` helper. It NEVER mutates
+    /// `.plans/` and does NOT touch the header `statusCounts`.
+    @ViewBuilder
+    private var typeFilterMenu: some View {
+        Menu {
+            Button {
+                typeFilter = nil
+            } label: {
+                Label("All", systemImage: "line.3.horizontal.decrease.circle")
+            }
+            ForEach(TaskType.allCases, id: \.self) { type in
+                Button {
+                    typeFilter = type
+                } label: {
+                    Text("\(type.glyph) \(type.label)")
+                }
+            }
+        } label: {
+            if let type = typeFilter {
+                Text("\(type.glyph) \(type.label)")
+            } else {
+                Label("Filter", systemImage: "line.3.horizontal.decrease.circle")
+                    .labelStyle(.iconOnly)
+            }
+        }
+        .menuStyle(.borderlessButton)
+        .fixedSize()
+        .foregroundStyle(typeFilter == nil ? AnyShapeStyle(.secondary) : AnyShapeStyle(Color.accentColor))
+        .help("Filter plans by type")
     }
 
     // MARK: - Capture ("+" new plan)
@@ -556,7 +609,15 @@ struct ProjectCard: View {
     @ViewBuilder
     private func body(for rows: [TaskRow]) -> some View {
         if rows.isEmpty {
-            Text("No outstanding plans")
+            // #076: `body(for:)` receives the ALREADY-filtered rows, so an empty
+            // list means one of two things. When a type filter is active
+            // (`typeFilter != nil`) the project may well have outstanding work that
+            // the filter is simply hiding, so show a distinct "No matching plans"
+            // message rather than implying the work vanished. With no filter
+            // (`typeFilter == nil`) an empty list genuinely means no outstanding
+            // work, so keep the original "No outstanding plans" wording. Same
+            // muted subheadline styling in both cases.
+            Text(typeFilter == nil ? "No outstanding plans" : "No matching plans")
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
         } else {

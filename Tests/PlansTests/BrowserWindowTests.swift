@@ -326,6 +326,61 @@ final class BrowserWindowTests: XCTestCase {
         XCTAssertEqual(row?.id, "/p/001")
     }
 
+    // MARK: - (c2) activeRows(matchingType:) — per-card type filter (#076)
+
+    /// A mixed-type project fixture: a bug then a feature in `activeTasks`, so a
+    /// type filter can be shown to keep only the matching rows in order.
+    private func mixedTypeProject() -> ProjectTasks {
+        makeProject(
+            path: "/p",
+            name: "p",
+            activeTasks: [
+                makeTask(id: "001", type: .bug, status: .inProgress),
+                makeTask(id: "002", type: .feature, status: .pending),
+            ]
+        )
+    }
+
+    /// A `nil` filter is the pass-through case: it returns EVERY active row
+    /// unchanged, matching `activeRows(_:)` exactly (same ids, same order).
+    func testActiveRowsMatchingNilReturnsAllRows() {
+        let project = mixedTypeProject()
+        let unfiltered = BrowserViewModel.activeRows(project)
+        let filtered = BrowserViewModel.activeRows(project, matchingType: nil)
+        XCTAssertEqual(filtered.map(\.id), unfiltered.map(\.id))
+        XCTAssertEqual(filtered.map(\.id), ["/p/001", "/p/002"])
+    }
+
+    /// A `.bug` filter keeps ONLY the bug row and drops the feature row.
+    func testActiveRowsMatchingTypeKeepsOnlyMatchingRows() {
+        let filtered = BrowserViewModel.activeRows(mixedTypeProject(), matchingType: .bug)
+        XCTAssertEqual(filtered.map(\.id), ["/p/001"])
+        XCTAssertEqual(filtered.first?.type, .bug)
+    }
+
+    /// A filter for a type absent from `activeTasks` (`.chore` here) yields an
+    /// empty array.
+    func testActiveRowsMatchingTypeAbsentYieldsEmpty() {
+        let filtered = BrowserViewModel.activeRows(mixedTypeProject(), matchingType: .chore)
+        XCTAssertTrue(filtered.isEmpty)
+    }
+
+    /// A filter that keeps MULTIPLE rows preserves their original order (the
+    /// parser's pre-sort), never re-sorting.
+    func testActiveRowsMatchingTypePreservesOrderForMultipleMatches() {
+        let project = makeProject(
+            path: "/p",
+            name: "p",
+            activeTasks: [
+                makeTask(id: "001", type: .bug, status: .inProgress),
+                makeTask(id: "002", type: .feature, status: .pending),
+                makeTask(id: "003", type: .bug, status: .pending),
+            ]
+        )
+        let filtered = BrowserViewModel.activeRows(project, matchingType: .bug)
+        XCTAssertEqual(filtered.map(\.id), ["/p/001", "/p/003"])
+    }
+
     // MARK: - visibleUnderViewMode (#072: one labelled three-state view mode)
 
     /// `.all` keeps every project, including one with NO outstanding work.

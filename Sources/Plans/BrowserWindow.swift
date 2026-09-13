@@ -1004,6 +1004,20 @@ enum BrowserViewModel {
         }
     }
 
+    /// The clickable plan rows for ONE project's card (Surface C dashboard),
+    /// FILTERED by task type (#076: per-card status/type filters).
+    ///
+    /// A `nil` `matchingType` is the pass-through case — it returns every active
+    /// row unchanged (delegating to `activeRows(_:)`), so an unfiltered card and
+    /// this helper agree. A non-nil `matchingType` keeps ONLY rows whose
+    /// `task.type` equals it, preserving `TaskParser`'s order. Does NOT re-sort
+    /// and performs no I/O or SwiftUI work.
+    static func activeRows(_ project: ProjectTasks, matchingType: TaskType?) -> [TaskRow] {
+        let rows = activeRows(project)
+        guard let matchingType else { return rows }
+        return rows.filter { $0.task.type == matchingType }
+    }
+
     /// Whether `project` survives the current project view mode (#072): `.all`
     /// keeps everything, `.active` keeps only projects with outstanding work, and
     /// `.starred` keeps only projects whose path the user has starred.
