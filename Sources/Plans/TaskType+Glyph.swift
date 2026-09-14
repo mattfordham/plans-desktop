@@ -21,6 +21,27 @@ extension TaskType {
         }
     }
 
+    /// The SF Symbol for this task type (#076), the symbol counterpart to the
+    /// emoji `glyph`. Used by AppKit-native chrome that must not render emoji —
+    /// notably the per-card type filter menu, which mirrors the `ProjectViewMode`
+    /// toolbar select and so pairs a symbol with a text label.
+    ///
+    ///   bug      → ladybug.fill                (the 🐞 metaphor)
+    ///   feature  → sparkles                    (the ✨ metaphor)
+    ///   refactor → arrow.triangle.2.circlepath (the ♻️ metaphor)
+    ///   chore    → wrench.fill                 (the 🔧 metaphor)
+    ///
+    /// Exhaustive `switch` with no `default:` so a future type forces a compile
+    /// error here, same as `glyph` and `label`.
+    var symbolName: String {
+        switch self {
+        case .bug: return "ladybug.fill"
+        case .feature: return "sparkles"
+        case .refactor: return "arrow.triangle.2.circlepath"
+        case .chore: return "wrench.fill"
+        }
+    }
+
     /// A short human label for this task type, shown as a `[label]` tag next to
     /// the status glyph in the browser (mirroring the TUI dashboard's
     /// `[type]` tag). Exhaustive, no `default:`, for the same compile-safety

@@ -431,13 +431,18 @@ struct ProjectCard: View {
     }
 
     /// #076: the per-card task-type filter control, placed at the trailing edge of
-    /// the header after the (unfiltered) status count badges. A small `Menu`
-    /// mirroring the `ProjectViewMode` toolbar menu in `BrowserWindow`: an "All"
-    /// reset entry (clears the filter) plus one entry per `TaskType.allCases`,
-    /// each labelled with the type's emoji `.glyph` + `.label`. The menu's own
-    /// label reflects the active filter — the selected type's glyph + label, or a
-    /// neutral filter glyph (`line.3.horizontal.decrease.circle`) when unfiltered
-    /// — and is accent-tinted while a filter is actually narrowing the list.
+    /// the header after the (unfiltered) status count badges. A `Menu` modelled on
+    /// the `ProjectViewMode` ("All / Active / Starred") toolbar select in
+    /// `BrowserWindow`: an "All" reset entry (clears the filter) plus one entry per
+    /// `TaskType.allCases`, each a `Label` pairing the type's SF `symbolName` with
+    /// its text `label`.
+    ///
+    /// Like that select, the menu's own label renders the current selection as
+    /// visible TEXT beside its symbol (`.titleAndIcon`) rather than a bare glyph —
+    /// an unlabeled icon can't say WHICH type is active, which is the whole point
+    /// of the control. Unfiltered it reads "All"; filtered it reads the type's
+    /// symbol + name, accent-tinted while the list is actually narrowed. SF
+    /// Symbols (not the emoji `glyph`) so it matches the native toolbar chrome.
     ///
     /// Purely view state (§2 read-only): selecting an entry only sets the local
     /// `typeFilter`, which the `rows` computed property feeds through the pure
@@ -449,26 +454,25 @@ struct ProjectCard: View {
             Button {
                 typeFilter = nil
             } label: {
-                Label("All", systemImage: "line.3.horizontal.decrease.circle")
+                Label("All", systemImage: "square.grid.2x2")
             }
             ForEach(TaskType.allCases, id: \.self) { type in
                 Button {
                     typeFilter = type
                 } label: {
-                    Text("\(type.glyph) \(type.label)")
+                    Label(type.label, systemImage: type.symbolName)
                 }
             }
         } label: {
-            if let type = typeFilter {
-                Text("\(type.glyph) \(type.label)")
-            } else {
-                Label("Filter", systemImage: "line.3.horizontal.decrease.circle")
-                    .labelStyle(.iconOnly)
-            }
+            Label(
+                typeFilter?.label ?? "All",
+                systemImage: typeFilter?.symbolName ?? "square.grid.2x2"
+            )
+            .labelStyle(.titleAndIcon)
         }
         .menuStyle(.borderlessButton)
         .fixedSize()
-        .foregroundStyle(typeFilter == nil ? AnyShapeStyle(.secondary) : AnyShapeStyle(Color.accentColor))
+        .foregroundStyle(typeFilter == nil ? AnyShapeStyle(.primary) : AnyShapeStyle(.tint))
         .help("Filter plans by type")
     }
 
