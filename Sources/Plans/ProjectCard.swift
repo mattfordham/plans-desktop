@@ -412,6 +412,8 @@ struct ProjectCard: View {
 
             Spacer(minLength: 8)
 
+            typeFilterMenu
+
             ForEach(statusCounts, id: \.status) { entry in
                 HStack(spacing: 4) {
                     Image(systemName: entry.status.symbolName)
@@ -425,13 +427,14 @@ struct ProjectCard: View {
                         .foregroundStyle(entry.count == 0 ? Color.white.opacity(0.1) : Color.secondary)
                 }
             }
-
-            typeFilterMenu
         }
     }
 
-    /// #076: the per-card task-type filter control, placed at the trailing edge of
-    /// the header after the (unfiltered) status count badges. A `Menu` modelled on
+    /// #076: the per-card task-type filter control, placed in the header between
+    /// the `Spacer` and the (unfiltered) status count badges — i.e. to the LEFT of
+    /// the counts, so the badges keep the right edge they share with every other
+    /// card and the filter reads as a control rather than another readout. A
+    /// `Menu` modelled on
     /// the `ProjectViewMode` ("All / Active / Starred") toolbar select in
     /// `BrowserWindow`: an "All" reset entry (clears the filter) plus one entry per
     /// `TaskType.allCases`, each a `Label` pairing the type's SF `symbolName` with
