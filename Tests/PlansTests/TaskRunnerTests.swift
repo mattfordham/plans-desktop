@@ -588,6 +588,46 @@ final class TaskRunnerTests: XCTestCase {
         XCTAssertEqual(TaskRunner.captureMode(execute: false, elaborate: false), .capture)
     }
 
+    // MARK: - Backlog / restore modes (#077 follow-up)
+
+    /// `RunMode` is `String`-backed and the raw value IS the `--mode` flag handed
+    /// to the Node runner, so both new modes must round-trip exactly — the
+    /// runner's `parseArgs` rejects any `--mode` value it doesn't recognize.
+    func testBacklogAndRestoreModesRoundTripRawValues() {
+        XCTAssertEqual(RunMode.backlog.rawValue, "backlog")
+        XCTAssertEqual(RunMode(rawValue: "backlog"), .backlog)
+
+        XCTAssertEqual(RunMode.restore.rawValue, "restore")
+        XCTAssertEqual(RunMode(rawValue: "restore"), .restore)
+    }
+
+    /// Both modes operate on an EXISTING task identified by id alone (they just
+    /// move its file between `pending/` and `backlog/`), so they pass
+    /// `--task-id` and carry no free text — the same arg shape as `.delete`.
+    func testBacklogAndRestoreUseTaskIDWithoutDescription() {
+        XCTAssertTrue(RunMode.backlog.usesTaskID)
+        XCTAssertTrue(RunMode.restore.usesTaskID)
+
+        XCTAssertFalse(RunMode.backlog.usesDescription)
+        XCTAssertFalse(RunMode.restore.usesDescription)
+    }
+
+    /// A `.backlog` / `.restore` run is keyed by the real task id (not a
+    /// synthetic capture identity) and carries no description.
+    @MainActor
+    func testBacklogAndRestoreRunsCarryTaskIDAndNoDescription() {
+        let backlogRun = TaskRun(taskID: "077", mode: .backlog)
+        XCTAssertEqual(backlogRun.taskID, "077")
+        XCTAssertEqual(backlogRun.mode, .backlog)
+        XCTAssertNil(backlogRun.description)
+        XCTAssertFalse(backlogRun.isRunning)
+
+        let restoreRun = TaskRun(taskID: "077", mode: .restore)
+        XCTAssertEqual(restoreRun.mode, .restore)
+        XCTAssertNil(restoreRun.description)
+        XCTAssertFalse(restoreRun.isRunning)
+    }
+
     /// `RunMode.usesDescription` is the pure flag `TaskRun.spawn` consults to pass
     /// `--description <text>`: true for the three description-driven modes
     /// (`.capture`, `.captureElaborate`, `.executeYolo`) and for the two

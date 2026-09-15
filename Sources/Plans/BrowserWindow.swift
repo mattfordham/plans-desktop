@@ -1002,14 +1002,31 @@ enum BrowserViewModel {
     /// re-sort — it preserves `TaskParser`'s order — and performs no I/O or
     /// SwiftUI work.
     /// Resolves a composite row id to its `TaskRow` by scanning EVERY project's
-    /// active rows (the same cross-project lookup the card grid and the
-    /// plan-detail overlay pane both need). Flattens `activeRows` over all
-    /// projects and returns the first row whose `id` matches; `nil` when no
-    /// active row across any project matches (e.g. a completed/closed task or a
-    /// project that disappeared). Pure value work — no I/O, no SwiftUI.
+    /// active rows AND backlog rows (the same cross-project lookup the card grid
+    /// and the plan-detail overlay pane both need). Returns the first row whose
+    /// `id` matches; `nil` when nothing across any project matches (e.g. a
+    /// completed/closed task or a project that disappeared). Pure value work —
+    /// no I/O, no SwiftUI.
+    ///
+    /// Backlog rows MUST be searched here, not just active ones (#077 follow-up).
+    /// `ProjectCard`'s backlog section reuses `planRow`, so a backlogged row
+    /// carries the same `OpenDetailOnTap` modifier and opens the detail pane with
+    /// its composite id — but backlogged tasks live in a SEPARATE
+    /// `backloggedTasks` collection deliberately excluded from `activeTasks`, so
+    /// a resolver scanning only `activeRows` could never match one and the pane
+    /// fell through to its "Plan not found" placeholder.
+    ///
+    /// Active rows are searched FIRST so they win any id collision. A task id
+    /// cannot legitimately occupy `pending/` and `backlog/` at once (the
+    /// plan-backlog / plan-restore skills MOVE the file), but if a stale poll ever
+    /// surfaced both, the active row is the truthful one — it reflects the task's
+    /// live, outstanding state.
     static func resolveRow(in projects: [ProjectTasks], id: TaskRow.ID) -> TaskRow? {
-        projects
-            .flatMap { activeRows($0) }
+        if let active = projects.flatMap({ activeRows($0) }).first(where: { $0.id == id }) {
+            return active
+        }
+        return projects
+            .flatMap { backlogRows($0) }
             .first { $0.id == id }
     }
 

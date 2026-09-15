@@ -19,6 +19,12 @@
  *                `plan-elaborate` to record AND flesh out a new task from a
  *                free-text `--description`, leaving it in `elaborated` (it does
  *                NOT execute).
+ *   - `backlog`: drives `plan-backlog` to defer an existing task, moving its
+ *                file from `.plans/pending/` into `.plans/backlog/`. Requires
+ *                `--task-id`; carries no description.
+ *   - `restore`: drives `plan-restore` to bring a deferred task back, moving its
+ *                file from `.plans/backlog/` into `.plans/pending/` while
+ *                PRESERVING its status. Requires `--task-id`; no description.
  *   - `executeYolo`: drives `plan-execute "<description>" yolo` to auto-capture,
  *                auto-elaborate, and autonomously execute a new task from a
  *                free-text `--description` in an isolated worktree, leaving it in
@@ -64,7 +70,9 @@ type Mode =
   | "capture"
   | "captureElaborate"
   | "executeYolo"
-  | "delete";
+  | "delete"
+  | "backlog"
+  | "restore";
 
 interface Args {
   projectRoot: string;
@@ -125,7 +133,9 @@ function parseArgs(argv: string[]): Args | null {
         value !== "capture" &&
         value !== "captureElaborate" &&
         value !== "executeYolo" &&
-        value !== "delete"
+        value !== "delete" &&
+        value !== "backlog" &&
+        value !== "restore"
       ) {
         return null;
       }
@@ -159,12 +169,12 @@ function parseArgs(argv: string[]): Args | null {
     return { projectRoot, taskId, mode, description, deep };
   }
 
-  // execute / elaborate / delete operate on an existing task, so a task id is
-  // the only REQUIRED argument. elaborate additionally accepts an OPTIONAL
-  // `--description` (the user's guidance for the pass); it is folded in when
-  // present and simply absent otherwise, so a bare `--mode elaborate
-  // --task-id <id>` behaves exactly as before. execute / delete carry no free
-  // text at all.
+  // execute / elaborate / delete / backlog / restore operate on an existing
+  // task, so a task id is the only REQUIRED argument. elaborate additionally
+  // accepts an OPTIONAL `--description` (the user's guidance for the pass); it
+  // is folded in when present and simply absent otherwise, so a bare `--mode
+  // elaborate --task-id <id>` behaves exactly as before. execute / delete /
+  // backlog / restore carry no free text at all.
   if (!taskId) {
     return null;
   }
@@ -469,6 +479,80 @@ function buildDeletePrompt(taskId: string): string {
   ].join("\n");
 }
 
+/**
+ * Build the prompt for a `backlog` run. This drives `plan-backlog <id>` to move
+ * a deferred task's file from `.plans/pending/` into `.plans/backlog/`.
+ *
+ * The app gates this mode's button to `pending` / `elaborated` tasks only
+ * (`PlanDetailView.canBacklog`), precisely so the skill's auto-pause path — which
+ * commits dirty work with `git add -A` and checks out the default branch — can
+ * never fire from a single in-app click. The prompt reinforces that boundary: if
+ * the task somehow turns out to be active, STOP rather than pausing it, because
+ * moving git state must never follow from one click.
+ *
+ * Note: `plan-backlog` is marked `disable-model-invocation: true`, so it is
+ * user-invocable only. This prompt drives it via the `Skill` tool exactly as the
+ * delete mode does. If that flag ever blocks the hand-off, the run will fail
+ * loudly here rather than half-applying the move — the file move and the
+ * PROGRESS.md edit are deliberately NOT inlined as a fallback, so there is one
+ * implementation of the contract (the skill) and no chance of the two drifting.
+ */
+function buildBacklogPrompt(taskId: string): string {
+  return [
+    `Use the \`plan-backlog\` skill to defer the plans-cc task with id ${taskId}:`,
+    "",
+    `/plan-backlog ${taskId}`,
+    "",
+    "Requirements:",
+    "1. The user has ALREADY chosen to backlog this task in the app, so proceed",
+    "   without re-confirming. Do NOT ask the user any questions — there is no",
+    "   interactive UI to answer them.",
+    `2. Task #${taskId} is expected to be \`pending\` or \`elaborated\` (the app only`,
+    "   offers this action for those statuses). If you find it is actually",
+    "   `in-progress` or `in-review`, STOP and report that instead of pausing it:",
+    "   the skill's auto-pause would commit uncommitted work and switch branches,",
+    "   and that must never follow from a single in-app click.",
+    "3. Complete the rest of the skill's work as normal: move the task file into",
+    "   `.plans/backlog/`, and update PROGRESS.md.",
+    "",
+    "Work autonomously to completion. Do not ask for confirmation.",
+  ].join("\n");
+}
+
+/**
+ * Build the prompt for a `restore` run. This drives `plan-restore <id>` to move
+ * a deferred task's file from `.plans/backlog/` back into `.plans/pending/`.
+ *
+ * Restore is the pure inverse of backlog and is non-destructive: it moves one
+ * file and PRESERVES the task's existing status (a restored `elaborated` task
+ * stays `elaborated`). It touches no git state, so it needs no in-app
+ * confirmation and carries no status guard beyond the skill's own.
+ *
+ * Note: like `plan-backlog`, `plan-restore` is marked
+ * `disable-model-invocation: true`. See `buildBacklogPrompt` for why the steps
+ * are not inlined as a fallback.
+ */
+function buildRestorePrompt(taskId: string): string {
+  return [
+    `Use the \`plan-restore\` skill to bring the backlogged plans-cc task with`,
+    `id ${taskId} back to the active list:`,
+    "",
+    `/plan-restore ${taskId}`,
+    "",
+    "Requirements:",
+    "1. The user has ALREADY chosen to restore this task in the app, so proceed",
+    "   without re-confirming. Do NOT ask the user any questions — there is no",
+    "   interactive UI to answer them.",
+    "2. PRESERVE the task's existing `**Status:**` exactly as it is. Restore is",
+    "   the inverse of backlog, not a status change: a restored `elaborated` task",
+    "   stays `elaborated`, a still-`pending` one stays `pending`.",
+    "3. Complete the rest of the skill's work as normal: move the task file into",
+    "   `.plans/pending/`, append the `**Restored:**` note, and update PROGRESS.md.",
+    "",
+    "Work autonomously to completion. Do not ask for confirmation.",
+  ].join("\n");
+}
+
 function buildPrompt(args: Args): string {
   if (args.mode === "capture") {
     return buildCapturePrompt(args.description ?? "");
@@ -495,6 +579,12 @@ function buildPrompt(args: Args): string {
   }
   if (args.mode === "delete") {
     return buildDeletePrompt(args.taskId ?? "");
+  }
+  if (args.mode === "backlog") {
+    return buildBacklogPrompt(args.taskId ?? "");
+  }
+  if (args.mode === "restore") {
+    return buildRestorePrompt(args.taskId ?? "");
   }
   return buildExecutePrompt(args.taskId ?? "");
 }

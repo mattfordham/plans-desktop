@@ -601,6 +601,72 @@ final class BrowserWindowTests: XCTestCase {
         XCTAssertNil(BrowserViewModel.resolveRow(in: twoProjectFixture(), id: "/proj1/999"))
     }
 
+    /// #077 follow-up: a BACKLOGGED row must resolve too. `ProjectCard`'s
+    /// backlog section reuses `planRow`, so a backlogged row carries the same
+    /// `OpenDetailOnTap` modifier as an active one and opens the detail pane
+    /// with its composite id. But backlogged tasks live in a SEPARATE
+    /// `backloggedTasks` collection that is deliberately excluded from
+    /// `activeTasks`, so a resolver scanning only `activeRows` can never match
+    /// one — the pane fell through to its "Plan not found" placeholder. The
+    /// resolver must therefore consult backlog rows as well.
+    func testResolveRowFindsBackloggedRow() {
+        let project = makeProject(
+            path: "/proj1",
+            name: "proj1",
+            activeTasks: [makeTask(id: "001", status: .inProgress)],
+            backloggedTasks: [makeTask(id: "050", status: .pending)]
+        )
+        let row = BrowserViewModel.resolveRow(in: [project], id: "/proj1/050")
+        XCTAssertEqual(row?.id, "/proj1/050")
+        XCTAssertEqual(row?.projectPath, "/proj1")
+        XCTAssertEqual(row?.task.id, "050")
+    }
+
+    /// A backlogged row resolves in the SECOND project even when both projects
+    /// reuse the same task id — the composite id disambiguates, exactly as it
+    /// does for active rows.
+    func testResolveRowFindsBackloggedRowInSecondProject() {
+        let p1 = makeProject(
+            path: "/proj1",
+            name: "proj1",
+            backloggedTasks: [makeTask(id: "050", status: .pending)]
+        )
+        let p2 = makeProject(
+            path: "/proj2",
+            name: "proj2",
+            backloggedTasks: [makeTask(id: "050", status: .pending)]
+        )
+        let row = BrowserViewModel.resolveRow(in: [p1, p2], id: "/proj2/050")
+        XCTAssertEqual(row?.projectPath, "/proj2")
+    }
+
+    /// Resolution stays total: an id in neither the active nor the backlog rows
+    /// still yields `nil` so the pane shows its placeholder rather than trapping.
+    func testResolveRowReturnsNilWhenAbsentFromBothActiveAndBacklog() {
+        let project = makeProject(
+            path: "/proj1",
+            name: "proj1",
+            activeTasks: [makeTask(id: "001", status: .inProgress)],
+            backloggedTasks: [makeTask(id: "050", status: .pending)]
+        )
+        XCTAssertNil(BrowserViewModel.resolveRow(in: [project], id: "/proj1/999"))
+    }
+
+    /// Active rows take precedence over backlog rows. A task id cannot legitimately
+    /// occupy `pending/` and `backlog/` at once (the skills MOVE the file), but if a
+    /// stale poll ever surfaced both, the active row is the truthful one — it
+    /// reflects the task's live, outstanding state.
+    func testResolveRowPrefersActiveRowOverBackloggedDuplicate() {
+        let project = makeProject(
+            path: "/proj1",
+            name: "proj1",
+            activeTasks: [makeTask(id: "001", status: .inProgress)],
+            backloggedTasks: [makeTask(id: "001", status: .pending)]
+        )
+        let row = BrowserViewModel.resolveRow(in: [project], id: "/proj1/001")
+        XCTAssertEqual(row?.task.status, .inProgress)
+    }
+
     /// #073: the detail pane feeds `BrowserWindow`'s optional `detailRowID`
     /// straight into `PlanDetailView(rowID:)`, so resolution must stay total over
     /// EVERY id the pane can hold, including ids that go stale while the pane is

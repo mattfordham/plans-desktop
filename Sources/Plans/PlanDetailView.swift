@@ -210,7 +210,9 @@ struct PlanDetailView: View {
                     // `ElaborateModal` first (optional guidance + Deep) instead
                     // of firing the run straight off the button; submitting the
                     // sheet with an empty box behaves exactly as before.
-                    if Self.canElaborate(status: row.task.status, isBlocked: row.task.isBlocked) {
+                    if Self.canElaborate(status: row.task.status,
+                                         isBlocked: row.task.isBlocked,
+                                         isBacklogged: row.task.isBacklogged) {
                         Button {
                             showElaborate = true
                         } label: {
@@ -224,7 +226,9 @@ struct PlanDetailView: View {
                     // non-blocked task — so an elaborated plan shows BOTH Refine
                     // and Execute (intended). Shares the pending Elaborate's
                     // `sparkles` glyph since both drive `plan-elaborate`.
-                    if Self.canReElaborate(status: row.task.status, isBlocked: row.task.isBlocked) {
+                    if Self.canReElaborate(status: row.task.status,
+                                           isBlocked: row.task.isBlocked,
+                                           isBacklogged: row.task.isBacklogged) {
                         Button {
                             showReElaborate = true
                         } label: {
@@ -235,7 +239,9 @@ struct PlanDetailView: View {
                     // "Execute" — hands the plan off to the bundled Agent-SDK
                     // runner in worktree-isolated `plan-execute` mode. Available
                     // only for an elaborated/in-progress, non-blocked task.
-                    if Self.canWork(status: row.task.status, isBlocked: row.task.isBlocked) {
+                    if Self.canWork(status: row.task.status,
+                                    isBlocked: row.task.isBlocked,
+                                    isBacklogged: row.task.isBacklogged) {
                         Button {
                             runner.run(projectPath: row.projectPath,
                                        taskID: row.task.id, mode: .execute)
@@ -273,6 +279,39 @@ struct PlanDetailView: View {
                     Label("Open in Markdown App", systemImage: "doc.text")
                 }
 
+                // "Backlog" / "Restore" (#077 follow-up) — the two halves of
+                // plans-cc's defer/undefer pair, each handing the plan off to the
+                // bundled runner (the sole writer of `.plans/`, §2). They are
+                // mutually exclusive by construction: a task is either in
+                // `pending/` (backloggable) or in `backlog/` (restorable), never
+                // both, because the skills MOVE the file. `canRestore` is checked
+                // FIRST because a backlogged task keeps its real
+                // `pending`/`elaborated` status, so `canBacklog` would also be
+                // true for it — source directory wins over status.
+                //
+                // Neither needs a confirm alert: Restore is non-destructive, and
+                // Backlog is gated by `canBacklog` to the two quiescent statuses
+                // precisely so the skill's git-touching auto-pause can never fire
+                // from one click (see `canBacklog`).
+                if Self.canRestore(isBacklogged: row.task.isBacklogged) {
+                    Button {
+                        runner.run(projectPath: row.projectPath,
+                                   taskID: row.task.id, mode: .restore)
+                    } label: {
+                        Label("Restore", systemImage: "arrow.uturn.left")
+                    }
+                    .help("Move this plan out of the backlog, back to the active list")
+                } else if Self.canBacklog(status: row.task.status,
+                                          isBlocked: row.task.isBlocked) {
+                    Button {
+                        runner.run(projectPath: row.projectPath,
+                                   taskID: row.task.id, mode: .backlog)
+                    } label: {
+                        Label("Backlog", systemImage: "archivebox")
+                    }
+                    .help("Defer this plan — move it to the backlog holding pen")
+                }
+
                 // "Delete" — hands the plan off to the bundled runner in
                 // `plan-delete` mode. Lives in this always-visible file-actions
                 // block (so it's hidden automatically while a run is in flight)
@@ -304,7 +343,16 @@ struct PlanDetailView: View {
     /// (#027). Whether a run is in flight is a separate, per-task concern (the row
     /// shows a spinner instead of the button) — runs are independent across tasks,
     /// so it does NOT gate availability.
-    static func canWork(status: TaskStatus?, isBlocked: Bool) -> Bool {
+    /// A BACKLOGGED plan is never workable, whatever its status (#077 follow-up).
+    /// Backlog is a source directory, not a status (spec §5.4), so a deferred
+    /// `elaborated` plan would otherwise satisfy the status gate below and offer
+    /// Execute on work the user deliberately parked. Worse, `plan-execute` writes
+    /// `in-progress` back into a file under `backlog/`, stranding a task that
+    /// neither `/plan-status` nor this app's active views will surface. Restore
+    /// it first (`canRestore`), then work it.
+    static func canWork(status: TaskStatus?, isBlocked: Bool,
+                        isBacklogged: Bool = false) -> Bool {
+        guard !isBacklogged else { return false }
         guard !isBlocked else { return false }
         return status == .elaborated
     }
@@ -312,7 +360,13 @@ struct PlanDetailView: View {
     /// Pure predicate for the "Elaborate" action's availability. Available only
     /// for a `pending` task that is not blocked — elaboration is the step that
     /// produces the How checklist a subsequent Execute run needs.
-    static func canElaborate(status: TaskStatus?, isBlocked: Bool) -> Bool {
+    /// Withheld from a BACKLOGGED plan (#077 follow-up): elaborating work the
+    /// user has consciously set aside is incoherent. Restore it first. See
+    /// `canWork` for why the source directory has to be consulted alongside the
+    /// status here.
+    static func canElaborate(status: TaskStatus?, isBlocked: Bool,
+                             isBacklogged: Bool = false) -> Bool {
+        guard !isBacklogged else { return false }
         guard !isBlocked else { return false }
         return status == .pending
     }
@@ -322,9 +376,50 @@ struct PlanDetailView: View {
     /// refines the existing How checklist before an Execute run, so it only makes
     /// sense once a first elaboration has produced one (and not after work has
     /// started or completed).
-    static func canReElaborate(status: TaskStatus?, isBlocked: Bool) -> Bool {
+    /// Withheld from a BACKLOGGED plan (#077 follow-up), for the same reason as
+    /// `canElaborate`: refining a parked plan's checklist is shaping work the
+    /// user set aside. Restore it first.
+    static func canReElaborate(status: TaskStatus?, isBlocked: Bool,
+                               isBacklogged: Bool = false) -> Bool {
+        guard !isBacklogged else { return false }
         guard !isBlocked else { return false }
         return status == .elaborated
+    }
+
+    /// Pure predicate for the "Backlog" action's availability (#077 follow-up),
+    /// gated to `pending` / `elaborated` ONLY.
+    ///
+    /// This is a SAFETY rule, not a cosmetic one. `plan-backlog` auto-pauses an
+    /// `in-progress` / `in-review` task before deferring it, and that pause
+    /// commits dirty work (`git add -A`) and checks out the default branch.
+    /// Restricting the button to the two quiescent statuses means the auto-pause
+    /// path can never fire from a single in-app click, so no click can move git
+    /// state. Deferring an active task stays a deliberate CLI action
+    /// (`/plan-backlog <id>`), where the user sees what it does.
+    ///
+    /// `completed` is excluded because a finished task has nothing to defer (the
+    /// skill itself rejects it, pointing at `/plan-reopen`), and `nil` is
+    /// excluded because an undecodable status is not known to be safe.
+    ///
+    /// `isBlocked` deliberately does NOT gate this: being blocked is a common
+    /// REASON to park work, so a blocked plan is *more* deferrable, not less —
+    /// following `canDelete`'s reasoning rather than `canWork`'s.
+    static func canBacklog(status: TaskStatus?, isBlocked: Bool) -> Bool {
+        status == .pending || status == .elaborated
+    }
+
+    /// Pure predicate for the "Restore" action's availability (#077 follow-up).
+    ///
+    /// Keyed on the task's SOURCE DIRECTORY rather than its status, because
+    /// backlog is where a task lives, not what state it is in (spec §5.4): a
+    /// backlogged file retains its real `pending` / `elaborated` status, and
+    /// `plan-restore` preserves that status on the way back. So status carries no
+    /// information about restorability — `isBacklogged` is the whole question.
+    ///
+    /// "Restore" is the verb plans-cc uses (`/plan-restore`), so the button
+    /// matches the skill and the spec's existing vocabulary.
+    static func canRestore(isBacklogged: Bool) -> Bool {
+        isBacklogged
     }
 
     /// Pure predicate for the "Delete" action's availability. Unlike Execute
@@ -651,7 +746,8 @@ struct RunProgressSheet: View {
     }
 
     /// The verb for this run's mode ("Executing" / "Elaborating" / "Capturing"
-    /// / "Capturing & elaborating" / "Capturing & executing" / "Deleting").
+    /// / "Capturing & elaborating" / "Capturing & executing" / "Deleting" /
+    /// "Backlogging" / "Restoring").
     private var modeVerb: String {
         switch run?.mode {
         case .elaborate: return "Elaborating"
@@ -660,6 +756,8 @@ struct RunProgressSheet: View {
         case .captureElaborate: return "Capturing & elaborating"
         case .executeYolo: return "Capturing & executing"
         case .delete: return "Deleting"
+        case .backlog: return "Backlogging"
+        case .restore: return "Restoring"
         case .execute, .none: return "Executing"
         }
     }

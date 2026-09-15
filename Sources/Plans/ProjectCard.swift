@@ -898,7 +898,8 @@ struct ProjectCard: View {
                     }
                     .help("Show progress")
             } else if PlanDetailView.canElaborate(status: row.task.status,
-                                                  isBlocked: row.task.isBlocked) {
+                                                  isBlocked: row.task.isBlocked,
+                                                  isBacklogged: row.task.isBacklogged) {
                 // Elaborate now opens the `ElaborateModal` via the card's
                 // `.sheet(item:)` rather than firing the run straight off the
                 // glyph (#074), so the user can attach optional guidance and
@@ -912,7 +913,8 @@ struct ProjectCard: View {
                     )
                 }
             } else if PlanDetailView.canWork(status: row.task.status,
-                                             isBlocked: row.task.isBlocked) {
+                                             isBlocked: row.task.isBlocked,
+                                             isBacklogged: row.task.isBacklogged) {
                 // An elaborated, non-blocked task surfaces BOTH Refine and Execute
                 // (#056). The two glyphs sit in a tight HStack — each
                 // `RowActionGlyph` is its own 22pt-tall cell with built-in 8pt

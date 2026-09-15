@@ -74,8 +74,18 @@ one place. The app bundles an Agent-SDK **runner subprocess**
 (`Tools/work-task/run-task.ts`, built to `dist/run-task.js`), and that
 subprocess is the **sole writer** of a project's `.plans/` directory and git
 tree. The app drives it for the plans-cc lifecycle verbs — **capture**,
-**elaborate**, **execute**, and **delete** — by spawning it with a `--mode`
-and the task id or description, then rendering its NDJSON progress stream.
+**elaborate**, **execute**, **delete**, **backlog**, and **restore** — by
+spawning it with a `--mode` and the task id or description, then rendering its
+NDJSON progress stream.
+
+The **backlog** / **restore** pair defers a plan into `.plans/backlog/` and
+brings it back to `.plans/pending/` (see §5.1). Both are offered from the plan
+detail pane and are mutually exclusive: a task is either backloggable or
+restorable, never both, since the skills move the file. Backlog is deliberately
+offered ONLY for a `pending` / `elaborated` task, because `plan-backlog`
+auto-pauses an active one — committing uncommitted work and switching branches —
+and moving git state must never follow from a single in-app click. Deferring an
+active task stays a deliberate CLI action.
 
 The distinction that matters, and that must be preserved:
 

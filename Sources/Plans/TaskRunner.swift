@@ -143,11 +143,17 @@ enum RunMode: String {
     case executeYolo
     case reElaborate
     case delete
+    /// Defers a pending/elaborated task by driving `plan-backlog` to move its
+    /// file from `.plans/pending/` into `.plans/backlog/` (#077 follow-up).
+    case backlog
+    /// Brings a deferred task back by driving `plan-restore` to move its file
+    /// from `.plans/backlog/` into `.plans/pending/`, PRESERVING its status.
+    case restore
 
     /// Whether this mode operates on an EXISTING task, so `TaskRun.spawn` passes
     /// `--task-id <id>`. True for the existing-task modes `.execute` /
-    /// `.elaborate` / `.reElaborate` / `.delete`; false for the
-    /// description-driven modes (`.capture` / `.captureElaborate` /
+    /// `.elaborate` / `.reElaborate` / `.delete` / `.backlog` / `.restore`;
+    /// false for the description-driven modes (`.capture` / `.captureElaborate` /
     /// `.executeYolo`), whose task does not exist yet. Pure flag (no I/O) so the
     /// arg-shape contract is unit-testable without spawning a `node` process.
     ///
@@ -157,7 +163,7 @@ enum RunMode: String {
     /// `--description` for them.
     var usesTaskID: Bool {
         switch self {
-        case .execute, .elaborate, .reElaborate, .delete:
+        case .execute, .elaborate, .reElaborate, .delete, .backlog, .restore:
             return true
         case .capture, .captureElaborate, .executeYolo:
             return false
@@ -187,7 +193,7 @@ enum RunMode: String {
         switch self {
         case .capture, .captureElaborate, .executeYolo, .reElaborate, .elaborate:
             return true
-        case .execute, .delete:
+        case .execute, .delete, .backlog, .restore:
             return false
         }
     }
