@@ -209,14 +209,20 @@ file does. A summary of its behavior is given in §5.5.
   .plans/
     pending/        # active task files (NNN-slug.md) — see §5.2 for statuses
     completed/      # archived, completed task files (NNN-slug.md)
+    backlog/        # consciously deferred task files (NNN-slug.md)
     config.json     # project settings: { "next_id": <int>, "git_commits": <bool>, ... }
     CONTEXT.md      # project knowledge      (optional to parse)
     PROGRESS.md     # current work status    (optional to parse)
     HISTORY.md      # completed-work archive (optional to parse)
 ```
 
-- `pending/` and `completed/` are the two directories that contain task files.
-  Either may be missing or empty — handle that.
+- `pending/`, `completed/`, and `backlog/` are the three directories that contain
+  task files. Any of them may be missing or empty — handle that.
+- `backlog/` is a **holding pen** for consciously deferred plans: work the user
+  has chosen to set aside rather than abandon. plans-cc populates it with the
+  `plan-backlog` command and empties it with `plan-restore` (which moves a file
+  back to `pending/`). Backlogged tasks are deferred, not outstanding — see §5.4
+  and §5.5 for how they are kept separate from active work.
 - `config.json` holds project-level settings such as `next_id` (the next task
   id to allocate) and `git_commits` (whether plans-cc auto-commits). You may read
   it but it is not required for the core views.
@@ -324,6 +330,11 @@ Directory ↔ status relationship:
 - Files in `completed/` carry `completed`. (Treat the containing directory as
   authoritative for completion: a file in `completed/` is completed regardless of
   what its `**Status:**` line says.)
+- Files in `backlog/` are **BACKLOGGED**, a condition defined by the source
+  directory rather than by a status. Unlike `completed/`, the directory does
+  **not** override the file's `**Status:**`: a backlogged task retains its real
+  `pending` / `elaborated` (etc.) status. "Backlogged" is orthogonal to the
+  status vocabulary above — it is where the task lives, not what state it is in.
 
 **Type** (the value of `**Type:**`):
 
@@ -339,7 +350,7 @@ Directory ↔ status relationship:
 The plans-cc repo's `lib/parse-tasks.js` is the source of truth. Mirror this
 behavior in Swift:
 
-1. List `.md` files in `pending/` and `completed/`.
+1. List `.md` files in `pending/`, `completed/`, and `backlog/`.
 2. For each file, derive `id = filename[0..<3]`.
 3. Find the title from the first `# ` line.
 4. Extract `Type`, `Status`, and `Blocked by` via per-line `**Field:**` patterns
@@ -352,6 +363,12 @@ behavior in Swift:
    `{ pending, elaborated, in-progress, review, in-review, completed }`.
 8. Sort active tasks by status priority
    `in-progress > in-review > review > elaborated > pending`, then by id.
+9. Files scanned from `backlog/` keep their real `**Status:**` (see §5.4) and are
+   carried in a **separate `backloggedTasks` collection**. They are **excluded**
+   from the active-task set (`activeTasks`), from the by-status `counts`, and from
+   `hasOutstandingWork` — a project whose only remaining work is backlogged has no
+   outstanding work, because backlogged plans are deferred, not pending. Surface
+   them as an opt-in section rather than mixing them into active counts.
 
 You may extend beyond this (e.g. capturing full section bodies for the browser
 window, reading `Created`/`Branch`), but do not contradict it.

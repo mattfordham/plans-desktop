@@ -872,6 +872,27 @@ final class PlansStoreTests: XCTestCase {
         XCTAssertEqual(reloaded.projectViewMode, .starred)
     }
 
+    // MARK: - Show backlog (#077, persisted to injected UserDefaults)
+
+    func testShowBacklogDefaultsToFalse() throws {
+        let reader = try makeReader(projectPaths: [])
+        let store = PlansStore(registryReader: reader, defaults: makeDefaults())
+
+        XCTAssertFalse(store.showBacklog)
+    }
+
+    func testSettingShowBacklogPersistsAcrossStoreInstances() throws {
+        let reader = try makeReader(projectPaths: [])
+        let defaults = makeDefaults()
+
+        let store = PlansStore(registryReader: reader, defaults: defaults)
+        store.showBacklog = true
+
+        // A fresh store over the SAME defaults reads the saved flag back.
+        let reloaded = PlansStore(registryReader: reader, defaults: defaults)
+        XCTAssertTrue(reloaded.showBacklog)
+    }
+
     // MARK: - Starred project paths (#035, persisted to injected UserDefaults)
 
     func testStarredProjectPathsDefaultToEmpty() throws {

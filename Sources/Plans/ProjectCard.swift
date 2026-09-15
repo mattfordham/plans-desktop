@@ -133,6 +133,26 @@ struct ProjectCard: View {
         BrowserViewModel.activeRows(project, matchingType: typeFilter)
     }
 
+    /// #077: the project's backlogged (deferred) plan rows, in `TaskParser`'s
+    /// order. Rendered as a distinct, dimmed "Backlogged" section BELOW the active
+    /// rows — but ONLY when `store.showBacklog` is on AND the project actually has
+    /// backlog. The active rows and the header `statusCounts` are unaffected:
+    /// backlog is excluded from the counts already, and these rows are an
+    /// ADDITIONAL section, never a replacement for the active empty state. The
+    /// header type filter deliberately does NOT narrow backlog — the toggle is a
+    /// whole-card reveal, not a per-type one.
+    private var backlogRows: [TaskRow] {
+        BrowserViewModel.backlogRows(project)
+    }
+
+    /// Whether the dimmed "Backlogged" section should render on this card (#077):
+    /// only when the user has turned the backlog reveal on AND the project has at
+    /// least one backlogged task. Off by default, so a card is byte-for-byte
+    /// identical to before whenever the toggle is off.
+    private var showsBacklogSection: Bool {
+        store.showBacklog && !project.backloggedTasks.isEmpty
+    }
+
     // MARK: - Layout decision (scroll the body when height-constrained)
 
     /// Whether the card should scroll its body internally instead of laying it
@@ -377,6 +397,49 @@ struct ProjectCard: View {
     private var scrollableContent: some View {
         captureRows
         body(for: rows)
+        // #077: the optional backlog section sits BELOW the active plan list. It
+        // is additive — the active `body(for:)` above (including its "No
+        // outstanding plans" / "No matching plans" empty state) is untouched, so a
+        // project with only backlog still shows the active empty state and then
+        // this section beneath it. Gated on `showsBacklogSection`, so when the
+        // toggle is off the card renders exactly as before with no extra chrome.
+        if showsBacklogSection {
+            backlogSection
+        }
+    }
+
+    // MARK: - Backlog section (#077 deferred plans)
+
+    /// The dimmed "Backlogged" section shown below the active plan rows when the
+    /// window's backlog reveal is on and this project has deferred plans. A small
+    /// section label distinguishes it from the active list, and the whole section
+    /// is rendered at reduced opacity so it reads as secondary/deferred while its
+    /// rows stay fully clickable (they reuse `planRow(_:index:)`, so tapping one
+    /// opens the detail overlay exactly like an active row). The backlog rows get
+    /// their OWN zero-based indexing so their zebra parity is independent of the
+    /// active rows above them.
+    @ViewBuilder
+    private var backlogSection: some View {
+        let rows = backlogRows
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 4) {
+                Image(systemName: "archivebox")
+                    .imageScale(.small)
+                Text("Backlogged")
+                    .font(.caption.weight(.semibold))
+                    .textCase(.uppercase)
+            }
+            .foregroundStyle(.secondary)
+
+            VStack(spacing: 2) {
+                ForEach(Array(rows.enumerated()), id: \.element.id) { index, row in
+                    planRow(row, index: index)
+                }
+            }
+        }
+        // Deferred treatment: the whole section is dimmed so it reads as
+        // secondary to the active plans while remaining interactive.
+        .opacity(0.55)
     }
 
     // MARK: - Header (project name + per-status count summary)
@@ -1147,7 +1210,8 @@ private struct OpenDetailOnTap: ViewModifier {
         sections: [],
         howProgress: (done: 0, total: 0),
         isBlocked: false,
-        isCompletedDir: false
+        isCompletedDir: false,
+        isBacklogged: false
     )
     let project = ProjectTasks(
         projectPath: "/tmp/Ensemble",

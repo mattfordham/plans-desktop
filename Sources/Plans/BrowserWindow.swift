@@ -383,6 +383,25 @@ struct BrowserWindow: View {
                     .foregroundStyle(store.cardLayoutMode == .fit ? AnyShapeStyle(.tint) : AnyShapeStyle(.primary))
                     .help("Toggle between scrolling and fit-to-screen card layout")
                 }
+                // #077: reveal/hide backlogged (deferred) plans. A plain `Button`
+                // (matching the `cardLayoutMode` idiom above) that flips the
+                // persisted `store.showBacklog`, so the identical square toolbar
+                // footprint is shared with the other filter controls. Accent-tinted
+                // while backlog is being shown, and its `archivebox` glyph fills in
+                // (`archivebox.fill`) in that ON state. When off (default) each
+                // card renders exactly as before — no backlog section is added.
+                ToolbarItem {
+                    Button {
+                        store.showBacklog.toggle()
+                    } label: {
+                        Label(
+                            store.showBacklog ? "Hide Backlog" : "Show Backlog",
+                            systemImage: store.showBacklog ? "archivebox.fill" : "archivebox"
+                        )
+                    }
+                    .foregroundStyle(store.showBacklog ? AnyShapeStyle(.tint) : AnyShapeStyle(.primary))
+                    .help("Show or hide backlogged (deferred) plans")
+                }
             }
     }
 
@@ -996,6 +1015,24 @@ enum BrowserViewModel {
 
     static func activeRows(_ project: ProjectTasks) -> [TaskRow] {
         project.activeTasks.map { task in
+            TaskRow(
+                projectPath: project.projectPath,
+                projectName: project.projectName,
+                task: task
+            )
+        }
+    }
+
+    /// The backlogged (deferred) plan rows for ONE project's card (#077).
+    ///
+    /// Maps the project's `backloggedTasks` (populated by `TaskParser` from the
+    /// `.plans/backlog/` directory, in the parser's order) into `TaskRow`s
+    /// carrying the owning project identity — mirroring `activeRows(_:)` exactly.
+    /// This helper does NOT re-sort (it preserves `TaskParser`'s order) and
+    /// performs no I/O or SwiftUI work. Consumed by `ProjectCard`'s optional
+    /// "Backlogged" section, shown only while `store.showBacklog` is on.
+    static func backlogRows(_ project: ProjectTasks) -> [TaskRow] {
+        project.backloggedTasks.map { task in
             TaskRow(
                 projectPath: project.projectPath,
                 projectName: project.projectName,

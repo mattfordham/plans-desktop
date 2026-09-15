@@ -30,7 +30,8 @@ final class BrowserWindowTests: XCTestCase {
             sections: [],
             howProgress: (done: 0, total: 0),
             isBlocked: isBlocked,
-            isCompletedDir: false
+            isCompletedDir: false,
+            isBacklogged: false
         )
     }
 
@@ -43,7 +44,8 @@ final class BrowserWindowTests: XCTestCase {
         name: String,
         lastSeen: String = "",
         tasks: [Task] = [],
-        activeTasks: [Task] = []
+        activeTasks: [Task] = [],
+        backloggedTasks: [Task] = []
     ) -> ProjectTasks {
         ProjectTasks(
             projectPath: path,
@@ -51,7 +53,8 @@ final class BrowserWindowTests: XCTestCase {
             lastSeen: lastSeen,
             tasks: tasks,
             counts: [:],
-            activeTasks: activeTasks
+            activeTasks: activeTasks,
+            backloggedTasks: backloggedTasks
         )
     }
 
@@ -324,6 +327,57 @@ final class BrowserWindowTests: XCTestCase {
         XCTAssertEqual(row?.projectPath, "/p")
         XCTAssertEqual(row?.projectName, "myproj")
         XCTAssertEqual(row?.id, "/p/001")
+    }
+
+    // MARK: - (c1b) backlogRows: one project's backlogged (deferred) rows (#077)
+
+    /// `backlogRows` maps a project's `backloggedTasks` to `TaskRow`s in the SAME
+    /// order (the parser's order — no re-sort), with composite ids, mirroring
+    /// `activeRows`.
+    func testBacklogRowsPreservesOrderWithCompositeIds() {
+        let project = makeProject(
+            path: "/p",
+            name: "p",
+            backloggedTasks: [
+                makeTask(id: "010", status: .pending),
+                makeTask(id: "011", status: .pending),
+            ]
+        )
+        let rows = BrowserViewModel.backlogRows(project)
+        XCTAssertEqual(rows.map(\.id), ["/p/010", "/p/011"])
+    }
+
+    /// A project carrying no backlogged tasks yields no backlog rows.
+    func testBacklogRowsEmptyWhenNoBackloggedTasks() {
+        let project = makeProject(path: "/p", name: "p", backloggedTasks: [])
+        XCTAssertTrue(BrowserViewModel.backlogRows(project).isEmpty)
+    }
+
+    /// `backlogRows` carries the owning project's identity onto each row, exactly
+    /// as `activeRows` does.
+    func testBacklogRowsCarriesProjectIdentity() {
+        let project = makeProject(
+            path: "/p",
+            name: "myproj",
+            backloggedTasks: [makeTask(id: "042", status: .pending)]
+        )
+        let row = BrowserViewModel.backlogRows(project).first
+        XCTAssertEqual(row?.projectPath, "/p")
+        XCTAssertEqual(row?.projectName, "myproj")
+        XCTAssertEqual(row?.id, "/p/042")
+    }
+
+    /// `backlogRows` draws from `backloggedTasks`, NOT `activeTasks` — a project
+    /// with active tasks but no backlog yields no backlog rows, and vice versa.
+    func testBacklogRowsIndependentOfActiveTasks() {
+        let project = makeProject(
+            path: "/p",
+            name: "p",
+            activeTasks: [makeTask(id: "001", status: .inProgress)],
+            backloggedTasks: [makeTask(id: "050", status: .pending)]
+        )
+        XCTAssertEqual(BrowserViewModel.backlogRows(project).map(\.id), ["/p/050"])
+        XCTAssertEqual(BrowserViewModel.activeRows(project).map(\.id), ["/p/001"])
     }
 
     // MARK: - (c2) activeRows(matchingType:) — per-card type filter (#076)

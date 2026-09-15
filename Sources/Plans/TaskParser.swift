@@ -132,6 +132,13 @@ struct Task: Equatable {
     /// so the parser can force `status` to `.completed`.
     let isCompletedDir: Bool
 
+    /// Whether this file was found under `backlog/` (#077). Threaded in by the
+    /// caller so the browser can distinguish backlogged plans. Unlike
+    /// `completed/`, backlog is a SOURCE DIRECTORY only — it does NOT force a
+    /// status; a backlogged file keeps its real `**Status:**` (`pending` /
+    /// `elaborated`).
+    let isBacklogged: Bool
+
     /// Hand-written `Equatable` (#066). Swift cannot synthesize the conformance
     /// here because `howProgress` is a TUPLE `(done: Int, total: Int)`, and
     /// tuples do not conform to protocols.
@@ -139,11 +146,11 @@ struct Task: Equatable {
     /// This `==` is load-bearing: it gates whether a reload PUBLISHES a new
     /// `projects` value, so a field omitted here would cause a real on-disk
     /// change to be silently dropped from both surfaces. Every one of the
-    /// twelve stored properties is therefore compared, in declaration order:
+    /// thirteen stored properties is therefore compared, in declaration order:
     /// `id`, `title`, `type`, `status`, `created`, `branch`, `isKeptWorktree`,
     /// `blockedBy`, `sections`, `howProgress` (both tuple elements), `isBlocked`,
-    /// `isCompletedDir`. If a property is ever ADDED to `Task`, it MUST be added
-    /// here too.
+    /// `isCompletedDir`, `isBacklogged`. If a property is ever ADDED to `Task`,
+    /// it MUST be added here too.
     static func == (lhs: Task, rhs: Task) -> Bool {
         lhs.id == rhs.id
             && lhs.title == rhs.title
@@ -158,6 +165,7 @@ struct Task: Equatable {
             && lhs.howProgress.total == rhs.howProgress.total
             && lhs.isBlocked == rhs.isBlocked
             && lhs.isCompletedDir == rhs.isCompletedDir
+            && lhs.isBacklogged == rhs.isBacklogged
     }
 }
 
@@ -191,6 +199,13 @@ struct ProjectTasks: Equatable {
     /// whose status failed to decode are excluded.
     let activeTasks: [Task]
 
+    /// The BACKLOGGED tasks (files under `.plans/backlog/`), kept SEPARATE from
+    /// `tasks`/`counts`/`activeTasks` so backlog never inflates active work or
+    /// status counts (#077). Backlog is a source directory, not a status: each
+    /// task keeps its real `**Status:**`. Sorted like `activeTasks` — status
+    /// priority descending, then id ascending.
+    let backloggedTasks: [Task]
+
     /// Whether the project has any outstanding work — i.e. at least one active
     /// (non-completed, non-`nil`-status) task. `false` for a project whose tasks
     /// are all completed or have unrecognized statuses. Drives the browser's
@@ -223,6 +238,7 @@ struct ProjectTasks: Equatable {
         tasks: [Task],
         counts: [TaskStatus: Int],
         activeTasks: [Task],
+        backloggedTasks: [Task] = [],
         gitBranch: String? = nil,
         gitIsDirty: Bool? = nil
     ) {
@@ -232,6 +248,7 @@ struct ProjectTasks: Equatable {
         self.tasks = tasks
         self.counts = counts
         self.activeTasks = activeTasks
+        self.backloggedTasks = backloggedTasks
         self.gitBranch = gitBranch
         self.gitIsDirty = gitIsDirty
     }
@@ -339,9 +356,11 @@ struct TaskParser {
             .appendingPathComponent(".plans")
 
         var entries: [ProjectSignature.Entry] = []
-        // Both directories `parseProject` enumerates, in the same order, so the
-        // resulting entry list is deterministic.
-        for subdir in ["pending", "completed"] {
+        // Every directory `parseProject` enumerates, in the same order, so the
+        // resulting entry list is deterministic. `backlog` is included (#077) so
+        // a backlog/restore file move changes the signature and triggers a
+        // reload.
+        for subdir in ["pending", "completed", "backlog"] {
             entries.append(
                 contentsOf: signatureEntries(
                     in: plansDir.appendingPathComponent(subdir),
@@ -407,6 +426,7 @@ struct TaskParser {
             .appendingPathComponent(".plans")
         let pendingDir = plansDir.appendingPathComponent("pending")
         let completedDir = plansDir.appendingPathComponent("completed")
+        let backlogDir = plansDir.appendingPathComponent("backlog")
 
         // Parse each directory's `.md` files. The completed-ids set is derived
         // from the completed files so blocked-by can be resolved (§5.5 step 5).
@@ -444,6 +464,25 @@ struct TaskParser {
                 return lhs.id < rhs.id
             }
 
+        // #077: backlogged tasks (files under `backlog/`) are kept SEPARATE —
+        // never added to `tasks`, `counts`, or `activeTasks`. `isBlocked` is
+        // resolved against the SAME completed-ids set as pending tasks. Backlog
+        // keeps each task's real `**Status:**` (no status is forced). Sorted like
+        // `activeTasks`: status priority descending, then id ascending.
+        let backloggedParsed = parseTaskFiles(
+            in: backlogDir,
+            isCompletedDir: false,
+            isBacklogged: true
+        )
+        let backloggedTasks = backloggedParsed
+            .map { resolveBlocked($0, completedIds: completedIds) }
+            .sorted { lhs, rhs in
+                let lp = lhs.status?.activePriority ?? 0
+                let rp = rhs.status?.activePriority ?? 0
+                if lp != rp { return lp > rp }
+                return lhs.id < rhs.id
+            }
+
         let projectName = URL(fileURLWithPath: projectPath).lastPathComponent.titleized()
 
         return ProjectTasks(
@@ -452,7 +491,8 @@ struct TaskParser {
             lastSeen: lastSeen,
             tasks: tasks,
             counts: counts,
-            activeTasks: activeTasks
+            activeTasks: activeTasks,
+            backloggedTasks: backloggedTasks
         )
     }
 
@@ -461,7 +501,11 @@ struct TaskParser {
     /// an empty array when the directory is missing or empty — tolerant, never
     /// throws (§5.5 step 1). `isCompletedDir` is threaded into single-file
     /// parsing so `completed/` files are forced to `.completed` (§5.4).
-    private func parseTaskFiles(in directory: URL, isCompletedDir: Bool) -> [Task] {
+    private func parseTaskFiles(
+        in directory: URL,
+        isCompletedDir: Bool,
+        isBacklogged: Bool = false
+    ) -> [Task] {
         // contentsOfDirectory throws when the directory is missing; tolerate it.
         let entries = (try? fileManager.contentsOfDirectory(
             at: directory,
@@ -481,7 +525,8 @@ struct TaskParser {
             return parse(
                 filename: url.lastPathComponent,
                 text: text,
-                isCompletedDir: isCompletedDir
+                isCompletedDir: isCompletedDir,
+                isBacklogged: isBacklogged
             )
         }
     }
@@ -503,7 +548,8 @@ struct TaskParser {
             sections: task.sections,
             howProgress: task.howProgress,
             isBlocked: isBlocked,
-            isCompletedDir: task.isCompletedDir
+            isCompletedDir: task.isCompletedDir,
+            isBacklogged: task.isBacklogged
         )
     }
 
@@ -518,7 +564,15 @@ struct TaskParser {
     ///   - isCompletedDir: `true` when the file lives under `completed/`, which
     ///     forces `status` to `.completed` regardless of the `**Status:**` line
     ///     (the directory is authoritative, §5.4).
-    func parse(filename: String, text: String, isCompletedDir: Bool) -> Task {
+    ///   - isBacklogged: `true` when the file lives under `backlog/` (#077).
+    ///     Recorded on the `Task` but does NOT affect `status` — backlogged
+    ///     files keep their real `**Status:**`.
+    func parse(
+        filename: String,
+        text: String,
+        isCompletedDir: Bool,
+        isBacklogged: Bool = false
+    ) -> Task {
         // §5.2: the id is literally the first 3 characters of the filename. If
         // the filename is shorter than 3 characters, take what is there.
         let id = String(filename.prefix(3))
@@ -569,7 +623,8 @@ struct TaskParser {
             // Resolved at the project level in segment 2; false at single-file
             // scope (we don't yet know the set of completed/ ids).
             isBlocked: false,
-            isCompletedDir: isCompletedDir
+            isCompletedDir: isCompletedDir,
+            isBacklogged: isBacklogged
         )
     }
 

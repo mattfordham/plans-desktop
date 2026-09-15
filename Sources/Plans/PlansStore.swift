@@ -219,6 +219,15 @@ final class PlansStore {
         didSet { defaults.set(projectViewMode.rawValue, forKey: Self.projectViewModeKey) }
     }
 
+    /// Whether the browser surfaces backlogged plans (#077). Defaults OFF so the
+    /// dashboard stays focused on active work; when on, each project's
+    /// backlogged tasks become visible. Persisted on every set so the choice
+    /// survives app restarts. NEVER written to `.plans/` (§2 read-only) —
+    /// UserDefaults is the only persistence sink.
+    var showBacklog: Bool = false {
+        didSet { defaults.set(showBacklog, forKey: Self.showBacklogKey) }
+    }
+
     /// UserDefaults key for the persisted manual card order (array of paths).
     private static let orderKey = "cardOrderOverride"
 
@@ -230,6 +239,9 @@ final class PlansStore {
 
     /// UserDefaults key for the persisted project view mode (#072).
     private static let projectViewModeKey = "projectViewMode"
+
+    /// UserDefaults key for the persisted show-backlog flag (#077).
+    private static let showBacklogKey = "showBacklog"
 
     /// UserDefaults key for the persisted starred project paths (#035). The
     /// stored value is `Array(starredProjectPaths)` (UserDefaults stores arrays).
@@ -390,6 +402,10 @@ final class PlansStore {
         _manualOrderActive = defaults.bool(forKey: Self.activeKey)
         _cardLayoutMode = CardLayoutMode(rawValue: defaults.string(forKey: Self.cardLayoutKey) ?? "") ?? .scroll
         _projectViewMode = ProjectViewMode(rawValue: defaults.string(forKey: Self.projectViewModeKey) ?? "") ?? .all
+        // Load persisted show-backlog flag (#077). `bool(forKey:)` returns false
+        // for a missing key, so the default is correctly OFF. Assigning the
+        // backing field avoids the `didSet` re-persisting the just-read value.
+        _showBacklog = defaults.bool(forKey: Self.showBacklogKey)
         // Load persisted starred project paths (#035): the stored array round-trips
         // back into the `Set`. Assigning the backing field avoids the `didSet`
         // re-persisting the just-read value.
@@ -656,6 +672,7 @@ final class PlansStore {
                 tasks: parsed.tasks,
                 counts: parsed.counts,
                 activeTasks: parsed.activeTasks,
+                backloggedTasks: parsed.backloggedTasks,
                 gitBranch: prior.0,
                 gitIsDirty: prior.1
             )
@@ -962,6 +979,7 @@ final class PlansStore {
                 tasks: existing.tasks,
                 counts: existing.counts,
                 activeTasks: existing.activeTasks,
+                backloggedTasks: existing.backloggedTasks,
                 gitBranch: result.branch,
                 gitIsDirty: result.dirty
             )

@@ -730,7 +730,8 @@ final class TaskRunnerTests: XCTestCase {
             sections: [],
             howProgress: (done: 0, total: 0),
             isBlocked: false,
-            isCompletedDir: false
+            isCompletedDir: false,
+            isBacklogged: false
         )
     }
 

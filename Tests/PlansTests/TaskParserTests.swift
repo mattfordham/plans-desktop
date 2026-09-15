@@ -615,4 +615,81 @@ final class TaskParserTests: XCTestCase {
             parser.projectSignature(at: missing)
         )
     }
+
+    // MARK: - Project: backlog (#077)
+
+    /// A file under `.plans/backlog/` is surfaced in `backloggedTasks` with
+    /// `isBacklogged == true` and its REAL `**Status:**` preserved (backlog is a
+    /// source directory, NOT a status — it is never forced to `.completed` or any
+    /// other status).
+    func testBackloggedTasksPreserveRealStatus() throws {
+        try writeTaskFile(
+            filename: "080-backlogged.md",
+            text: """
+            # Backlogged task
+
+            **Status:** elaborated
+            """,
+            in: "backlog"
+        )
+        let project = TaskParser().parseProject(at: tempDir.path)
+        let task = try XCTUnwrap(project.backloggedTasks.first { $0.id == "080" })
+        XCTAssertTrue(task.isBacklogged)
+        // Real status preserved — NOT forced to completed/anything.
+        XCTAssertEqual(task.status, .elaborated)
+        XCTAssertFalse(task.isCompletedDir)
+    }
+
+    /// A backlogged task must NOT leak into `tasks`, `counts`, or `activeTasks`,
+    /// and `hasOutstandingWork` must be `false` when the ONLY tasks present are
+    /// backlogged (no pending/active work).
+    func testBackloggedTasksDoNotLeakIntoActiveCountsOrOutstanding() throws {
+        try writeTaskFile(
+            filename: "081-backlogged.md",
+            text: """
+            # Backlogged pending
+
+            **Status:** pending
+            """,
+            in: "backlog"
+        )
+        let project = TaskParser().parseProject(at: tempDir.path)
+        XCTAssertEqual(project.backloggedTasks.map(\.id), ["081"])
+        // Does not leak into the main collections.
+        XCTAssertTrue(project.tasks.isEmpty)
+        XCTAssertTrue(project.activeTasks.isEmpty)
+        XCTAssertTrue(project.counts.isEmpty)
+        // No outstanding work: backlog does not count as active.
+        XCTAssertFalse(project.hasOutstandingWork)
+    }
+
+    /// Adding a file under `.plans/backlog/` must change the project signature so
+    /// a backlog/restore move triggers a reload.
+    func testProjectSignatureChangesWhenBacklogFileAdded() throws {
+        try writeTaskFile(
+            filename: "001-a.md",
+            text: "# A\n\n**Status:** pending",
+            in: "pending"
+        )
+        let parser = TaskParser()
+        let before = parser.projectSignature(at: tempDir.path)
+        try writeTaskFile(
+            filename: "082-backlogged.md",
+            text: "# B\n\n**Status:** pending",
+            in: "backlog"
+        )
+        XCTAssertNotEqual(before, parser.projectSignature(at: tempDir.path))
+    }
+
+    /// A project with NO `.plans/backlog/` directory yields an empty
+    /// `backloggedTasks` (no-op, no crash).
+    func testMissingBacklogDirYieldsEmptyBackloggedTasks() throws {
+        try writeTaskFile(
+            filename: "083-x.md",
+            text: "# X\n\n**Status:** pending",
+            in: "pending"
+        )
+        let project = TaskParser().parseProject(at: tempDir.path)
+        XCTAssertTrue(project.backloggedTasks.isEmpty)
+    }
 }
