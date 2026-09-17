@@ -293,6 +293,43 @@ final class NewPlanDraftPersistenceTests: XCTestCase {
         XCTAssertTrue(decoded.elaborate)
     }
 
+    // MARK: - Keep toggle Codable round-trip (#078)
+
+    /// A draft with `keep: true` encodes and decodes back with the flag
+    /// preserved — the "Keep" toggle survives dismiss/relaunch alongside the
+    /// existing fields. Asserted with a direct `JSONEncoder`/`JSONDecoder`
+    /// round-trip on `CaptureDraft` (the precise way to pin the Codable
+    /// behavior), and `text` is checked too so the round-trip is proven real.
+    func testKeepDraftRoundTripsPreservingKeepTrue() throws {
+        let draft = PlansStore.CaptureDraft(
+            text: "kept plan", execute: true, elaborate: false, keep: true
+        )
+
+        let encoded = try JSONEncoder().encode(draft)
+        let decoded = try JSONDecoder().decode(PlansStore.CaptureDraft.self, from: encoded)
+
+        XCTAssertTrue(decoded.keep)
+        XCTAssertEqual(decoded.text, "kept plan")
+        XCTAssertTrue(decoded.execute)
+    }
+
+    /// The critical backward-compat guarantee: an OLDER draft JSON saved before
+    /// #078 (no `keep` key at all) must still decode cleanly, defaulting `keep`
+    /// to false. The explicit `init(from:)` uses `decodeIfPresent` for the absent
+    /// key rather than throwing, so pre-#078 persisted drafts survive an app
+    /// upgrade. `imageData` (`Data?`) is optional and omitted here.
+    func testOlderDraftWithoutKeepKeyDecodesAsKeepFalse() throws {
+        let legacyJSON = #"{"text":"old draft","execute":true,"elaborate":false}"#
+
+        let decoded = try JSONDecoder().decode(
+            PlansStore.CaptureDraft.self, from: Data(legacyJSON.utf8)
+        )
+
+        XCTAssertFalse(decoded.keep)
+        XCTAssertEqual(decoded.text, "old draft")
+        XCTAssertTrue(decoded.execute)
+    }
+
     // MARK: - Multiple image attachments Codable migration (#069)
 
     /// A draft encoded with the new `imageDatas` array round-trips: the ordered

@@ -58,6 +58,13 @@ struct NewPlanModal: View {
     /// elaboration pass rather than being a run mode of its own.
     @State private var deep = false
 
+    /// Whether the "Keep" toggle is on (#078): preserve the run's worktree after
+    /// an execute run finishes (plans-cc `--keep`), so it can be reviewed in
+    /// parallel rather than being torn down. Only meaningful when `execute` is on
+    /// (the Keep toggle is disabled otherwise) — it modifies the execute run
+    /// rather than being a run mode of its own.
+    @State private var keep = false
+
     /// The PNG bytes of the images pasted/dropped into the editor (#048/#069),
     /// in staging order — empty when none are staged. Persisted in the per-project
     /// draft (UserDefaults only, never `.plans/` §2); written to disk under
@@ -159,6 +166,12 @@ struct NewPlanModal: View {
                 Toggle("Execute", isOn: $execute)
                     .toggleStyle(.checkbox)
                     .help("Capture, elaborate, and run the new plan autonomously in a worktree")
+                // Keep only affects an execute run, so it reads best right after
+                // Execute and is enabled only when Execute is on (#078).
+                Toggle("Keep", isOn: $keep)
+                    .toggleStyle(.checkbox)
+                    .help("Preserve the run's worktree after it finishes, so it can be reviewed in parallel (plans-cc `--keep`)")
+                    .disabled(!execute)
                 Spacer()
             }
 
@@ -213,6 +226,7 @@ struct NewPlanModal: View {
         .onChange(of: execute) { _, _ in persistDraft() }
         .onChange(of: elaborate) { _, _ in persistDraft() }
         .onChange(of: deep) { _, _ in persistDraft() }
+        .onChange(of: keep) { _, _ in persistDraft() }
         .onChange(of: imageDatas) { _, _ in persistDraft() }
     }
 
@@ -335,12 +349,14 @@ struct NewPlanModal: View {
             execute = draft.execute
             elaborate = draft.elaborate
             deep = draft.deep
+            keep = draft.keep
             imageDatas = draft.imageDatas
         } else {
             text = ""
             execute = false
             elaborate = false
             deep = false
+            keep = false
             imageDatas = []
         }
         // Clear the guard on the next runloop tick, after the field `.onChange`
@@ -364,6 +380,7 @@ struct NewPlanModal: View {
                 execute: execute,
                 elaborate: elaborate,
                 deep: deep,
+                keep: keep,
                 imageDatas: imageDatas
             ),
             for: projectPath
@@ -376,6 +393,7 @@ struct NewPlanModal: View {
         execute = false
         elaborate = false
         deep = false
+        keep = false
         imageDatas = []
         store.clearDraft(for: projectPath)
     }
@@ -393,7 +411,7 @@ struct NewPlanModal: View {
         // `.onDisappear`'s flush resurrect the just-submitted draft. Cleared on the
         // next runloop tick (mirrors `isSwitchingProject`).
         isSubmitting = true
-        modalLog.notice("modal Capture submitted: project=\(self.projectPath, privacy: .public) execute=\(self.execute) elaborate=\(self.elaborate) deep=\(self.deep)")
+        modalLog.notice("modal Capture submitted: project=\(self.projectPath, privacy: .public) execute=\(self.execute) elaborate=\(self.elaborate) deep=\(self.deep) keep=\(self.keep)")
         // Snapshot the project's CURRENT task ids as the reconciliation baseline,
         // so the run-finish hand-off (#051) can detect the genuinely-new id once
         // plans-cc writes the captured plan and dismiss the spinner row in the
@@ -425,6 +443,7 @@ struct NewPlanModal: View {
             execute: execute,
             elaborate: elaborate,
             deep: deep,
+            keep: keep,
             knownTaskIDs: knownTaskIDs
         )
         // Reset the editor and staged images and drop the saved draft BEFORE closing

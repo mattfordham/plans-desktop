@@ -62,6 +62,16 @@ final class PlansStore {
         /// does NOT consult property defaults for a non-Optional key and would
         /// otherwise throw `keyNotFound` when `deep` is absent.
         var deep: Bool = false
+        /// Whether the "Keep" toggle is on (#078): preserve the run's worktree
+        /// after an execute run finishes (plans-cc `--keep`), so it can be reviewed
+        /// in parallel rather than being torn down. Orthogonal to the run mode —
+        /// only meaningful when `execute` is on (the Keep toggle is disabled
+        /// otherwise). Defaults to false at the property level; backward-compat for
+        /// older drafts (saved before #078, with no `keep` key) is handled by the
+        /// explicit `init(from:)` below via `decodeIfPresent` — Swift's SYNTHESIZED
+        /// decoder does NOT consult property defaults for a non-Optional key and
+        /// would otherwise throw `keyNotFound` when `keep` is absent.
+        var keep: Bool = false
         /// The PNG bytes of the images pasted/dropped into the form (#048/#069),
         /// in staging order — empty when nothing is staged. Held alongside the
         /// text so a dismissed-and-reopened sheet (or an app relaunch) restores
@@ -81,11 +91,12 @@ final class PlansStore {
         /// `deep` defaults to false and `imageDatas` to `[]` so existing call
         /// sites and decoding of older drafts (saved before #065 / #048, with no
         /// `deep` or image key) still work.
-        init(text: String, execute: Bool, elaborate: Bool, deep: Bool = false, imageDatas: [Data] = []) {
+        init(text: String, execute: Bool, elaborate: Bool, deep: Bool = false, keep: Bool = false, imageDatas: [Data] = []) {
             self.text = text
             self.execute = execute
             self.elaborate = elaborate
             self.deep = deep
+            self.keep = keep
             self.imageDatas = imageDatas
         }
 
@@ -95,7 +106,7 @@ final class PlansStore {
         /// `init(from:)` via `LegacyCodingKeys` so it never appears in the encoded
         /// output.
         private enum CodingKeys: String, CodingKey {
-            case text, execute, elaborate, deep, imageDatas
+            case text, execute, elaborate, deep, keep, imageDatas
         }
 
         /// Decode-only keys for pre-#069 drafts, which carried a single scalar
@@ -116,6 +127,7 @@ final class PlansStore {
             self.execute = try container.decode(Bool.self, forKey: .execute)
             self.elaborate = try container.decode(Bool.self, forKey: .elaborate)
             self.deep = try container.decodeIfPresent(Bool.self, forKey: .deep) ?? false
+            self.keep = try container.decodeIfPresent(Bool.self, forKey: .keep) ?? false
 
             if let datas = try container.decodeIfPresent([Data].self, forKey: .imageDatas) {
                 self.imageDatas = datas
@@ -139,6 +151,7 @@ final class PlansStore {
             try container.encode(execute, forKey: .execute)
             try container.encode(elaborate, forKey: .elaborate)
             try container.encode(deep, forKey: .deep)
+            try container.encode(keep, forKey: .keep)
             try container.encode(imageDatas, forKey: .imageDatas)
         }
     }

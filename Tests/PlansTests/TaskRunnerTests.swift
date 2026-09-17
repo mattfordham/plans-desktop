@@ -481,6 +481,39 @@ final class TaskRunnerTests: XCTestCase {
         XCTAssertEqual(TaskRunner.captureMode(execute: false, elaborate: false), .capture)
     }
 
+    // MARK: - Keep flag (#078)
+
+    /// A `TaskRun` built with `keep: true` carries the flag on the run — this is
+    /// exactly the stored property `TaskRun.spawn` reads to emit the valueless
+    /// `--keep` argument. Asserted on the stored property rather than by spawning
+    /// a process (mirroring the `usesTaskID`/`usesDescription` precedent, which
+    /// verify arg shape via pure flags to avoid launching a real `node` run).
+    @MainActor
+    func testKeepRunCarriesKeepFlag() {
+        let run = TaskRun(taskID: "042", mode: .execute, keep: true)
+        XCTAssertTrue(run.keep)
+    }
+
+    /// `TaskRun.keep` defaults to false when the init param is omitted, so every
+    /// existing call site (which never passes `keep`) is unaffected — no `--keep`
+    /// is emitted for them.
+    @MainActor
+    func testKeepRunDefaultsToFalse() {
+        let run = TaskRun(taskID: "042", mode: .execute)
+        XCTAssertFalse(run.keep)
+    }
+
+    /// `keep` is ORTHOGONAL to `RunMode`: it composes with any mode rather than
+    /// being a mode of its own, so `TaskRunner.captureMode(execute:elaborate:)`
+    /// (which has no `keep` input) selects the same mode regardless. Keep is a
+    /// separate valueless flag threaded through `TaskRun`, not a mode.
+    func testKeepDoesNotAlterSelectedRunMode() {
+        // captureMode has no `keep` parameter — the selection stands.
+        XCTAssertEqual(TaskRunner.captureMode(execute: false, elaborate: true), .captureElaborate)
+        XCTAssertEqual(TaskRunner.captureMode(execute: true, elaborate: true), .executeYolo)
+        XCTAssertEqual(TaskRunner.captureMode(execute: false, elaborate: false), .capture)
+    }
+
     // MARK: - Optional elaborate guidance + Deep (#074)
 
     /// The Elaborate dialog's fullest submission: an `.elaborate` run carrying

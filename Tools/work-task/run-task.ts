@@ -5,6 +5,12 @@
  * `--mode` flag selects which skill drives the run:
  *   - `execute`  (default): drives `plan-execute` to implement the task,
  *                always in `worktree` isolation, leaving it in `review`.
+ *
+ * The valueless `--keep` flag (#078) requests that the worktree be KEPT after an
+ * execute run rather than cleaned up. It is threaded into the execute-bearing
+ * prompt builders (buildExecutePrompt / buildExecuteYoloPrompt), which append a
+ * trailing ` keep` token to the `/plan-execute … worktree` command line. It is
+ * orthogonal to `--mode` and ignored by non-execute builders.
  *   - `elaborate`: drives `plan-elaborate` to research/flesh out a pending
  *                task autonomously (no interactive prompts). Accepts an OPTIONAL
  *                `--description` folded in as the user's guidance for the pass.
@@ -93,6 +99,14 @@ interface Args {
    * builders.
    */
   deep?: boolean;
+  /**
+   * Optional (#078). When true, the execute-bearing prompt builders
+   * (buildExecutePrompt / buildExecuteYoloPrompt) append a trailing ` keep` token
+   * to the `/plan-execute … worktree` line, requesting that the worktree be kept
+   * after the run rather than cleaned up. Orthogonal to `mode`; ignored by
+   * non-execute builders.
+   */
+  keep?: boolean;
 }
 
 /** Emit one NDJSON line on stdout. Never pretty-printed. */
@@ -112,6 +126,8 @@ function parseArgs(argv: string[]): Args | null {
   let mode: Mode = "execute";
   // #065: valueless flag requesting a deeper elaborate pass. Orthogonal to mode.
   let deep = false;
+  // #078: valueless flag requesting the worktree be kept after execute. Orthogonal to mode.
+  let keep = false;
 
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
@@ -124,6 +140,9 @@ function parseArgs(argv: string[]): Args | null {
     } else if (arg === "--deep") {
       // Valueless flag — do NOT consume the following argv token.
       deep = true;
+    } else if (arg === "--keep") {
+      // Valueless flag — do NOT consume the following argv token.
+      keep = true;
     } else if (arg === "--mode") {
       const value = argv[++i];
       if (
@@ -157,7 +176,7 @@ function parseArgs(argv: string[]): Args | null {
     if (!description) {
       return null;
     }
-    return { projectRoot, mode, description, deep };
+    return { projectRoot, mode, description, deep, keep };
   }
 
   if (mode === "reElaborate") {
@@ -166,7 +185,7 @@ function parseArgs(argv: string[]): Args | null {
     if (!taskId || !description) {
       return null;
     }
-    return { projectRoot, taskId, mode, description, deep };
+    return { projectRoot, taskId, mode, description, deep, keep };
   }
 
   // execute / elaborate / delete / backlog / restore operate on an existing
@@ -179,9 +198,9 @@ function parseArgs(argv: string[]): Args | null {
     return null;
   }
   if (mode === "elaborate") {
-    return { projectRoot, taskId, mode, description, deep };
+    return { projectRoot, taskId, mode, description, deep, keep };
   }
-  return { projectRoot, taskId, mode, deep };
+  return { projectRoot, taskId, mode, deep, keep };
 }
 
 /**
@@ -217,11 +236,15 @@ function toolDetail(input: unknown): string {
  * skill is invoked as `/plan-execute <id> worktree` so it can never fall back to
  * editing the main checkout in place — the Plans app only ever hands tasks off
  * for isolated execution.
+ *
+ * #078: when `keep` is true, a trailing ` keep` token is appended to the
+ * `/plan-execute <id> worktree` command line so the worktree is kept after the
+ * run rather than cleaned up.
  */
-function buildExecutePrompt(taskId: string): string {
+function buildExecutePrompt(taskId: string, keep: boolean): string {
   return [
     `Use the \`plan-execute\` skill to work the plans-cc task with id ${taskId}.`,
-    `Invoke it in worktree mode: \`/plan-execute ${taskId} worktree\`.`,
+    `Invoke it in worktree mode: \`/plan-execute ${taskId} worktree${keep ? " keep" : ""}\`.`,
     "",
     "Requirements:",
     `1. The run MUST use a dedicated git worktree for task ${taskId} (the`,
@@ -409,13 +432,17 @@ function buildCaptureElaboratePrompt(
  * executes the new task fully autonomously in an isolated worktree (yolo implies
  * worktree + branch). The task is left in `review` for human verification — yolo
  * never marks it `completed`.
+ *
+ * #078: when `keep` is true, a trailing ` keep` token is appended to the
+ * `/plan-execute "<description>" yolo` command line so the worktree is kept after
+ * the run rather than cleaned up.
  */
-function buildExecuteYoloPrompt(description: string): string {
+function buildExecuteYoloPrompt(description: string, keep: boolean): string {
   return [
     `Use the \`plan-execute\` skill to autonomously work a brand-new plans-cc`,
     `task captured from the following description, in yolo mode:`,
     "",
-    `/plan-execute "${description}" yolo`,
+    `/plan-execute "${description}" yolo${keep ? " keep" : ""}`,
     "",
     "Requirements:",
     "1. Run the FULL autonomous pipeline: auto-capture the description into a new",
@@ -561,7 +588,7 @@ function buildPrompt(args: Args): string {
     return buildCaptureElaboratePrompt(args.description ?? "", args.deep ?? false);
   }
   if (args.mode === "executeYolo") {
-    return buildExecuteYoloPrompt(args.description ?? "");
+    return buildExecuteYoloPrompt(args.description ?? "", args.keep ?? false);
   }
   if (args.mode === "reElaborate") {
     return buildReElaboratePrompt(
@@ -586,7 +613,7 @@ function buildPrompt(args: Args): string {
   if (args.mode === "restore") {
     return buildRestorePrompt(args.taskId ?? "");
   }
-  return buildExecutePrompt(args.taskId ?? "");
+  return buildExecutePrompt(args.taskId ?? "", args.keep ?? false);
 }
 
 /**
