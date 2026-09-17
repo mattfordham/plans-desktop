@@ -514,6 +514,56 @@ final class TaskRunnerTests: XCTestCase {
         XCTAssertEqual(TaskRunner.captureMode(execute: false, elaborate: false), .capture)
     }
 
+    // MARK: - Keep via the existing-task run path (#078, ExecuteModal)
+
+    /// `ExecuteModal`'s submit path: `TaskRunner.run(... mode: .execute, keep: true)`
+    /// must register a `TaskRun` that carries `keep`, since that stored property
+    /// is exactly what `TaskRun.spawn` reads to emit the valueless `--keep`
+    /// argument. This covers the `run(...)` entry point specifically — distinct
+    /// from the `capture(...)` coverage above, which is the New Plan modal's
+    /// brand-new-task path. Asserted on the registered run's stored properties
+    /// rather than by inspecting a real process (the `testDeepRunCarriesDeepFlag`
+    /// precedent — spawning a real `node` run is deliberately avoided).
+    @MainActor
+    func testExecuteRunViaRunCarriesKeepFlag() {
+        let runner = TaskRunner()
+        runner.run(projectPath: "/some/project", taskID: "078", mode: .execute, keep: true)
+
+        let run = runner.run(for: "078")
+        XCTAssertNotNil(run)
+        XCTAssertEqual(run?.mode, .execute)
+        XCTAssertEqual(run?.taskID, "078")
+        XCTAssertEqual(run?.keep, true)
+    }
+
+    /// The sheet's no-regression path: submitting with Keep OFF must produce the
+    /// byte-for-byte run the bare Execute button fired before #078 — `keep`
+    /// false, so `spawn` omits `--keep` entirely and the launcher emits the
+    /// unchanged `/plan-execute <id> worktree` command line.
+    @MainActor
+    func testExecuteRunViaRunOmitsKeepWhenFalse() {
+        let runner = TaskRunner()
+        runner.run(projectPath: "/some/project", taskID: "078", mode: .execute, keep: false)
+
+        let run = runner.run(for: "078")
+        XCTAssertNotNil(run)
+        XCTAssertEqual(run?.mode, .execute)
+        XCTAssertEqual(run?.keep, false)
+        // No guidance channel exists for `.execute` — the sheet passes none.
+        XCTAssertNil(run?.description)
+    }
+
+    /// `run(...)`'s `keep` parameter is DEFAULTED, so every pre-#078 call site
+    /// (the other actions that still fire `run(...)` bare) keeps its exact
+    /// argument shape — no `--keep`, no source change required.
+    @MainActor
+    func testExecuteRunViaRunDefaultsKeepToFalse() {
+        let runner = TaskRunner()
+        runner.run(projectPath: "/some/project", taskID: "078", mode: .execute)
+
+        XCTAssertEqual(runner.run(for: "078")?.keep, false)
+    }
+
     // MARK: - Optional elaborate guidance + Deep (#074)
 
     /// The Elaborate dialog's fullest submission: an `.elaborate` run carrying

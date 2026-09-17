@@ -96,6 +96,15 @@ struct ProjectCard: View {
     /// pending rows are present.
     @State private var elaborateRequest: ElaborateRequest? = nil
 
+    /// The pending "Execute" request (#078), or `nil` when no Execute sheet is
+    /// open. Set by a row's Execute glyph (elaborated/in-progress, non-blocked
+    /// tasks only) to that row's task id + project path; an `.sheet(item:)` keyed
+    /// on it presents the `ExecuteModal` for exactly that task. Mirrors
+    /// `elaborateRequest` — an `Identifiable` struct rather than a bare bool +
+    /// separate id, so the sheet always targets the right row even if several
+    /// executable rows are present.
+    @State private var executeRequest: ExecuteRequest? = nil
+
     /// #076: the active per-card task-type filter, or `nil` for "All" (no
     /// filtering). Purely view-local transient state (like `hoveredRowID` and the
     /// sheet requests) — it narrows only the body rows shown by this card and is
@@ -384,6 +393,13 @@ struct ProjectCard: View {
         // `.elaborate` mode (the sole `.plans/` writer, §2).
         .sheet(item: $elaborateRequest) { request in
             ElaborateModal(taskID: request.taskID, projectPath: request.projectPath)
+        }
+        // The "Execute" sheet (#078), keyed on the requesting row's task the same
+        // way the two sheets above are. The `ExecuteModal` hands the Keep flag to
+        // the runner in `.execute` mode (the sole `.plans/` writer, §2); with Keep
+        // off it spawns exactly the run the bare glyph used to fire.
+        .sheet(item: $executeRequest) { request in
+            ExecuteModal(taskID: request.taskID, projectPath: request.projectPath)
         }
     }
 
@@ -923,8 +939,9 @@ struct ProjectCard: View {
                 // neighbours. A negative `spacing` trims the gap between the two
                 // adjacent glyphs (each already carries 8pt leading padding) so
                 // they read as a tight pair. Refine opens the `ReElaborateModal`
-                // via the card's `.sheet(item:)`; Execute launches the run as
-                // before. `canWork` and `canReElaborate` share the same
+                // via the card's `.sheet(item:)`; Execute likewise opens the
+                // `ExecuteModal` (#078) rather than firing the run straight off
+                // the glyph. `canWork` and `canReElaborate` share the same
                 // elaborated+non-blocked gate, so Refine appears exactly when
                 // Execute does.
                 HStack(spacing: -4) {
@@ -937,7 +954,10 @@ struct ProjectCard: View {
                     }
                     RowActionGlyph(systemImage: "play.fill", help: "Execute this plan") {
                         cardLog.notice("card Execute clicked: task=\(row.task.id, privacy: .public)")
-                        runner.run(projectPath: row.projectPath, taskID: row.task.id, mode: .execute)
+                        executeRequest = ExecuteRequest(
+                            taskID: row.task.id,
+                            projectPath: row.projectPath
+                        )
                     }
                 }
             } else {
@@ -1004,6 +1024,17 @@ private struct ReElaborateRequest: Identifiable {
 /// from `ReElaborateRequest` (rather than a shared one) so the two sheets stay
 /// independently keyed and can never be presented against each other's state.
 private struct ElaborateRequest: Identifiable {
+    let taskID: String
+    let projectPath: String
+    var id: String { taskID }
+}
+
+/// A pending "Execute" request (#078): the task + project a tapped Execute glyph
+/// targets, driving the card's third `.sheet(item:)`. A distinct type from
+/// `ElaborateRequest`/`ReElaborateRequest` (rather than a shared one) so the
+/// three sheets stay independently keyed and can never be presented against each
+/// other's state.
+private struct ExecuteRequest: Identifiable {
     let taskID: String
     let projectPath: String
     var id: String { taskID }

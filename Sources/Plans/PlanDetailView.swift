@@ -74,6 +74,13 @@ struct PlanDetailView: View {
     /// `showReElaborate` since the two actions are gated to disjoint statuses.
     @State private var showElaborate = false
 
+    /// Whether the "Execute" sheet (#078) is presented. Raised by the "Execute"
+    /// header action (only shown for an elaborated/in-progress, non-blocked task)
+    /// and lowered by the sheet's own Cancel/Execute. Drives the `ExecuteModal`
+    /// for THIS view's task, which offers the Keep toggle before launching the
+    /// run the button used to fire directly.
+    @State private var showExecute = false
+
     /// The resolved row for `rowID` across all projects' active rows, or `nil`
     /// when absent. Re-derived from the live store on each render.
     private var row: TaskRow? {
@@ -144,6 +151,16 @@ struct PlanDetailView: View {
         .sheet(isPresented: $showElaborate) {
             if let row {
                 ElaborateModal(taskID: row.task.id, projectPath: row.projectPath)
+            }
+        }
+        // The "Execute" sheet (#078). Same row-resolution shape as the two sheets
+        // above: the Execute action that raises it only renders inside the `if
+        // let row` header, so the unwrap is safe. The `ExecuteModal` hands the
+        // Keep flag to the runner in `.execute` mode; with Keep off it spawns
+        // exactly the run this button used to fire directly.
+        .sheet(isPresented: $showExecute) {
+            if let row {
+                ExecuteModal(taskID: row.task.id, projectPath: row.projectPath)
             }
         }
         // NOTE: dismissing the detail pane deliberately does NOT stop the run.
@@ -238,13 +255,14 @@ struct PlanDetailView: View {
 
                     // "Execute" — hands the plan off to the bundled Agent-SDK
                     // runner in worktree-isolated `plan-execute` mode. Available
-                    // only for an elaborated/in-progress, non-blocked task.
+                    // only for an elaborated/in-progress, non-blocked task. Opens
+                    // the `ExecuteModal` (#078) for the Keep choice rather than
+                    // launching the run straight off the button.
                     if Self.canWork(status: row.task.status,
                                     isBlocked: row.task.isBlocked,
                                     isBacklogged: row.task.isBacklogged) {
                         Button {
-                            runner.run(projectPath: row.projectPath,
-                                       taskID: row.task.id, mode: .execute)
+                            showExecute = true
                         } label: {
                             Label("Execute", systemImage: "play.fill")
                         }
