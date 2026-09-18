@@ -703,11 +703,16 @@ async function main(): Promise<void> {
           // Read-only Figma verification tools. des-build's self-verification
           // visual diff was hard-denied under `permissionMode: "acceptEdits"`
           // because MCP tools are not auto-approved and these weren't
-          // allowlisted (task #051 root cause), which stranded the run. These
-          // two are READ-ONLY verification tools (screenshot + metadata), so
-          // they are safe to allow. Do NOT add any Figma write/edit tools here.
+          // allowlisted (task #051 root cause), which stranded the run. That
+          // fix allowlisted only screenshot + metadata, so des-build still
+          // cleared its get_metadata preflight and then aborted mid-build at
+          // Step 5 when it reached get_design_context. These three are the
+          // complete set des-build declares in its frontmatter, and all three
+          // are READ-ONLY, so they are safe to allow. Do NOT add any Figma
+          // write/edit tools here.
           "mcp__figma-dev-mode-mcp-server__get_screenshot",
           "mcp__figma-dev-mode-mcp-server__get_metadata",
+          "mcp__figma-dev-mode-mcp-server__get_design_context",
         ],
       },
     });
