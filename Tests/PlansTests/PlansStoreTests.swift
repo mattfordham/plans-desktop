@@ -157,6 +157,172 @@ final class PlansStoreTests: XCTestCase {
         XCTAssertEqual(store.projects.count, 0)
     }
 
+    // MARK: - Run-outcome failure correlation (#079)
+
+    /// Writes an NDJSON `run-outcomes.log` under the temp dir listing the given
+    /// outcomes and returns a `RunOutcomeLogReader` pointed at it.
+    private func makeOutcomeReader(_ outcomes: [RunOutcome]) throws -> RunOutcomeLogReader {
+        let url = tempDir.appendingPathComponent("run-outcomes-\(UUID().uuidString).log")
+        let encoder = JSONEncoder()
+        let lines = try outcomes.map { String(data: try encoder.encode($0), encoding: .utf8)! }
+        try lines.joined(separator: "\n").write(to: url, atomically: true, encoding: .utf8)
+        return RunOutcomeLogReader(fileURL: url)
+    }
+
+    private func makeOutcome(
+        projectPath: String,
+        taskID: String,
+        classification: RunOutcome.Classification,
+        timestamp: String,
+        stopReason: String? = nil,
+        errorMessage: String? = nil
+    ) -> RunOutcome {
+        RunOutcome(
+            timestamp: timestamp,
+            taskID: taskID,
+            mode: "execute",
+            projectPath: projectPath,
+            costUsd: 0,
+            turns: 0,
+            stopReason: stopReason,
+            errorMessage: errorMessage,
+            classification: classification
+        )
+    }
+
+    /// An in-progress task with a matching latest FAILED outcome on disk surfaces
+    /// a `failure` overlay carrying the outcome's classification/message.
+    func testReloadCorrelatesFailureForInProgressTask() throws {
+        let projectDir = try makeProjectDir(name: "alpha")
+        try writeTaskFile(
+            projectDir: projectDir,
+            filename: "007-run.md",
+            text: "# Run\n\n**Status:** in-progress",
+            in: "pending"
+        )
+        let reader = try makeReader(projectPaths: [projectDir.path])
+        let outcomeReader = try makeOutcomeReader([
+            makeOutcome(
+                projectPath: projectDir.path,
+                taskID: "007",
+                classification: .truncated,
+                timestamp: "2026-06-04T10:00:00Z",
+                stopReason: "error_max_budget_usd",
+                errorMessage: "Budget cap reached"
+            )
+        ])
+        let store = PlansStore(registryReader: reader, outcomeLogReader: outcomeReader)
+        store.reload()
+
+        let task = try XCTUnwrap(store.projects.first?.tasks.first { $0.id == "007" })
+        let failure = try XCTUnwrap(task.failure, "in-progress + failed outcome should overlay a failure")
+        XCTAssertEqual(failure.classification, .truncated)
+        XCTAssertEqual(failure.stopReason, "error_max_budget_usd")
+        XCTAssertEqual(failure.errorMessage, "Budget cap reached")
+        XCTAssertEqual(failure.timestamp, "2026-06-04T10:00:00Z")
+    }
+
+    /// No stale badge: a task that has ADVANCED past in-progress (now review)
+    /// carries no failure overlay even though a failed outcome exists on disk.
+    func testReloadDoesNotBadgeTaskThatAdvancedPastInProgress() throws {
+        let projectDir = try makeProjectDir(name: "alpha")
+        try writeTaskFile(
+            projectDir: projectDir,
+            filename: "007-run.md",
+            text: "# Run\n\n**Status:** review",
+            in: "pending"
+        )
+        let reader = try makeReader(projectPaths: [projectDir.path])
+        let outcomeReader = try makeOutcomeReader([
+            makeOutcome(
+                projectPath: projectDir.path,
+                taskID: "007",
+                classification: .truncated,
+                timestamp: "2026-06-04T10:00:00Z"
+            )
+        ])
+        let store = PlansStore(registryReader: reader, outcomeLogReader: outcomeReader)
+        store.reload()
+
+        let task = try XCTUnwrap(store.projects.first?.tasks.first { $0.id == "007" })
+        XCTAssertNil(task.failure, "a task past in-progress must not show a stale failure badge")
+    }
+
+    /// No stale badge: an in-progress task whose LATEST outcome is `completed`
+    /// carries no failure overlay (only failing classifications overlay).
+    func testReloadDoesNotBadgeInProgressTaskWithCompletedLatestOutcome() throws {
+        let projectDir = try makeProjectDir(name: "alpha")
+        try writeTaskFile(
+            projectDir: projectDir,
+            filename: "007-run.md",
+            text: "# Run\n\n**Status:** in-progress",
+            in: "pending"
+        )
+        let reader = try makeReader(projectPaths: [projectDir.path])
+        let outcomeReader = try makeOutcomeReader([
+            makeOutcome(
+                projectPath: projectDir.path,
+                taskID: "007",
+                classification: .truncated,
+                timestamp: "2026-06-04T10:00:00Z"
+            ),
+            // A later, cleanly-completed run supersedes the earlier failure.
+            makeOutcome(
+                projectPath: projectDir.path,
+                taskID: "007",
+                classification: .completed,
+                timestamp: "2026-06-04T11:00:00Z"
+            )
+        ])
+        let store = PlansStore(registryReader: reader, outcomeLogReader: outcomeReader)
+        store.reload()
+
+        let task = try XCTUnwrap(store.projects.first?.tasks.first { $0.id == "007" })
+        XCTAssertNil(task.failure, "a superseding completed outcome must clear the failure")
+    }
+
+    /// `failedCount` (#079) totals the tasks carrying a failure overlay across
+    /// every project. Two in-progress tasks with failing latest outcomes (one per
+    /// project) sum to 2; a healthy in-progress task adds nothing.
+    func testFailedCountTotalsFailureOverlaysAcrossProjects() throws {
+        let alpha = try makeProjectDir(name: "alpha")
+        let beta = try makeProjectDir(name: "beta")
+        try writeTaskFile(projectDir: alpha, filename: "001-a.md",
+                          text: "# A\n\n**Status:** in-progress", in: "pending")
+        try writeTaskFile(projectDir: beta, filename: "002-b.md",
+                          text: "# B\n\n**Status:** in-progress", in: "pending")
+        // A healthy in-progress task (no failing outcome) must not be counted.
+        try writeTaskFile(projectDir: alpha, filename: "003-c.md",
+                          text: "# C\n\n**Status:** in-progress", in: "pending")
+
+        let reader = try makeReader(projectPaths: [alpha.path, beta.path])
+        let outcomeReader = try makeOutcomeReader([
+            makeOutcome(projectPath: alpha.path, taskID: "001",
+                        classification: .error, timestamp: "2026-06-04T10:00:00Z",
+                        errorMessage: "boom"),
+            makeOutcome(projectPath: beta.path, taskID: "002",
+                        classification: .crashed, timestamp: "2026-06-04T10:00:00Z")
+        ])
+        let store = PlansStore(registryReader: reader, outcomeLogReader: outcomeReader)
+        store.reload()
+
+        XCTAssertEqual(store.failedCount, 2)
+    }
+
+    /// With no failing outcomes on disk, `failedCount` is 0 so the menu-bar
+    /// surfaces suppress the failed badge entirely.
+    func testFailedCountZeroWhenNoFailures() throws {
+        let projectDir = try makeProjectDir(name: "alpha")
+        try writeTaskFile(projectDir: projectDir, filename: "001-a.md",
+                          text: "# A\n\n**Status:** in-progress", in: "pending")
+        let reader = try makeReader(projectPaths: [projectDir.path])
+        let store = PlansStore(registryReader: reader,
+                               outcomeLogReader: try makeOutcomeReader([]))
+        store.reload()
+
+        XCTAssertEqual(store.failedCount, 0)
+    }
+
     // MARK: - onDidReload hand-off hook (#051)
 
     /// `reload()` must invoke `onDidReload` AFTER `projects` is repopulated, so

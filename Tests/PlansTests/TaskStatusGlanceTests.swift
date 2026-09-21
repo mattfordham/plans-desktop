@@ -91,6 +91,56 @@ final class TaskStatusGlanceTests: XCTestCase {
         XCTAssertEqual(indicator.color, TaskStatusIndicator.neutralColor)
     }
 
+    // MARK: - TaskStatusIndicator failure resolution (#079)
+
+    /// A failed (but not blocked) task shows the failure symbol + failure color,
+    /// which reuse the SAME `exclamationmark.octagon.fill` + `#cc6666` as blocked
+    /// (failure and blocked are visually identical alarm states).
+    func testIndicatorFailureSymbolTakesPrecedenceOverStatus() {
+        let indicator = TaskStatusIndicator(
+            status: .inProgress, isBlocked: false, isFailed: true
+        )
+        XCTAssertEqual(indicator.symbolName, TaskStatusIndicator.failureSymbol)
+        XCTAssertEqual(indicator.color, TaskStatusIndicator.failureColor)
+    }
+
+    /// The failure symbol/color reuse the blocked symbol/color literals exactly
+    /// (`exclamationmark.octagon.fill` + `#cc6666`).
+    func testFailureSymbolAndColorReuseBlockedLiterals() {
+        XCTAssertEqual(TaskStatusIndicator.failureSymbol, TaskStatusIndicator.blockedSymbol)
+        XCTAssertEqual(TaskStatusIndicator.failureColor, TaskStatusIndicator.blockedColor)
+        XCTAssertEqual(TaskStatusIndicator.failureSymbol, "exclamationmark.octagon.fill")
+        XCTAssertEqual(TaskStatusIndicator.failureColor, Color(hex: 0xcc6666))
+    }
+
+    /// A failed task with a `nil` status still shows the failure symbol + color
+    /// (failure overrides the neutral fallback).
+    func testIndicatorFailureWithNilStatusStillFailed() {
+        let indicator = TaskStatusIndicator(status: nil, isBlocked: false, isFailed: true)
+        XCTAssertEqual(indicator.symbolName, TaskStatusIndicator.failureSymbol)
+        XCTAssertEqual(indicator.color, TaskStatusIndicator.failureColor)
+    }
+
+    /// Precedence ordering when a task is BOTH blocked and failed: blocked wins
+    /// the branch (mirrors the TUI invariant that the blocked check is first).
+    /// Because failure and blocked share the same symbol/color, the rendered
+    /// result is identical either way — this test pins the documented ordering.
+    func testIndicatorBlockedTakesPrecedenceOverFailure() {
+        let indicator = TaskStatusIndicator(
+            status: .inProgress, isBlocked: true, isFailed: true
+        )
+        XCTAssertEqual(indicator.symbolName, TaskStatusIndicator.blockedSymbol)
+        XCTAssertEqual(indicator.color, TaskStatusIndicator.blockedColor)
+    }
+
+    /// The `isFailed` parameter defaults to false, so existing call sites that
+    /// omit it are unchanged (no failure branch taken).
+    func testIndicatorFailureDefaultsFalse() {
+        let indicator = TaskStatusIndicator(status: .review, isBlocked: false)
+        XCTAssertEqual(indicator.symbolName, TaskStatus.review.symbolName)
+        XCTAssertEqual(indicator.color, TaskStatus.review.glanceColor)
+    }
+
     // MARK: - glance order
 
     /// The glance order mirrors the TUI `STAT_CARDS` order and excludes

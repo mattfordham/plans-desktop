@@ -153,4 +153,74 @@ final class RunOutcomeLogTests: XCTestCase {
         let contents = try String(contentsOf: url, encoding: .utf8)
         XCTAssertTrue(contents.contains("\"taskID\":\"001\"") || contents.contains("\"taskID\" : \"001\""))
     }
+
+    // MARK: - Reading (NDJSON line reader)
+
+    /// Writes NDJSON lines verbatim to a temp `run-outcomes.log` so the reader can
+    /// be exercised against realistic bytes (including the malformed/blank lines
+    /// it must tolerate) without going through the writer.
+    private func writeLog(_ lines: [String]) throws -> URL {
+        let url = tempDir.appendingPathComponent("run-outcomes.log")
+        try (lines.joined(separator: "\n") + "\n").write(to: url, atomically: true, encoding: .utf8)
+        return url
+    }
+
+    func testReadReturnsAllValidOutcomesInOrder() throws {
+        // The real sample line shape (optional stopReason, enum raw classification).
+        let url = try writeLog([
+            #"{"costUsd":4.6379015,"stopReason":"end_turn","taskID":"724","turns":17,"projectPath":"/Users/matt/Work/Ensemble","mode":"elaborate","timestamp":"2026-09-02T19:36:28Z","classification":"completed"}"#,
+            #"{"costUsd":4.2,"stopReason":"error_max_budget_usd","taskID":"410","turns":31,"projectPath":"/proj","mode":"execute","timestamp":"2026-06-16T11:06:46Z","classification":"truncated"}"#,
+        ])
+        let reader = RunOutcomeLogReader(fileURL: url)
+        let outcomes = reader.read()
+        XCTAssertEqual(outcomes.count, 2)
+        XCTAssertEqual(outcomes[0].taskID, "724")
+        XCTAssertEqual(outcomes[0].classification, .completed)
+        XCTAssertEqual(outcomes[1].taskID, "410")
+        XCTAssertEqual(outcomes[1].classification, .truncated)
+        XCTAssertEqual(outcomes[1].stopReason, "error_max_budget_usd")
+    }
+
+    func testReadSkipsMalformedAndBlankLines() throws {
+        // Blank lines and non-JSON garbage are skipped, not fatal — the log is a
+        // best-effort append target and a partial write must not blind the reader.
+        let url = try writeLog([
+            #"{"costUsd":1.0,"taskID":"001","turns":1,"projectPath":"/p","mode":"execute","timestamp":"2026-01-01T00:00:00Z","classification":"completed"}"#,
+            "",
+            "not json at all",
+            #"{"costUsd":2.0"#, // truncated / partial write
+            #"{"costUsd":3.0,"taskID":"002","turns":2,"projectPath":"/p","mode":"execute","timestamp":"2026-01-02T00:00:00Z","classification":"crashed"}"#,
+        ])
+        let reader = RunOutcomeLogReader(fileURL: url)
+        let outcomes = reader.read()
+        XCTAssertEqual(outcomes.map(\.taskID), ["001", "002"])
+    }
+
+    func testReadReturnsEmptyWhenFileMissing() {
+        let url = tempDir.appendingPathComponent("does-not-exist.log")
+        let reader = RunOutcomeLogReader(fileURL: url)
+        XCTAssertEqual(reader.read(), [])
+    }
+
+    func testLatestOutcomeByTaskPicksNewestTimestampPerKey() throws {
+        // Two outcomes for the same (projectPath, taskID): the latest by timestamp
+        // wins, regardless of file order (older line appears AFTER the newer one).
+        let url = try writeLog([
+            #"{"costUsd":3.0,"taskID":"410","turns":5,"projectPath":"/proj","mode":"execute","timestamp":"2026-06-16T12:00:00Z","classification":"completed"}"#,
+            #"{"costUsd":4.2,"stopReason":"error_max_budget_usd","taskID":"410","turns":31,"projectPath":"/proj","mode":"execute","timestamp":"2026-06-16T11:06:46Z","classification":"truncated"}"#,
+            // Same taskID "410" but a DIFFERENT project — must be a distinct key.
+            #"{"costUsd":1.0,"taskID":"410","turns":2,"projectPath":"/other","mode":"execute","timestamp":"2026-06-16T09:00:00Z","classification":"crashed"}"#,
+        ])
+        let reader = RunOutcomeLogReader(fileURL: url)
+        let latest = reader.latestOutcomeByTask()
+
+        // Newest for (/proj, 410) is the 12:00 completed line, NOT the truncated one.
+        let projKey = RunOutcomeKey(projectPath: "/proj", taskID: "410")
+        XCTAssertEqual(latest[projKey]?.classification, .completed)
+        XCTAssertEqual(latest[projKey]?.timestamp, "2026-06-16T12:00:00Z")
+
+        // The same task id in another project is tracked independently.
+        let otherKey = RunOutcomeKey(projectPath: "/other", taskID: "410")
+        XCTAssertEqual(latest[otherKey]?.classification, .crashed)
+    }
 }

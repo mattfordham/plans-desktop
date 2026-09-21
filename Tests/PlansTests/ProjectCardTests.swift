@@ -73,6 +73,55 @@ final class ProjectCardTests: XCTestCase {
         XCTAssertNil(project.gitIsDirty)
     }
 
+    // MARK: - failureTooltip (#079 — plan-row failed indicator tooltip)
+
+    /// A healthy plan (no failure overlay) yields NO tooltip — the caller passes
+    /// an empty `help` string and the row shows no failure explanation.
+    func testFailureTooltipNilWhenHealthy() {
+        XCTAssertNil(ProjectCard.failureTooltip(for: nil))
+    }
+
+    /// A failure WITH an error message folds the classification/stop-reason
+    /// summary and the message onto two lines.
+    func testFailureTooltipWithMessageCombinesSummaryAndMessage() {
+        let failure = TaskFailure(
+            classification: .error,
+            errorMessage: "boom",
+            stopReason: nil,
+            timestamp: "2026-01-01T00:00:00Z"
+        )
+        XCTAssertEqual(
+            ProjectCard.failureTooltip(for: failure),
+            "Run errored\nboom"
+        )
+    }
+
+    /// A failure with a stop reason but NO error message shows only the summary
+    /// (classification label + stop reason).
+    func testFailureTooltipWithStopReasonNoMessage() {
+        let failure = TaskFailure(
+            classification: .truncated,
+            errorMessage: nil,
+            stopReason: "error_max_budget_usd",
+            timestamp: "2026-01-01T00:00:00Z"
+        )
+        XCTAssertEqual(
+            ProjectCard.failureTooltip(for: failure),
+            "Run cut short (budget/turn cap) · error_max_budget_usd"
+        )
+    }
+
+    /// An empty error message is treated as absent (no trailing blank line).
+    func testFailureTooltipEmptyMessageOmitsMessageLine() {
+        let failure = TaskFailure(
+            classification: .crashed,
+            errorMessage: "",
+            stopReason: nil,
+            timestamp: "2026-01-01T00:00:00Z"
+        )
+        XCTAssertEqual(ProjectCard.failureTooltip(for: failure), "Run crashed")
+    }
+
     // MARK: - shouldScrollContent (fit/grid mode → scroll the card body)
 
     /// #038: in fit-to-screen ("grid") mode `BrowserWindow.cardGrid` hands each

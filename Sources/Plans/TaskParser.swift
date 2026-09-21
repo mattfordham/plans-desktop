@@ -65,6 +65,35 @@ enum TaskType: String, Codable, CaseIterable, Equatable {
     }
 }
 
+/// A failure overlay derived from the durable `run-outcomes.log` (#079), NOT
+/// from the task file itself. A plan file cannot express "the last run failed" —
+/// `TaskStatus` is a fixed six-case data contract — so this value is correlated
+/// onto a `Task` by the store from the LATEST `RunOutcome` for the task's
+/// `(projectPath, taskID)` key. A `nil` `failure` on a `Task` means healthy: no
+/// failing outcome, or a since-superseded one.
+///
+/// Only carries the fields the UI needs to render the failure banner and its
+/// retry affordance; the full `RunOutcome` (cost, turns, mode) stays out of the
+/// parsed model.
+struct TaskFailure: Equatable {
+    /// The terminal classification of the latest run (`truncated`, `error`,
+    /// `crashed`, `stranded`). The store only builds a `TaskFailure` for the
+    /// failing classifications; `completed` never produces one.
+    let classification: RunOutcome.Classification
+
+    /// The human-readable error message from the run (a streamed `error` line, a
+    /// budget/turn-cap message, or a generic nonzero-exit message), or `nil` when
+    /// the run recorded none.
+    let errorMessage: String?
+
+    /// The raw terminal stop reason (`error_max_budget_usd`, `error_max_turns`,
+    /// …), or `nil` when no `done` line was seen.
+    let stopReason: String?
+
+    /// The ISO-8601 timestamp of the failing run, carried through verbatim.
+    let timestamp: String
+}
+
 /// A `## ` second-level section of a task file. `heading` is the text after the
 /// `## ` marker (trimmed); `body` is the verbatim text from after the heading
 /// line up to (but excluding) the next `## ` line or end of file. Bodies are kept
@@ -128,6 +157,14 @@ struct Task: Equatable {
     /// resolved in segment 2; single-file parsing leaves it `false`.
     let isBlocked: Bool
 
+    /// The run-failure overlay (#079), correlated from the latest `RunOutcome`
+    /// for this task's `(projectPath, taskID)` key. `nil` = healthy (no failing
+    /// outcome). This is NOT parsed from the task file — a plan file cannot
+    /// express failure — so single-file parsing leaves it `nil`; the store fills
+    /// it in during reload (segment 2). Threaded onto the model here, alongside
+    /// `isBlocked`, so the type is complete once the correlation lands.
+    let failure: TaskFailure?
+
     /// Whether this file was found under `completed/`. Threaded in by the caller
     /// so the parser can force `status` to `.completed`.
     let isCompletedDir: Bool
@@ -139,6 +176,44 @@ struct Task: Equatable {
     /// `elaborated`).
     let isBacklogged: Bool
 
+    /// Memberwise initializer with `failure` defaulting to `nil` (#079). The
+    /// explicit init exists so the parser and the many call sites/tests that omit
+    /// the run-failure overlay continue to compile unchanged after the field was
+    /// added; the store reconstructs a `Task` supplying `failure` during reload
+    /// correlation (segment 2). Mirrors the same defaulted-field pattern
+    /// `ProjectTasks` uses for its git fields.
+    init(
+        id: String,
+        title: String?,
+        type: TaskType?,
+        status: TaskStatus?,
+        created: String?,
+        branch: String?,
+        isKeptWorktree: Bool,
+        blockedBy: [String],
+        sections: [TaskSection],
+        howProgress: (done: Int, total: Int),
+        isBlocked: Bool,
+        isCompletedDir: Bool,
+        isBacklogged: Bool,
+        failure: TaskFailure? = nil
+    ) {
+        self.id = id
+        self.title = title
+        self.type = type
+        self.status = status
+        self.created = created
+        self.branch = branch
+        self.isKeptWorktree = isKeptWorktree
+        self.blockedBy = blockedBy
+        self.sections = sections
+        self.howProgress = howProgress
+        self.isBlocked = isBlocked
+        self.isCompletedDir = isCompletedDir
+        self.isBacklogged = isBacklogged
+        self.failure = failure
+    }
+
     /// Hand-written `Equatable` (#066). Swift cannot synthesize the conformance
     /// here because `howProgress` is a TUPLE `(done: Int, total: Int)`, and
     /// tuples do not conform to protocols.
@@ -146,11 +221,11 @@ struct Task: Equatable {
     /// This `==` is load-bearing: it gates whether a reload PUBLISHES a new
     /// `projects` value, so a field omitted here would cause a real on-disk
     /// change to be silently dropped from both surfaces. Every one of the
-    /// thirteen stored properties is therefore compared, in declaration order:
+    /// fourteen stored properties is therefore compared, in declaration order:
     /// `id`, `title`, `type`, `status`, `created`, `branch`, `isKeptWorktree`,
     /// `blockedBy`, `sections`, `howProgress` (both tuple elements), `isBlocked`,
-    /// `isCompletedDir`, `isBacklogged`. If a property is ever ADDED to `Task`,
-    /// it MUST be added here too.
+    /// `failure`, `isCompletedDir`, `isBacklogged`. If a property is ever ADDED to
+    /// `Task`, it MUST be added here too.
     static func == (lhs: Task, rhs: Task) -> Bool {
         lhs.id == rhs.id
             && lhs.title == rhs.title
@@ -164,6 +239,7 @@ struct Task: Equatable {
             && lhs.howProgress.done == rhs.howProgress.done
             && lhs.howProgress.total == rhs.howProgress.total
             && lhs.isBlocked == rhs.isBlocked
+            && lhs.failure == rhs.failure
             && lhs.isCompletedDir == rhs.isCompletedDir
             && lhs.isBacklogged == rhs.isBacklogged
     }
@@ -549,7 +625,8 @@ struct TaskParser {
             howProgress: task.howProgress,
             isBlocked: isBlocked,
             isCompletedDir: task.isCompletedDir,
-            isBacklogged: task.isBacklogged
+            isBacklogged: task.isBacklogged,
+            failure: task.failure
         )
     }
 

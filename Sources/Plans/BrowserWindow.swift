@@ -977,10 +977,18 @@ struct TaskRow: Identifiable {
     var type: TaskType? { task.type }
     var title: String? { task.title }
 
+    /// The run-failure overlay (#079) for this row, or `nil` when healthy.
+    /// Passthrough of the underlying `Task.failure`, correlated by the store.
+    var failure: TaskFailure? { task.failure }
+
     /// The status glyph + color for this task, matching the plans-cc TUI
-    /// dashboard (blocked takes precedence over status).
+    /// dashboard (blocked takes precedence over status; a run failure (#079) sits
+    /// just below blocked). `isFailed` lights the alarm indicator whenever the
+    /// run-failure overlay is present.
     var indicator: TaskStatusIndicator {
-        TaskStatusIndicator(status: task.status, isBlocked: task.isBlocked)
+        TaskStatusIndicator(status: task.status,
+                            isBlocked: task.isBlocked,
+                            isFailed: task.failure != nil)
     }
 }
 

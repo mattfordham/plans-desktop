@@ -67,6 +67,21 @@ struct RunOutcome: Codable, Equatable {
         case error
         /// The process exited nonzero without any terminal `done`/`error` line.
         case crashed
+
+        /// A short, human-readable label for a failing classification (#079),
+        /// used by the failure UI (detail-view section, card tooltip). Pure so it
+        /// is unit-testable without any view. `completed` is not a failure and
+        /// falls back to a neutral label the UI never actually shows (the failure
+        /// surfaces only render for the four non-completed cases).
+        var failureLabel: String {
+            switch self {
+            case .truncated: return "Run cut short (budget/turn cap)"
+            case .stranded: return "Stranded at in-progress"
+            case .error: return "Run errored"
+            case .crashed: return "Run crashed"
+            case .completed: return "Completed"
+            }
+        }
     }
 
     /// Derives the terminal `Classification` from a run's raw signals. Pure so
@@ -152,5 +167,75 @@ struct RunOutcomeLog {
         } catch {
             outcomeLog.error("append failed: \(error.localizedDescription, privacy: .public)")
         }
+    }
+}
+
+/// The correlation key for a run outcome: a `(projectPath, taskID)` pair. The
+/// `run-outcomes.log` records outcomes per RUN, and the same task id can recur
+/// across projects (a synthetic capture key aside), so a task's failure state is
+/// only meaningful when scoped to its owning project. `Hashable` so it keys the
+/// `latestOutcomeByTask()` dictionary the store correlates against parsed tasks.
+struct RunOutcomeKey: Hashable {
+    let projectPath: String
+    let taskID: String
+}
+
+/// A tolerant NDJSON reader over the `run-outcomes.log` written by `RunOutcomeLog`
+/// — one `RunOutcome` JSON object per line. Mirrors `RegistryReader`'s injectable
+/// `fileURL`/`FileManager` pattern so tests point it at a temp fixture rather than
+/// the real `~/.claude/plans-cc/run-outcomes.log`.
+///
+/// Reading is best-effort and never throws: a missing/empty file yields an empty
+/// list, and any single malformed or blank line is SKIPPED rather than aborting
+/// the whole read. This matters because the log is an append target that may be
+/// mid-write (a partially flushed final line) or hand-truncated; a diagnostic log
+/// must degrade to "fewer records" rather than "no records".
+struct RunOutcomeLogReader {
+    let fileURL: URL
+    let fileManager: FileManager
+
+    /// Defaults to `~/.claude/plans-cc/run-outcomes.log` (the same location
+    /// `RunOutcomeLog` writes to). Inject a custom `fileURL`/`fileManager` in
+    /// tests.
+    init(fileURL: URL? = nil, fileManager: FileManager = .default) {
+        self.fileManager = fileManager
+        self.fileURL = fileURL ?? fileManager
+            .homeDirectoryForCurrentUser
+            .appendingPathComponent(".claude")
+            .appendingPathComponent("plans-cc")
+            .appendingPathComponent("run-outcomes.log")
+    }
+
+    /// Reads every well-formed NDJSON line into a `RunOutcome`, in file order.
+    /// Malformed lines (non-JSON, partial writes) and blank lines are skipped.
+    /// Returns `[]` when the file is missing or unreadable — never throws.
+    func read() -> [RunOutcome] {
+        guard let contents = try? String(contentsOf: fileURL, encoding: .utf8) else {
+            return []
+        }
+        let decoder = JSONDecoder()
+        return contents
+            .split(separator: "\n", omittingEmptySubsequences: true)
+            .compactMap { line -> RunOutcome? in
+                try? decoder.decode(RunOutcome.self, from: Data(line.utf8))
+            }
+    }
+
+    /// Selects the LATEST outcome per `(projectPath, taskID)` key. "Latest" is by
+    /// the `timestamp` string: the ISO-8601 timestamps the writer stamps are
+    /// lexicographically sortable, so a plain string comparison orders them
+    /// correctly without a `DateFormatter` round-trip (keeps this type
+    /// Foundation-only, no locale/clock access). On a tie the later line in file
+    /// order wins. Malformed lines are already dropped by `read()`.
+    func latestOutcomeByTask() -> [RunOutcomeKey: RunOutcome] {
+        var latest: [RunOutcomeKey: RunOutcome] = [:]
+        for outcome in read() {
+            let key = RunOutcomeKey(projectPath: outcome.projectPath, taskID: outcome.taskID)
+            if let existing = latest[key], existing.timestamp > outcome.timestamp {
+                continue
+            }
+            latest[key] = outcome
+        }
+        return latest
     }
 }

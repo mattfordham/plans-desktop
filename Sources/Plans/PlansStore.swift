@@ -288,6 +288,18 @@ final class PlansStore {
         }
     }
 
+    /// The total number of tasks with a live run-failure overlay (#079),
+    /// aggregated across every live project. The failure state is an OVERLAY, not
+    /// a `TaskStatus`, so it is not present in `project.counts`; it is counted
+    /// directly from each task's `failure` field. `0` means nothing has failed,
+    /// so the menu-bar surfaces suppress the failed badge entirely. Reuses the
+    /// already-correlated `task.failure` — no new parsing happens here.
+    var failedCount: Int {
+        projects.reduce(0) { sum, project in
+            sum + project.tasks.filter { $0.failure != nil }.count
+        }
+    }
+
     /// The registry reader used by `reload()` to discover live projects.
     @ObservationIgnored private let registryReader: RegistryReader
 
@@ -297,6 +309,14 @@ final class PlansStore {
 
     /// The task parser used by `reload()` to parse each project's `.plans/`.
     @ObservationIgnored private let taskParser: TaskParser
+
+    /// The run-outcomes log reader (#079) used by `reload()` to correlate a
+    /// FAILED latest run onto its still-in-progress task as a `failure` overlay.
+    /// Injected (defaulting to the real `~/.claude/plans-cc/run-outcomes.log`
+    /// reader) so tests point it at a temp fixture. Stateless (holds only a
+    /// `URL`/`FileManager`), so it is safe to read from the thread-agnostic
+    /// `performReload`.
+    @ObservationIgnored private let outcomeLogReader: RunOutcomeLogReader
 
     /// The UserDefaults instance backing the persisted manual-order state (#017).
     /// Injected (defaulting to `.standard`) so tests can pass an isolated suite.
@@ -356,6 +376,31 @@ final class PlansStore {
         let tasks: ProjectTasks
     }
 
+    /// The mtime-gated cache of the run-outcomes log (#079). The log is read (and
+    /// its latest-per-task map recomputed) ONLY when the file's modification date
+    /// differs from `mtime`; on an idle tick where no run has finished, the
+    /// cached `latestByTask` is reused verbatim, so the ~5s poll never re-reads
+    /// and re-decodes the whole NDJSON log. This mirrors the `ProjectSignature`
+    /// change-gate discipline (`parseCache`), scoped to the single append-only
+    /// log file. `mtime` is `nil` when the log is missing/unreadable, which the
+    /// gate treats as "no change" once cached (an empty map is reused). Threaded
+    /// as a value through `performReload` — the same in/out pattern as the parse
+    /// cache — so both the sync and async reload paths share one code path.
+    ///
+    /// `@ObservationIgnored` — internal memoization, not observable UI state.
+    /// Only read/written on the MAIN thread (snapshotted before the async parse,
+    /// installed back on main under the #059 generation guard).
+    @ObservationIgnored private var outcomeCache = OutcomeCache(mtime: nil, latestByTask: [:])
+
+    /// The mtime-gated run-outcomes state (#079): the log's last-seen
+    /// modification date and the latest-per-`(projectPath, taskID)` outcome map
+    /// derived from it. `Sendable` (immutable value fields) so it rides into the
+    /// background parse closure inside the reload snapshot.
+    private struct OutcomeCache: Sendable {
+        let mtime: Date?
+        let latestByTask: [RunOutcomeKey: RunOutcome]
+    }
+
     /// The project paths that were actually RE-PARSED (not served from the
     /// change-gate cache) by the most recent reload, in registry order. Written
     /// on the main thread by `reload()` / `applyReloadResult`. Exposed to tests
@@ -401,12 +446,14 @@ final class PlansStore {
         registryReader: RegistryReader = RegistryReader(),
         registryWriter: RegistryWriter = RegistryWriter(),
         taskParser: TaskParser = TaskParser(),
+        outcomeLogReader: RunOutcomeLogReader = RunOutcomeLogReader(),
         defaults: UserDefaults = .standard,
         now: @escaping () -> Date = Date.init
     ) {
         self.registryReader = registryReader
         self.registryWriter = registryWriter
         self.taskParser = taskParser
+        self.outcomeLogReader = outcomeLogReader
         self.defaults = defaults
         self.now = now
         // Load persisted manual-order state. Assigning the backing fields avoids
@@ -610,9 +657,14 @@ final class PlansStore {
         // cache goes in, a rebuilt cache comes out, and it is installed here on
         // the main thread — the same shape the async path uses, so both paths
         // share one code path.
-        let result = performReload(priorGitInfo: priorGitInfo, cache: parseCache)
+        let result = performReload(
+            priorGitInfo: priorGitInfo,
+            cache: parseCache,
+            outcomeCache: outcomeCache
+        )
         publishProjects(result.projects)
         parseCache = result.cache
+        outcomeCache = result.outcomeCache
         lastReloadParsedPaths = result.parsedPaths
 
 
@@ -647,10 +699,19 @@ final class PlansStore {
     /// `projects`, SwiftUI is never mutated off-main here.
     private func performReload(
         priorGitInfo: [String: (String?, Bool?)],
-        cache: [String: CachedParse]
+        cache: [String: CachedParse],
+        outcomeCache: OutcomeCache
     ) -> ReloadResult {
         var freshCache: [String: CachedParse] = [:]
         var parsedPaths: [String] = []
+
+        // Mtime-gate the run-outcomes log read (#079): recompute the latest-per-
+        // task outcome map ONLY when the log file's modification date changed
+        // since the last tick; otherwise reuse the cached map verbatim so an idle
+        // poll never re-reads/re-decodes the whole NDJSON log. Mirrors the
+        // `ProjectSignature` parse-gate discipline, scoped to one file.
+        let freshOutcomeCache = refreshedOutcomeCache(from: outcomeCache)
+        let latestOutcomes = freshOutcomeCache.latestByTask
 
         let projects = registryReader.readProjects().map { project -> ProjectTasks in
             // Cheap change detection (#066): one batched directory listing per
@@ -674,25 +735,126 @@ final class PlansStore {
 
             // Rebuilt from the registry each time, so a project that dropped out
             // of the registry has its cache entry dropped with it and cannot
-            // resurrect a stale result if it is re-added later.
+            // resurrect a stale result if it is re-added later. The cache stores
+            // the failure-free parse: the failure overlay (#079) is applied AFTER
+            // the cache lookup so a new outcome badges its task even on a tick
+            // where the `.plans/` file itself did not change.
             freshCache[project.path] = CachedParse(signature: signature, tasks: parsed)
 
-            guard let prior = priorGitInfo[project.path] else { return parsed }
-            return ProjectTasks(
-                projectPath: parsed.projectPath,
-                projectName: parsed.projectName,
-                lastSeen: parsed.lastSeen,
-                tasks: parsed.tasks,
-                counts: parsed.counts,
-                activeTasks: parsed.activeTasks,
-                backloggedTasks: parsed.backloggedTasks,
-                gitBranch: prior.0,
-                gitIsDirty: prior.1
+            let withGit: ProjectTasks
+            if let prior = priorGitInfo[project.path] {
+                withGit = ProjectTasks(
+                    projectPath: parsed.projectPath,
+                    projectName: parsed.projectName,
+                    lastSeen: parsed.lastSeen,
+                    tasks: parsed.tasks,
+                    counts: parsed.counts,
+                    activeTasks: parsed.activeTasks,
+                    backloggedTasks: parsed.backloggedTasks,
+                    gitBranch: prior.0,
+                    gitIsDirty: prior.1
+                )
+            } else {
+                withGit = parsed
+            }
+
+            return Self.applyFailureOverlay(to: withGit, latestOutcomes: latestOutcomes)
+        }
+
+        return ReloadResult(
+            projects: projects,
+            cache: freshCache,
+            parsedPaths: parsedPaths,
+            outcomeCache: freshOutcomeCache
+        )
+    }
+
+    /// Returns the run-outcomes cache for this tick (#079): reuses `previous`
+    /// unchanged when the log file's modification date is unchanged, otherwise
+    /// re-reads the log and recomputes the latest-per-task map. A missing/
+    /// unreadable log yields `mtime: nil` with an empty map. Pure/thread-agnostic
+    /// (reads only the injected stateless `outcomeLogReader`), so it is safe to
+    /// call from the background parse.
+    private func refreshedOutcomeCache(from previous: OutcomeCache) -> OutcomeCache {
+        let currentMtime = try? outcomeLogReader.fileURL.resourceValues(
+            forKeys: [.contentModificationDateKey]
+        ).contentModificationDate
+
+        // Unchanged since last tick (including still-missing: both `nil`) — reuse
+        // the cached map without touching the file.
+        if currentMtime == previous.mtime {
+            return previous
+        }
+        return OutcomeCache(
+            mtime: currentMtime,
+            latestByTask: outcomeLogReader.latestOutcomeByTask()
+        )
+    }
+
+    /// Applies the run-failure overlay (#079) to a project's tasks: for each task
+    /// whose EFFECTIVE status is `.inProgress` and whose latest `RunOutcome`
+    /// (keyed by `(projectPath, taskID)`) is a FAILURE classification, sets a
+    /// `TaskFailure`. Every other task keeps `failure == nil`, so a task that has
+    /// advanced past in-progress (or whose latest outcome is `completed`) shows no
+    /// stale badge. Rebuilds the affected `tasks` / `activeTasks` arrays (backlog
+    /// tasks are never in-progress, so they are left untouched). Static + pure so
+    /// it is thread-agnostic like the rest of `performReload`.
+    private static func applyFailureOverlay(
+        to project: ProjectTasks,
+        latestOutcomes: [RunOutcomeKey: RunOutcome]
+    ) -> ProjectTasks {
+        // Cheap out: no outcomes recorded at all, nothing can overlay.
+        guard !latestOutcomes.isEmpty else { return project }
+
+        func overlay(_ task: Task) -> Task {
+            guard task.status == .inProgress else { return task }
+            let key = RunOutcomeKey(projectPath: project.projectPath, taskID: task.id)
+            guard let outcome = latestOutcomes[key],
+                  Self.failingClassifications.contains(outcome.classification) else {
+                return task
+            }
+            return Task(
+                id: task.id,
+                title: task.title,
+                type: task.type,
+                status: task.status,
+                created: task.created,
+                branch: task.branch,
+                isKeptWorktree: task.isKeptWorktree,
+                blockedBy: task.blockedBy,
+                sections: task.sections,
+                howProgress: task.howProgress,
+                isBlocked: task.isBlocked,
+                isCompletedDir: task.isCompletedDir,
+                isBacklogged: task.isBacklogged,
+                failure: TaskFailure(
+                    classification: outcome.classification,
+                    errorMessage: outcome.errorMessage,
+                    stopReason: outcome.stopReason,
+                    timestamp: outcome.timestamp
+                )
             )
         }
 
-        return ReloadResult(projects: projects, cache: freshCache, parsedPaths: parsedPaths)
+        return ProjectTasks(
+            projectPath: project.projectPath,
+            projectName: project.projectName,
+            lastSeen: project.lastSeen,
+            tasks: project.tasks.map(overlay),
+            counts: project.counts,
+            activeTasks: project.activeTasks.map(overlay),
+            backloggedTasks: project.backloggedTasks,
+            gitBranch: project.gitBranch,
+            gitIsDirty: project.gitIsDirty
+        )
     }
+
+    /// The `RunOutcome.Classification` cases that count as a run FAILURE for the
+    /// #079 overlay: everything except `completed`. A task whose latest outcome is
+    /// one of these AND is still at in-progress surfaces a failure badge.
+    private static let failingClassifications: Set<RunOutcome.Classification> = [
+        .truncated, .stranded, .error, .crashed,
+    ]
 
     /// The full output of one `performReload` pass (#066): the projects to
     /// publish, the rebuilt change-gate cache to install, and which project paths
@@ -703,6 +865,7 @@ final class PlansStore {
         let projects: [ProjectTasks]
         let cache: [String: CachedParse]
         let parsedPaths: [String]
+        let outcomeCache: OutcomeCache
     }
 
     /// Asynchronous reload for the timer-driven poll: identical to `reload()` in
@@ -753,11 +916,18 @@ final class PlansStore {
         // installed back on main under the #059 generation guard.
         let cacheSnapshot = parseCache
 
+        // Snapshot the run-outcomes cache on main too (#079): a value of
+        // immutable fields, so the background pass reads only this detached copy
+        // and never touches `self.outcomeCache`; the rebuilt cache is installed
+        // back on main under the #059 generation guard, same as the parse cache.
+        let outcomeCacheSnapshot = outcomeCache
+
         nonisolated(unsafe) let unsafeSelf = self
         DispatchQueue.global(qos: .userInitiated).async {
             let result = unsafeSelf.performReload(
                 priorGitInfo: priorGitInfo,
-                cache: cacheSnapshot
+                cache: cacheSnapshot,
+                outcomeCache: outcomeCacheSnapshot
             )
             DispatchQueue.main.async {
                 unsafeSelf.applyReloadResult(result, generation: generation)
@@ -784,6 +954,9 @@ final class PlansStore {
         // protects `projects`, so a dropped stale result leaves the cache
         // untouched too — the two can never drift apart.
         parseCache = result.cache
+        // Install the rebuilt run-outcomes cache (#079) under the SAME guard, so a
+        // dropped stale result leaves it untouched too.
+        outcomeCache = result.outcomeCache
         lastReloadParsedPaths = result.parsedPaths
         startGitSecondPass()
         onDidReload?()
@@ -1043,7 +1216,12 @@ final class PlansStore {
     ) -> [ProjectTasks] {
         // An empty cache means the change gate (#066) always misses, so this hook
         // exercises the full parse path exactly as it did before the gate landed.
-        performReload(priorGitInfo: priorGitInfo, cache: [:]).projects
+        // An empty outcome cache with `mtime: nil` forces a fresh log read (#079).
+        performReload(
+            priorGitInfo: priorGitInfo,
+            cache: [:],
+            outcomeCache: OutcomeCache(mtime: nil, latestByTask: [:])
+        ).projects
     }
 
     /// Test-only hook: the project paths actually RE-PARSED by the most recent
@@ -1102,7 +1280,12 @@ final class PlansStore {
         // is supplied. Passing `parsedPaths: []` mirrors "nothing was re-parsed",
         // which is accurate for a caller-supplied result.
         applyReloadResult(
-            ReloadResult(projects: projects, cache: [:], parsedPaths: []),
+            ReloadResult(
+                projects: projects,
+                cache: [:],
+                parsedPaths: [],
+                outcomeCache: OutcomeCache(mtime: nil, latestByTask: [:])
+            ),
             generation: generation
         )
     }
