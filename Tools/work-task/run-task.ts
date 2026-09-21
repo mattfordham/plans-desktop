@@ -55,9 +55,9 @@ import * as path from "node:path";
 
 // Hard ceiling on spend. Under subscription (claude login) auth the real bound
 // is the plan; this ceiling is the safety net for API-key fallback. Raised to
-// $20 so a single autonomous execute run is far less likely to hit the cap
+// $40 so a single autonomous execute run is far less likely to hit the cap
 // mid-task and strand the task at in-progress before it reaches review.
-const MAX_BUDGET_USD = 20.0;
+const MAX_BUDGET_USD = 40.0;
 
 // Stop reasons that mean the run was cut short by a cap (budget/turn limit)
 // rather than finishing. These truncation reasons are the more actionable cause

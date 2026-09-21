@@ -57,7 +57,7 @@ struct RunOutcome: Codable, Equatable {
         /// Finished cleanly (no cap, no error, no crash).
         case completed
         /// Cut short by a budget/turn cap — the task was left mid-flight (the
-        /// strand-at-in-progress case the $20 cap was raised to mitigate).
+        /// strand-at-in-progress case the budget cap was raised to mitigate).
         case truncated
         /// The run finished cleanly (SDK `result`, no cap) but the task never
         /// reached review — it was left stranded at in-progress because
