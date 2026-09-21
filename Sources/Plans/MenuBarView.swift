@@ -90,6 +90,15 @@ private struct ProjectGlanceRow: View {
         }
     }
 
+    /// The number of this project's tasks whose latest run FAILED (#079). The
+    /// failure state is an OVERLAY, not a `TaskStatus`, so it isn't in
+    /// `counts`/`glanceOrder`; it is counted directly from each task's `failure`
+    /// field and rendered as a separate red alarm badge alongside the status
+    /// counts. `0` suppresses the badge.
+    private var failedCount: Int {
+        project.tasks.filter { $0.failure != nil }.count
+    }
+
     var body: some View {
         HStack(spacing: 8) {
             Text(project.projectName)
@@ -109,6 +118,22 @@ private struct ProjectGlanceRow: View {
                         Text("\(entry.count)")
                     }
                 }
+            }
+
+            // #079: a red alarm badge for FAILED tasks, appended after the status
+            // counts (or shown alone alongside "no tasks" if a failed task somehow
+            // isn't counted as an active status). Reuses the shared failure
+            // symbol/color from `TaskStatusIndicator` so it reads identically to
+            // the failure indicator on the cards and detail view.
+            if failedCount > 0 {
+                HStack(spacing: 2) {
+                    Image(systemName: TaskStatusIndicator.failureSymbol)
+                        .imageScale(.small)
+                        .foregroundStyle(TaskStatusIndicator.failureColor)
+                        .frame(width: 14, alignment: .center)
+                    Text("\(failedCount)")
+                }
+                .help("\(failedCount) failed run\(failedCount == 1 ? "" : "s")")
             }
         }
         .contentShape(Rectangle())

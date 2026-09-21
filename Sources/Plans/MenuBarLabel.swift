@@ -41,7 +41,9 @@ struct MenuBarLabel: View {
         // tracks the store dependency so `body` re-runs — re-rendering the
         // bitmap — on each 5s poll change. `colorScheme` is likewise read into
         // the render path so appearance changes re-render the bitmap.
-        if let nsImage = renderedImage(for: store.iconSpaceCounts, colorScheme: colorScheme) {
+        if let nsImage = renderedImage(for: store.iconSpaceCounts,
+                                       failedCount: store.failedCount,
+                                       colorScheme: colorScheme) {
             // `.renderingMode(.original)` stops macOS from re-tinting the bitmap
             // as a monochrome template, preserving the status colors.
             Image(nsImage: nsImage)
@@ -63,9 +65,12 @@ struct MenuBarLabel: View {
     /// rendered.
     private func renderedImage(
         for counts: [(status: TaskStatus, count: Int)],
+        failedCount: Int,
         colorScheme: ColorScheme
     ) -> NSImage? {
-        let content = MenuBarLabelContent(counts: counts, fontSize: Self.fontSize)
+        let content = MenuBarLabelContent(counts: counts,
+                                          failedCount: failedCount,
+                                          fontSize: Self.fontSize)
             .environment(\.colorScheme, colorScheme)
         let renderer = ImageRenderer(content: content)
         // Crisp on Retina: render at the screen's backing scale.
@@ -92,10 +97,14 @@ struct MenuBarLabel: View {
 /// meant to read vividly in both modes, so they stay as-is.
 private struct MenuBarLabelContent: View {
     let counts: [(status: TaskStatus, count: Int)]
+    /// The count of FAILED tasks across all projects (#079). Rendered as a
+    /// trailing red alarm badge (`⊘N`) after the in-motion status badges, or on
+    /// its own when there is no in-motion work. `0` suppresses it.
+    let failedCount: Int
     let fontSize: CGFloat
 
     var body: some View {
-        if counts.isEmpty {
+        if counts.isEmpty && failedCount == 0 {
             // Empty state: only the bare icon.
             Image(systemName: "list.bullet")
                 .font(.system(size: fontSize))
@@ -110,6 +119,19 @@ private struct MenuBarLabelContent: View {
                         Text("\(entry.count)")
                             // Adaptive label color (resolved via the injected
                             // `\.colorScheme`) so digits read in both modes.
+                            .foregroundStyle(Color(nsColor: .labelColor))
+                    }
+                    .font(.system(size: fontSize))
+                }
+                // #079: the failed badge, using the shared blocked/failure glyph
+                // (`⊘`) in the failure color so it matches the failure indicator
+                // used everywhere else in the app. Appended after the in-motion
+                // status badges (or shown alone when nothing is in motion).
+                if failedCount > 0 {
+                    HStack(spacing: 4) {
+                        Text(TaskStatusIndicator.blockedGlyph)
+                            .foregroundStyle(TaskStatusIndicator.failureColor)
+                        Text("\(failedCount)")
                             .foregroundStyle(Color(nsColor: .labelColor))
                     }
                     .font(.system(size: fontSize))

@@ -307,6 +307,21 @@ struct ProjectCard: View {
     /// `planRow` so the view and the tested decision cannot drift apart.
     static let rowColumns = RowColumns()
 
+    /// The hover tooltip for a plan row whose latest run failed (#079), or `nil`
+    /// when the plan is healthy (no failure overlay). Combines the failure summary
+    /// (classification + stop reason, via `PlanDetailView.failureSummary`) with
+    /// the run's error message on a second line when present. Pure so the copy is
+    /// unit-testable without the view. A `nil` result means the row is healthy and
+    /// the caller passes an empty `help` string (no tooltip).
+    static func failureTooltip(for failure: TaskFailure?) -> String? {
+        guard let failure else { return nil }
+        let summary = PlanDetailView.failureSummary(failure)
+        if let message = failure.errorMessage, !message.isEmpty {
+            return "\(summary)\n\(message)"
+        }
+        return summary
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             header
@@ -774,6 +789,12 @@ struct ProjectCard: View {
                 .imageScale(.large)
                 .foregroundStyle(indicator.color)
                 .frame(width: ProjectCard.rowColumns.statusWidth, alignment: .center)
+                // #079: when the latest run for this plan failed, the indicator is
+                // already the red alarm glyph (via `row.indicator`'s `isFailed`);
+                // add a tooltip surfacing the classification + error message so a
+                // hover explains WHY it is red — mirrors the `captureRow` failed
+                // help-tooltip pattern.
+                .help(ProjectCard.failureTooltip(for: row.task.failure) ?? "")
                 .modifier(OpenDetailOnTap(row: row, onOpenDetail: onOpenDetail))
 
             Text(row.task.id)
@@ -913,6 +934,21 @@ struct ProjectCard: View {
                         progressPopoverTaskID = (progressPopoverTaskID == row.task.id) ? nil : row.task.id
                     }
                     .help("Show progress")
+            } else if PlanDetailView.canRetry(failure: row.task.failure) {
+                // #079: the latest run for this plan failed. Offer a Retry glyph
+                // that re-runs `plan-execute` via the SAME Execute consent gate as
+                // the Execute glyph below (the `ExecuteModal` sheet keyed on
+                // `executeRequest`) — never a silent reload. Takes precedence over
+                // the status-gated Elaborate/Execute branches because a failed run
+                // usually left the task at in-progress (which those branches don't
+                // surface any action for), and re-running is the actionable step.
+                RowActionGlyph(systemImage: "arrow.clockwise", help: "Retry this plan") {
+                    cardLog.notice("card Retry clicked: task=\(row.task.id, privacy: .public)")
+                    executeRequest = ExecuteRequest(
+                        taskID: row.task.id,
+                        projectPath: row.projectPath
+                    )
+                }
             } else if PlanDetailView.canElaborate(status: row.task.status,
                                                   isBlocked: row.task.isBlocked,
                                                   isBacklogged: row.task.isBacklogged) {

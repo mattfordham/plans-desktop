@@ -103,9 +103,17 @@ extension TaskStatus {
 /// The (symbol, glyph, color) indicator for a task, mirroring the plans-cc TUI
 /// dashboard's `glyphFor` + `colorForTask` precedence in
 /// `lib/render-dashboard.js`: a blocked task ALWAYS shows the blocked indicator
-/// in the blocked color (`#cc6666`) regardless of its status; otherwise the
-/// status's own symbol/glyph + `glanceColor` are used. A `nil` status falls back
-/// to a neutral symbol/glyph in a neutral color.
+/// in the blocked color (`#cc6666`) regardless of its status; a FAILED task
+/// (#079) shows the same alarm indicator (`exclamationmark.octagon.fill` +
+/// `#cc6666`, reused verbatim from blocked) ranked just below blocked; otherwise
+/// the status's own symbol/glyph + `glanceColor` are used. A `nil` status falls
+/// back to a neutral symbol/glyph in a neutral color.
+///
+/// Precedence (highest first): blocked → failed → status → neutral. Blocked is
+/// kept first to preserve the TUI invariant that the blocked check is the first
+/// branch of both `glyphFor` and `colorForTask`. Because the failed state reuses
+/// the SAME symbol/color as blocked, the rendered pixels are identical when a
+/// task is both — the ordering is documented only to pin which branch claims it.
 ///
 /// Carries BOTH the new SF Symbol (`symbolName`, for the desktop views) and the
 /// legacy text `glyph` (for call sites not yet migrated). Pure value type so it
@@ -121,6 +129,11 @@ struct TaskStatusIndicator: Equatable {
     static let blockedGlyph = "⊘"
     /// The blocked SF Symbol — a strong stop/halt icon that takes precedence.
     static let blockedSymbol = "exclamationmark.octagon.fill"
+    /// The failure color (#079). Reuses the blocked hex (`#cc6666`) verbatim so
+    /// the two alarm states read identically.
+    static let failureColor = blockedColor
+    /// The failure SF Symbol (#079). Reuses the blocked stop/halt icon verbatim.
+    static let failureSymbol = blockedSymbol
     /// The neutral fallback color for a `nil`/unknown status (TUI `COLORS.id`).
     static let neutralColor = Color(hex: 0xebdbb2)
     /// The neutral fallback SF Symbol for a `nil`/unknown status.
@@ -133,14 +146,20 @@ struct TaskStatusIndicator: Equatable {
     static let keptWorktreeSymbol = "house"
 
     /// Builds the indicator for a task with the given `status`, honoring the
-    /// blocked-takes-precedence rule. `isBlocked` overrides everything (TUI
-    /// behavior: `if (task.isBlocked) return …` is the first check in both
-    /// `glyphFor` and `colorForTask`).
-    init(status: TaskStatus?, isBlocked: Bool) {
+    /// precedence blocked → failed → status → neutral. `isBlocked` overrides
+    /// everything (TUI behavior: `if (task.isBlocked) return …` is the first check
+    /// in both `glyphFor` and `colorForTask`); `isFailed` (#079) ranks just below
+    /// blocked and reuses the same alarm symbol/color. `isFailed` defaults to
+    /// false so existing call sites that omit it are unchanged.
+    init(status: TaskStatus?, isBlocked: Bool, isFailed: Bool = false) {
         if isBlocked {
             symbolName = Self.blockedSymbol
             glyph = Self.blockedGlyph
             color = Self.blockedColor
+        } else if isFailed {
+            symbolName = Self.failureSymbol
+            glyph = Self.blockedGlyph
+            color = Self.failureColor
         } else if let status {
             symbolName = status.symbolName
             glyph = status.glanceGlyph

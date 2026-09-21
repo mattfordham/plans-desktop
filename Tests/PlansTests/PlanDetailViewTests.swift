@@ -307,4 +307,62 @@ final class PlanDetailViewTests: XCTestCase {
     func testDoesNotAutoOpenProgressWhenNotRunningOnAppear() {
         XCTAssertFalse(PlanDetailView.shouldAutoOpenProgress(onAppearRunning: false))
     }
+
+    // MARK: - PlanDetailView.canRetry (#079 — failure section + Retry gating)
+
+    /// A healthy task (no failure overlay) never shows the failure section /
+    /// Retry affordance.
+    func testCanRetryFalseWhenHealthy() {
+        XCTAssertFalse(PlanDetailView.canRetry(failure: nil))
+    }
+
+    /// Any failure overlay enables the failure section + Retry.
+    func testCanRetryTrueWhenFailurePresent() {
+        let failure = TaskFailure(
+            classification: .stranded,
+            errorMessage: nil,
+            stopReason: "stranded_at_in_progress",
+            timestamp: "2026-01-01T00:00:00Z"
+        )
+        XCTAssertTrue(PlanDetailView.canRetry(failure: failure))
+    }
+
+    // MARK: - PlanDetailView.failureSummary (#079 — failure section header)
+
+    /// With a stop reason, the summary appends it after the classification label.
+    func testFailureSummaryWithStopReason() {
+        let failure = TaskFailure(
+            classification: .truncated,
+            errorMessage: "cap hit",
+            stopReason: "error_max_turns",
+            timestamp: "2026-01-01T00:00:00Z"
+        )
+        XCTAssertEqual(
+            PlanDetailView.failureSummary(failure),
+            "Run cut short (budget/turn cap) · error_max_turns"
+        )
+    }
+
+    /// Without a stop reason, the summary is just the classification label (the
+    /// error message is rendered separately, not folded in here).
+    func testFailureSummaryWithoutStopReason() {
+        let failure = TaskFailure(
+            classification: .error,
+            errorMessage: "boom",
+            stopReason: nil,
+            timestamp: "2026-01-01T00:00:00Z"
+        )
+        XCTAssertEqual(PlanDetailView.failureSummary(failure), "Run errored")
+    }
+
+    // MARK: - RunOutcome.Classification.failureLabel (#079)
+
+    func testFailureLabelForEachFailingClassification() {
+        XCTAssertEqual(RunOutcome.Classification.truncated.failureLabel,
+                       "Run cut short (budget/turn cap)")
+        XCTAssertEqual(RunOutcome.Classification.stranded.failureLabel,
+                       "Stranded at in-progress")
+        XCTAssertEqual(RunOutcome.Classification.error.failureLabel, "Run errored")
+        XCTAssertEqual(RunOutcome.Classification.crashed.failureLabel, "Run crashed")
+    }
 }

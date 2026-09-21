@@ -94,6 +94,13 @@ struct PlanDetailView: View {
                 ScrollView {
                     VStack(alignment: .leading, spacing: 28) {
                         detailHeader(row)
+                        // #079: a PERSISTENT failure section (not a transient
+                        // banner) when the latest run for this task failed. Reuses
+                        // the `errorBanner` visual style and offers a Retry that
+                        // re-runs via the same Execute consent gate.
+                        if let failure = row.task.failure {
+                            failureSection(row, failure: failure)
+                        }
                         ForEach(Array(row.task.sections.enumerated()), id: \.offset) { _, section in
                             sectionView(section)
                         }
@@ -352,6 +359,76 @@ struct PlanDetailView: View {
             }
             .padding(.top, 4)
         }
+    }
+
+    /// The PERSISTENT run-failure section (#079), shown only when `row.task`
+    /// carries a `TaskFailure` overlay. Unlike the transient `errorBanner` in the
+    /// progress sheet (which lives only for the duration of a run), this stays in
+    /// the detail body between runs so a stranded/truncated/errored/crashed run is
+    /// visible whenever the plan is opened. It reuses the `errorBanner` visual
+    /// treatment (white-on-red rounded panel) and surfaces the classification,
+    /// stop reason, timestamp, and the run's error message, plus a Retry that
+    /// re-runs `plan-execute` via the SAME consent gate as the Execute action —
+    /// the `ExecuteModal` sheet (`showExecute`), NOT a silent reload. Retry is
+    /// offered regardless of status because resuming a stranded/truncated run is
+    /// exactly a re-run of `plan-execute` on an in-progress task.
+    private func failureSection(_ row: TaskRow, failure: TaskFailure) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 8) {
+                Image(systemName: TaskStatusIndicator.failureSymbol)
+                    .imageScale(.medium)
+                Text(Self.failureSummary(failure))
+                    .fontWeight(.semibold)
+                Spacer(minLength: 0)
+            }
+
+            if let message = failure.errorMessage, !message.isEmpty {
+                Text(message)
+                    .font(.callout)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+
+            HStack(spacing: 8) {
+                // Retry re-runs via the Execute consent gate (`ExecuteModal`),
+                // matching the Execute action exactly — never a silent reload.
+                // Hidden while a run for this task is already in flight so a
+                // second run can't be launched over the first.
+                if !runner.isRunning(taskID: row.task.id) {
+                    Button {
+                        showExecute = true
+                    } label: {
+                        Label("Retry", systemImage: "arrow.clockwise")
+                    }
+                }
+                Spacer(minLength: 0)
+            }
+        }
+        .foregroundStyle(.white)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(12)
+        .background(Color.red.opacity(0.85))
+        .clipShape(RoundedRectangle(cornerRadius: 8))
+    }
+
+    /// Whether the failure section + Retry affordance (#079) should render for a
+    /// task, gated purely on the presence of the run-failure overlay. Pure so it
+    /// is unit-testable without the view; a `nil` failure (healthy) hides both.
+    static func canRetry(failure: TaskFailure?) -> Bool {
+        failure != nil
+    }
+
+    /// A one-line human-readable summary of a run failure (#079) — the
+    /// classification's `failureLabel`, and when present a trailing stop reason in
+    /// parentheses (e.g. `Run cut short (budget/turn cap) · error_max_budget_usd`).
+    /// Pure so the failure-section header (and any tooltip built from it) is
+    /// unit-testable without a view. The full error message is rendered
+    /// separately below the summary, not folded in here.
+    static func failureSummary(_ failure: TaskFailure) -> String {
+        let base = failure.classification.failureLabel
+        if let stopReason = failure.stopReason, !stopReason.isEmpty {
+            return "\(base) · \(stopReason)"
+        }
+        return base
     }
 
     /// Pure predicate for the "Execute" action's availability, so the gating rule
