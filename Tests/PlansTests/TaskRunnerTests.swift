@@ -185,6 +185,27 @@ final class TaskRunnerTests: XCTestCase {
         XCTAssertEqual(cleanRun.summary?.turns, 7)
     }
 
+    /// #081 regression: a `done` event carrying a failing (stranded) stop reason
+    /// latches `error` via `handle`, but a `done` does NOT clear `isRunning`
+    /// (only `finish()` does). So a run can simultaneously be live (`isRunning ==
+    /// true`) AND carry a non-nil `error` — the exact state that armed the red
+    /// banner mid-run. This asserts that co-existing state directly so the
+    /// banner predicate (which must NOT fire in this state) has a proven basis.
+    @MainActor
+    func testDoneDerivedErrorLatchesWhileStillRunning() {
+        let run = TaskRun(taskID: "081", mode: .execute)
+        run.markRunningForTesting()
+        run.ingestForTesting(
+            #"{"kind":"done","costUsd":3.1,"turns":22,"stopReason":"stranded_at_in_progress"}"# + "\n"
+        )
+
+        // The done classification latched an error message...
+        XCTAssertNotNil(run.error)
+        XCTAssertEqual(run.lastStopReason, "stranded_at_in_progress")
+        // ...yet the run is still live: a `done` does not clear `isRunning`.
+        XCTAssertTrue(run.isRunning)
+    }
+
     // MARK: - Durable run-outcome logging
 
     /// On finish, a run writes exactly one `RunOutcome` line to its injected log

@@ -816,11 +816,47 @@ struct RunProgressSheet: View {
         lines.last?.id
     }
 
+    /// Whether the red failure banner should be shown. Pure so it's unit
+    /// testable without constructing the view.
+    ///
+    /// A `done`-derived failure (a budget/turn cap or the #058 stranded signal)
+    /// latches `run.error` the moment the terminal `done` line is ingested — but
+    /// a `done` does NOT clear `isRunning` (only `finish()` does). So without a
+    /// liveness check the banner armed mid-run and stayed armed while the run was
+    /// still live (spinner up, turns climbing) — the #081 false positive. Such a
+    /// `done`-derived failure is only meaningful once the run has actually ended,
+    /// so it is suppressed while `isRunning`.
+    ///
+    /// A genuine mid-run `.error(message)` event (a real crash / launch failure)
+    /// is a different animal: it means the run is broken now, so it must surface
+    /// immediately even while `isRunning`. We tell the two apart by comparing the
+    /// error text to `TaskRun.truncationError(for: stopReason)`: when they match,
+    /// the error came from the `done` classification and gets the liveness gate;
+    /// otherwise it's a genuine error and shows right away.
+    static func shouldShowFailureBanner(
+        error: String?,
+        isRunning: Bool,
+        stopReason: String?
+    ) -> Bool {
+        guard let error else { return false }
+        // Ended runs always show whatever error latched.
+        guard isRunning else { return true }
+        // Still running: suppress only a `done`-derived truncation/stranded
+        // failure (its text equals the mapping for the current stop reason).
+        // Any other error (a genuine mid-run crash/launch failure) shows now.
+        return TaskRun.truncationError(for: stopReason) != error
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             header
 
-            if let error = run?.error {
+            if let error = run?.error,
+               RunProgressSheet.shouldShowFailureBanner(
+                   error: error,
+                   isRunning: run?.isRunning == true,
+                   stopReason: run?.lastStopReason
+               ) {
                 errorBanner(error)
             }
 
