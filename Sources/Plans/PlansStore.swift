@@ -813,6 +813,20 @@ final class PlansStore {
                   Self.failingClassifications.contains(outcome.classification) else {
                 return task
             }
+            // Liveness/recency guard (#080): suppress a STALE failing outcome —
+            // one whose timestamp PREDATES the plan file's last edit. A terminal
+            // execution (which the app cannot observe directly) keeps the task
+            // pinned at in-progress and never writes the outcome log, but it does
+            // continually rewrite the plan file, advancing its mtime past any old
+            // app-run failure. So an outcome older than the file's mtime belongs
+            // to a superseded run and must not light the alarm. Fails SAFE: when
+            // either the file mtime or the outcome timestamp is unavailable, fall
+            // through to showing the overlay so a genuine failure is never hidden.
+            if let fileModified = task.modified,
+               let outcomeDate = outcome.timestampDate,
+               outcomeDate.timeIntervalSinceReferenceDate < fileModified {
+                return task
+            }
             return Task(
                 id: task.id,
                 title: task.title,
@@ -832,7 +846,8 @@ final class PlansStore {
                     errorMessage: outcome.errorMessage,
                     stopReason: outcome.stopReason,
                     timestamp: outcome.timestamp
-                )
+                ),
+                modified: task.modified
             )
         }
 
@@ -1222,6 +1237,18 @@ final class PlansStore {
             cache: [:],
             outcomeCache: OutcomeCache(mtime: nil, latestByTask: [:])
         ).projects
+    }
+
+    /// Test-only hook: exposes the private, pure `applyFailureOverlay` (#080) so
+    /// tests can exercise the liveness-guard fallback branches in isolation —
+    /// notably the `task.modified == nil` case, which a filesystem fixture cannot
+    /// produce (a real file always carries an mtime). Keeps the production method
+    /// `private`.
+    static func applyFailureOverlayForTesting(
+        to project: ProjectTasks,
+        latestOutcomes: [RunOutcomeKey: RunOutcome]
+    ) -> ProjectTasks {
+        applyFailureOverlay(to: project, latestOutcomes: latestOutcomes)
     }
 
     /// Test-only hook: the project paths actually RE-PARSED by the most recent

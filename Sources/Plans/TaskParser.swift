@@ -176,6 +176,17 @@ struct Task: Equatable {
     /// `elaborated`).
     let isBacklogged: Bool
 
+    /// The plan file's content-modification time as a `TimeInterval` since the
+    /// reference date (matching `ProjectSignature.Entry.modified`), or `nil` when
+    /// unavailable / not supplied by the caller (#080). Threaded in from the same
+    /// `contentModificationDate` fetched during the directory scan so the store's
+    /// run-failure overlay (#079) can suppress a STALE failing outcome — one whose
+    /// timestamp predates the last plan-file edit (a terminal run continually
+    /// rewrites the file, advancing its mtime past the old outcome). Optional so
+    /// single-file parse sites and tests that lack an mtime compile unchanged; the
+    /// guard falls back to current behavior when it is `nil`.
+    let modified: TimeInterval?
+
     /// Memberwise initializer with `failure` defaulting to `nil` (#079). The
     /// explicit init exists so the parser and the many call sites/tests that omit
     /// the run-failure overlay continue to compile unchanged after the field was
@@ -196,7 +207,8 @@ struct Task: Equatable {
         isBlocked: Bool,
         isCompletedDir: Bool,
         isBacklogged: Bool,
-        failure: TaskFailure? = nil
+        failure: TaskFailure? = nil,
+        modified: TimeInterval? = nil
     ) {
         self.id = id
         self.title = title
@@ -212,6 +224,7 @@ struct Task: Equatable {
         self.isCompletedDir = isCompletedDir
         self.isBacklogged = isBacklogged
         self.failure = failure
+        self.modified = modified
     }
 
     /// Hand-written `Equatable` (#066). Swift cannot synthesize the conformance
@@ -221,11 +234,14 @@ struct Task: Equatable {
     /// This `==` is load-bearing: it gates whether a reload PUBLISHES a new
     /// `projects` value, so a field omitted here would cause a real on-disk
     /// change to be silently dropped from both surfaces. Every one of the
-    /// fourteen stored properties is therefore compared, in declaration order:
+    /// fifteen stored properties is therefore compared, in declaration order:
     /// `id`, `title`, `type`, `status`, `created`, `branch`, `isKeptWorktree`,
     /// `blockedBy`, `sections`, `howProgress` (both tuple elements), `isBlocked`,
-    /// `failure`, `isCompletedDir`, `isBacklogged`. If a property is ever ADDED to
-    /// `Task`, it MUST be added here too.
+    /// `failure`, `isCompletedDir`, `isBacklogged`, `modified`. If a property is
+    /// ever ADDED to `Task`, it MUST be added here too. `modified` is compared
+    /// (#080) so a plan-file mtime advance — which can flip the run-failure
+    /// overlay from shown to suppressed even when no visible field changed —
+    /// publishes a fresh `projects` value rather than being dropped by the gate.
     static func == (lhs: Task, rhs: Task) -> Bool {
         lhs.id == rhs.id
             && lhs.title == rhs.title
@@ -242,6 +258,7 @@ struct Task: Equatable {
             && lhs.failure == rhs.failure
             && lhs.isCompletedDir == rhs.isCompletedDir
             && lhs.isBacklogged == rhs.isBacklogged
+            && lhs.modified == rhs.modified
     }
 }
 
@@ -583,9 +600,12 @@ struct TaskParser {
         isBacklogged: Bool = false
     ) -> [Task] {
         // contentsOfDirectory throws when the directory is missing; tolerate it.
+        // Prefetch the content-modification date so the per-file mtime read below
+        // is served from the batched enumeration rather than an extra `stat` each
+        // (#080; same batching discipline as `signatureEntries`).
         let entries = (try? fileManager.contentsOfDirectory(
             at: directory,
-            includingPropertiesForKeys: nil
+            includingPropertiesForKeys: [.contentModificationDateKey]
         )) ?? []
 
         let mdFiles = entries
@@ -598,11 +618,17 @@ struct TaskParser {
             guard let text = try? String(contentsOf: url, encoding: .utf8) else {
                 return nil
             }
+            // The plan file's mtime, carried onto the `Task` for the #080 stale-
+            // outcome guard. Same reference-date basis as `ProjectSignature.Entry`.
+            let modified = (try? url.resourceValues(forKeys: [.contentModificationDateKey]))?
+                .contentModificationDate?
+                .timeIntervalSinceReferenceDate
             return parse(
                 filename: url.lastPathComponent,
                 text: text,
                 isCompletedDir: isCompletedDir,
-                isBacklogged: isBacklogged
+                isBacklogged: isBacklogged,
+                modified: modified
             )
         }
     }
@@ -626,7 +652,8 @@ struct TaskParser {
             isBlocked: isBlocked,
             isCompletedDir: task.isCompletedDir,
             isBacklogged: task.isBacklogged,
-            failure: task.failure
+            failure: task.failure,
+            modified: task.modified
         )
     }
 
@@ -644,11 +671,16 @@ struct TaskParser {
     ///   - isBacklogged: `true` when the file lives under `backlog/` (#077).
     ///     Recorded on the `Task` but does NOT affect `status` — backlogged
     ///     files keep their real `**Status:**`.
+    ///   - modified: The plan file's content-modification time (reference-date
+    ///     `TimeInterval`), or `nil` when unavailable (#080). Carried through to
+    ///     the `Task` for the store's stale-outcome liveness guard; defaults to
+    ///     `nil` so single-file parse sites/tests need not supply it.
     func parse(
         filename: String,
         text: String,
         isCompletedDir: Bool,
-        isBacklogged: Bool = false
+        isBacklogged: Bool = false,
+        modified: TimeInterval? = nil
     ) -> Task {
         // §5.2: the id is literally the first 3 characters of the filename. If
         // the filename is shorter than 3 characters, take what is there.
@@ -701,7 +733,8 @@ struct TaskParser {
             // scope (we don't yet know the set of completed/ ids).
             isBlocked: false,
             isCompletedDir: isCompletedDir,
-            isBacklogged: isBacklogged
+            isBacklogged: isBacklogged,
+            modified: modified
         )
     }
 

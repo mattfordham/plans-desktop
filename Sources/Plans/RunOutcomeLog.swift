@@ -84,6 +84,32 @@ struct RunOutcome: Codable, Equatable {
         }
     }
 
+    /// Parses this outcome's ISO-8601 `timestamp` into a `Date`, tolerating both
+    /// the fractional-seconds and plain internet-date-time forms (mirrors
+    /// `BrowserWindow.parseLastSeen`). Returns `nil` when the timestamp is empty
+    /// or unparseable. Used by the store's #080 liveness guard to compare an
+    /// outcome's age against a plan file's mtime; on a `nil` here the guard fails
+    /// SAFE (shows the overlay) so a real failure is never hidden by a bad stamp.
+    var timestampDate: Date? {
+        Self.parseTimestamp(timestamp)
+    }
+
+    /// Shared ISO-8601 `timestamp → Date` parse for `RunOutcome`. Static + pure so
+    /// it is unit-testable without an instance. Tries the fractional-seconds form
+    /// first, then the plain internet-date-time form.
+    static func parseTimestamp(_ raw: String) -> Date? {
+        let trimmed = raw.trimmingCharacters(in: .whitespaces)
+        guard !trimmed.isEmpty else { return nil }
+
+        let withFractional = ISO8601DateFormatter()
+        withFractional.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        if let date = withFractional.date(from: trimmed) { return date }
+
+        let plain = ISO8601DateFormatter()
+        plain.formatOptions = [.withInternetDateTime]
+        return plain.date(from: trimmed)
+    }
+
     /// Derives the terminal `Classification` from a run's raw signals. Pure so
     /// the precedence is unit-testable without a `Process` (mirrors the
     /// `TaskRun.truncationError` / `TaskRunner.taskIDsToDismiss` static-helper

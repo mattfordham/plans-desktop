@@ -169,6 +169,35 @@ final class PlansStoreTests: XCTestCase {
         return RunOutcomeLogReader(fileURL: url)
     }
 
+    /// Forces the content-modification date of a task file to `date` so a test
+    /// can control the recency relationship between a plan file's mtime and a
+    /// run-outcome timestamp (the #080 liveness guard). Files written by
+    /// `writeTaskFile` otherwise get an mtime of "now", which is always newer
+    /// than the fixed past outcome timestamps used in these fixtures.
+    private func setTaskFileMtime(
+        projectDir: URL,
+        filename: String,
+        in subdir: String,
+        to date: Date
+    ) throws {
+        let url = projectDir
+            .appendingPathComponent(".plans")
+            .appendingPathComponent(subdir)
+            .appendingPathComponent(filename)
+        try FileManager.default.setAttributes(
+            [.modificationDate: date],
+            ofItemAtPath: url.path
+        )
+    }
+
+    /// Parses an ISO-8601 outcome timestamp (as used in these fixtures) into a
+    /// `Date` so tests can derive mtimes relative to an outcome's own timestamp.
+    private func date(fromISO iso: String) -> Date {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime]
+        return formatter.date(from: iso)!
+    }
+
     private func makeOutcome(
         projectPath: String,
         taskID: String,
@@ -199,6 +228,14 @@ final class PlansStoreTests: XCTestCase {
             filename: "007-run.md",
             text: "# Run\n\n**Status:** in-progress",
             in: "pending"
+        )
+        // The outcome is NEWER than the plan file's mtime — a genuine, just-
+        // recorded failure that the #080 liveness guard must NOT suppress.
+        try setTaskFileMtime(
+            projectDir: projectDir,
+            filename: "007-run.md",
+            in: "pending",
+            to: date(fromISO: "2026-06-04T09:00:00Z")
         )
         let reader = try makeReader(projectPaths: [projectDir.path])
         let outcomeReader = try makeOutcomeReader([
@@ -281,6 +318,211 @@ final class PlansStoreTests: XCTestCase {
         XCTAssertNil(task.failure, "a superseding completed outcome must clear the failure")
     }
 
+    // MARK: - Stale-outcome liveness guard (#080)
+
+    /// The false-positive reproduction: an in-progress task whose latest outcome
+    /// is a failing classification but whose plan-file mtime is NEWER than the
+    /// outcome timestamp (a terminal run rewrote the file after the stale app
+    /// run failed) must NOT show a failure overlay. This is the #080 bug: a stale
+    /// failing outcome kept lighting the alarm on a task being healthily re-run.
+    func testReloadSuppressesStaleFailureWhenFileNewerThanOutcome() throws {
+        let projectDir = try makeProjectDir(name: "alpha")
+        try writeTaskFile(
+            projectDir: projectDir,
+            filename: "007-run.md",
+            text: "# Run\n\n**Status:** in-progress",
+            in: "pending"
+        )
+        // The plan file was edited AFTER the failing outcome was recorded — the
+        // signature of an active terminal run advancing past the stale failure.
+        try setTaskFileMtime(
+            projectDir: projectDir,
+            filename: "007-run.md",
+            in: "pending",
+            to: date(fromISO: "2026-06-04T11:00:00Z")
+        )
+        let reader = try makeReader(projectPaths: [projectDir.path])
+        let outcomeReader = try makeOutcomeReader([
+            makeOutcome(
+                projectPath: projectDir.path,
+                taskID: "007",
+                classification: .stranded,
+                timestamp: "2026-06-04T10:00:00Z",
+                stopReason: "stranded_at_in_progress",
+                errorMessage: "Reached maximum budget ($20)"
+            )
+        ])
+        let store = PlansStore(registryReader: reader, outcomeLogReader: outcomeReader)
+        store.reload()
+
+        let task = try XCTUnwrap(store.projects.first?.tasks.first { $0.id == "007" })
+        XCTAssertNil(
+            task.failure,
+            "a failing outcome OLDER than the plan file's mtime is stale and must not overlay"
+        )
+    }
+
+    /// Guard against over-suppression: a failing outcome NEWER than the plan
+    /// file's mtime is a genuine, current failure and MUST still overlay.
+    func testReloadShowsFailureWhenOutcomeNewerThanFile() throws {
+        let projectDir = try makeProjectDir(name: "alpha")
+        try writeTaskFile(
+            projectDir: projectDir,
+            filename: "007-run.md",
+            text: "# Run\n\n**Status:** in-progress",
+            in: "pending"
+        )
+        // The plan file predates the failing outcome — the run failed after the
+        // last file edit, so the failure is current and should show.
+        try setTaskFileMtime(
+            projectDir: projectDir,
+            filename: "007-run.md",
+            in: "pending",
+            to: date(fromISO: "2026-06-04T09:00:00Z")
+        )
+        let reader = try makeReader(projectPaths: [projectDir.path])
+        let outcomeReader = try makeOutcomeReader([
+            makeOutcome(
+                projectPath: projectDir.path,
+                taskID: "007",
+                classification: .error,
+                timestamp: "2026-06-04T10:00:00Z",
+                errorMessage: "boom"
+            )
+        ])
+        let store = PlansStore(registryReader: reader, outcomeLogReader: outcomeReader)
+        store.reload()
+
+        let task = try XCTUnwrap(store.projects.first?.tasks.first { $0.id == "007" })
+        let failure = try XCTUnwrap(
+            task.failure,
+            "a failing outcome NEWER than the plan file's mtime is current and must overlay"
+        )
+        XCTAssertEqual(failure.classification, .error)
+    }
+
+    /// Edge case: an outcome timestamp EXACTLY EQUAL to the plan file's mtime is
+    /// treated as FRESH (`<` comparison, not `<=`) — the overlay is shown. This
+    /// biases toward surfacing a failure on a tie rather than hiding it.
+    func testReloadShowsFailureWhenOutcomeEqualsFileMtime() throws {
+        let projectDir = try makeProjectDir(name: "alpha")
+        try writeTaskFile(
+            projectDir: projectDir,
+            filename: "007-run.md",
+            text: "# Run\n\n**Status:** in-progress",
+            in: "pending"
+        )
+        // Mtime exactly equals the outcome timestamp.
+        try setTaskFileMtime(
+            projectDir: projectDir,
+            filename: "007-run.md",
+            in: "pending",
+            to: date(fromISO: "2026-06-04T10:00:00Z")
+        )
+        let reader = try makeReader(projectPaths: [projectDir.path])
+        let outcomeReader = try makeOutcomeReader([
+            makeOutcome(
+                projectPath: projectDir.path,
+                taskID: "007",
+                classification: .crashed,
+                timestamp: "2026-06-04T10:00:00Z"
+            )
+        ])
+        let store = PlansStore(registryReader: reader, outcomeLogReader: outcomeReader)
+        store.reload()
+
+        let task = try XCTUnwrap(store.projects.first?.tasks.first { $0.id == "007" })
+        XCTAssertNotNil(
+            task.failure,
+            "an outcome timestamp equal to the file mtime is fresh and must overlay"
+        )
+    }
+
+    /// Edge case: an UNPARSEABLE outcome timestamp means the guard cannot judge
+    /// recency, so it fails SAFE and shows the overlay rather than hiding a
+    /// possible genuine failure.
+    func testReloadShowsFailureWhenOutcomeTimestampUnparseable() throws {
+        let projectDir = try makeProjectDir(name: "alpha")
+        try writeTaskFile(
+            projectDir: projectDir,
+            filename: "007-run.md",
+            text: "# Run\n\n**Status:** in-progress",
+            in: "pending"
+        )
+        // File mtime is "now" (newer than any plausible outcome), which WOULD
+        // suppress a parseable stale outcome — but the timestamp cannot be parsed.
+        let reader = try makeReader(projectPaths: [projectDir.path])
+        let outcomeReader = try makeOutcomeReader([
+            makeOutcome(
+                projectPath: projectDir.path,
+                taskID: "007",
+                classification: .stranded,
+                timestamp: "not-a-timestamp"
+            )
+        ])
+        let store = PlansStore(registryReader: reader, outcomeLogReader: outcomeReader)
+        store.reload()
+
+        let task = try XCTUnwrap(store.projects.first?.tasks.first { $0.id == "007" })
+        XCTAssertNotNil(
+            task.failure,
+            "an unparseable outcome timestamp must fall back to showing the overlay"
+        )
+    }
+
+    /// Edge case: when the plan file's mtime is UNAVAILABLE (`nil`), the guard
+    /// cannot compare recency and falls back to the pre-#080 behavior — the
+    /// overlay is shown. Constructed directly (rather than via a filesystem
+    /// fixture) because a real file always has an mtime; this exercises the
+    /// `task.modified == nil` fallback branch of the overlay in isolation.
+    func testFailureOverlayShownWhenFileMtimeIsNil() throws {
+        let task = Task(
+            id: "007",
+            title: "Run",
+            type: nil,
+            status: .inProgress,
+            created: nil,
+            branch: nil,
+            isKeptWorktree: false,
+            blockedBy: [],
+            sections: [],
+            howProgress: (done: 0, total: 0),
+            isBlocked: false,
+            isCompletedDir: false,
+            isBacklogged: false,
+            failure: nil,
+            modified: nil
+        )
+        let project = ProjectTasks(
+            projectPath: "/p",
+            projectName: "P",
+            lastSeen: "",
+            tasks: [task],
+            counts: [.inProgress: 1],
+            activeTasks: [task],
+            backloggedTasks: []
+        )
+        let outcomes: [RunOutcomeKey: RunOutcome] = [
+            RunOutcomeKey(projectPath: "/p", taskID: "007"): makeOutcome(
+                projectPath: "/p",
+                taskID: "007",
+                classification: .truncated,
+                timestamp: "2026-06-04T10:00:00Z"
+            )
+        ]
+
+        let overlaid = PlansStore.applyFailureOverlayForTesting(
+            to: project,
+            latestOutcomes: outcomes
+        )
+
+        let result = try XCTUnwrap(overlaid.tasks.first)
+        XCTAssertNotNil(
+            result.failure,
+            "a nil file mtime must fall back to showing the overlay (pre-#080 behavior)"
+        )
+    }
+
     /// `failedCount` (#079) totals the tasks carrying a failure overlay across
     /// every project. Two in-progress tasks with failing latest outcomes (one per
     /// project) sum to 2; a healthy in-progress task adds nothing.
@@ -294,6 +536,12 @@ final class PlansStoreTests: XCTestCase {
         // A healthy in-progress task (no failing outcome) must not be counted.
         try writeTaskFile(projectDir: alpha, filename: "003-c.md",
                           text: "# C\n\n**Status:** in-progress", in: "pending")
+        // Both failing files predate their outcomes — genuine failures the #080
+        // liveness guard must count, not suppress.
+        try setTaskFileMtime(projectDir: alpha, filename: "001-a.md", in: "pending",
+                             to: date(fromISO: "2026-06-04T09:00:00Z"))
+        try setTaskFileMtime(projectDir: beta, filename: "002-b.md", in: "pending",
+                             to: date(fromISO: "2026-06-04T09:00:00Z"))
 
         let reader = try makeReader(projectPaths: [alpha.path, beta.path])
         let outcomeReader = try makeOutcomeReader([
