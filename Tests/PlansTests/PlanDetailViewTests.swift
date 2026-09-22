@@ -116,6 +116,96 @@ final class PlanDetailViewTests: XCTestCase {
         XCTAssertNil(RunProgressSheet.scrollTarget(for: []))
     }
 
+    // MARK: - RunProgressSheet.shouldShowFailureBanner (#081)
+
+    /// A `done`-derived failure (stranded/truncation) latches `error` mid-run
+    /// while `isRunning` stays true. The banner must NOT fire in that state —
+    /// the run is still live (spinner up, turns climbing); the failure is only
+    /// meaningful once the run has actually ended.
+    func testFailureBannerSuppressedForDoneDerivedErrorWhileRunning() {
+        let stopReason = TaskRun.strandedStopReason
+        let message = TaskRun.truncationError(for: stopReason)
+        XCTAssertNotNil(message)
+
+        XCTAssertFalse(
+            RunProgressSheet.shouldShowFailureBanner(
+                error: message,
+                isRunning: true,
+                stopReason: stopReason
+            )
+        )
+    }
+
+    /// Once the same `done`-derived failure's run has ended (`isRunning ==
+    /// false`), the banner fires — the failure is now the terminal outcome.
+    func testFailureBannerShownForDoneDerivedErrorOnceEnded() {
+        let stopReason = TaskRun.strandedStopReason
+        let message = TaskRun.truncationError(for: stopReason)
+
+        XCTAssertTrue(
+            RunProgressSheet.shouldShowFailureBanner(
+                error: message,
+                isRunning: false,
+                stopReason: stopReason
+            )
+        )
+    }
+
+    /// A truncating cap failure behaves the same way: suppressed while live,
+    /// shown once ended.
+    func testFailureBannerSuppressedForTruncatingCapWhileRunning() {
+        let stopReason = "error_max_budget_usd"
+        let message = TaskRun.truncationError(for: stopReason)
+        XCTAssertNotNil(message)
+
+        XCTAssertFalse(
+            RunProgressSheet.shouldShowFailureBanner(
+                error: message,
+                isRunning: true,
+                stopReason: stopReason
+            )
+        )
+        XCTAssertTrue(
+            RunProgressSheet.shouldShowFailureBanner(
+                error: message,
+                isRunning: false,
+                stopReason: stopReason
+            )
+        )
+    }
+
+    /// A genuine mid-run `.error(message)` event (a real crash / launch failure)
+    /// carries an error text that does NOT match any `truncationError` for the
+    /// current stop reason. It MUST show immediately, even while `isRunning`.
+    func testFailureBannerShownForGenuineErrorWhileRunning() {
+        // No stop reason yet (no `done` seen) and a crash-style message.
+        XCTAssertTrue(
+            RunProgressSheet.shouldShowFailureBanner(
+                error: "Failed to launch node: executable not found",
+                isRunning: true,
+                stopReason: nil
+            )
+        )
+    }
+
+    /// No error → never show the banner, regardless of running state.
+    func testFailureBannerHiddenWhenNoError() {
+        XCTAssertFalse(
+            RunProgressSheet.shouldShowFailureBanner(
+                error: nil,
+                isRunning: true,
+                stopReason: nil
+            )
+        )
+        XCTAssertFalse(
+            RunProgressSheet.shouldShowFailureBanner(
+                error: nil,
+                isRunning: false,
+                stopReason: "stranded_at_in_progress"
+            )
+        )
+    }
+
     // MARK: - PlanDetailView.canDelete gating (#060)
 
     /// `PlanDetailView.canDelete` is the pure predicate behind the Delete
