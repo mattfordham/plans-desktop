@@ -796,6 +796,31 @@ final class BrowserWindowTests: XCTestCase {
         )
     }
 
+    // MARK: - columnCount balances the last row (#082: avoid grid holes)
+    //
+    // At width 1400 the raw width capacity is 3 columns. With 4 cards the old
+    // maximize-columns policy laid out 3 + 1 — a 3-card row atop a lone card,
+    // leaving a two-slot hole in the final row. The balancing step prefers a
+    // fuller final row: 4 cards fall back to 2 columns (a 2x2 grid, no hole).
+
+    /// FOUR cards at capacity-3 width reflow to 2 columns (2x2, no hole) rather
+    /// than the ragged 3 + 1. This is the #082 fix.
+    func testColumnCountBalancesFourCardsToTwoByTwo() {
+        XCTAssertEqual(
+            BrowserWindow.columnCount(forWidth: 1400, cardCount: 4), 2
+        )
+    }
+
+    /// FIVE cards at capacity-3 width keep 3 columns: the near-square floor
+    /// (ceil(sqrt(5)) == 3) is the only candidate, and 5 is not divisible by 3,
+    /// so the width capacity stands and a single one-slot hole is deliberately
+    /// tolerated rather than collapsing to a jaggeder 2-column layout.
+    func testColumnCountKeepsThreeForFiveCardsAtCapacityThree() {
+        XCTAssertEqual(
+            BrowserWindow.columnCount(forWidth: 1400, cardCount: 5), 3
+        )
+    }
+
     // MARK: - effectiveLayoutMode (fit collapses to scroll at one column)
 
     /// Fit-to-screen at a SINGLE column collapses to scroll: stacking full-width

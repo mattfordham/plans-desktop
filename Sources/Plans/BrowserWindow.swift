@@ -86,18 +86,47 @@ struct BrowserWindow: View {
     }
 
     /// The width-driven column count CLAMPED by how many cards are actually being
-    /// rendered, so the grid never lays out more columns than it has cards to put
-    /// in them. Without the clamp a grid showing fewer cards than the viewport can
-    /// fit strands them at `cardMinWidth` against a run of empty columns — most
-    /// visibly under focus mode (#067), where collapsing to a single project left
-    /// one 400pt card in a 4-column window with three columns of dead space.
+    /// rendered and then BALANCED so the final row is not left with a large hole.
     ///
-    /// The clamp only ever NARROWS the count: with more cards than the width can
-    /// fit, the width-driven value stands and cards keep their `cardMinWidth`
-    /// floor. The `max(1, …)` floor is preserved for an empty grid so the row math
-    /// never divides by zero. Pure, so it is directly unit-testable.
+    /// The clamp: never lay out more columns than there are cards, so a grid
+    /// showing fewer cards than the viewport can fit doesn't strand them at
+    /// `cardMinWidth` against a run of empty columns — most visibly under focus
+    /// mode (#067), where collapsing to a single project left one 400pt card in a
+    /// 4-column window with three columns of dead space. The clamp only ever
+    /// NARROWS the count: with more cards than the width can fit, the width-driven
+    /// value stands and cards keep their `cardMinWidth` floor.
+    ///
+    /// The balance (#082): maximizing columns can leave a ragged final row — e.g.
+    /// 4 cards in a 3-wide viewport lay out 3 + 1, a lone card beneath a full row.
+    /// From the clamped width capacity DOWN TO the near-square floor
+    /// `ceil(sqrt(cardCount))`, pick the LARGEST column count whose final row is
+    /// completely full (`cardCount % candidate == 0`, with a single full row
+    /// counting as full). So 4 cards fall back to a 2x2 grid. The near-square
+    /// floor stops over-collapsing: 5 cards at capacity 3 keep 3 columns (a
+    /// deliberate one-slot hole) rather than dropping to a jaggeder 2-wide layout.
+    /// If nothing in that range divides evenly, the width capacity stands.
+    ///
+    /// The `max(1, …)` floor is preserved for an empty grid so the row math never
+    /// divides by zero, and the `cardCount == 1` focus-mode invariant (exactly one
+    /// column) is unaffected. Pure, so it is directly unit-testable.
     static func columnCount(forWidth width: CGFloat, cardCount: Int) -> Int {
-        max(1, min(columnCount(forWidth: width), cardCount))
+        let capacity = max(1, min(columnCount(forWidth: width), cardCount))
+        return balancedColumnCount(capacity: capacity, cardCount: cardCount)
+    }
+
+    /// Chooses the column count that best fills the final row. Scans candidate
+    /// column counts from `capacity` down to the near-square floor
+    /// `ceil(sqrt(cardCount))` and returns the largest whose last row is
+    /// completely full; falls back to `capacity` when none divides evenly. Pure.
+    static func balancedColumnCount(capacity: Int, cardCount: Int) -> Int {
+        guard cardCount > 1 else { return capacity }
+        let floor = Int(ceil(Double(cardCount).squareRoot()))
+        var candidate = capacity
+        while candidate >= floor {
+            if cardCount % candidate == 0 { return candidate }
+            candidate -= 1
+        }
+        return capacity
     }
 
     /// Whether the grid is in the FULL-HEIGHT focused single-card case (#071):
