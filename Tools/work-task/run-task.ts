@@ -713,6 +713,19 @@ async function main(): Promise<void> {
           "mcp__figma-dev-mode-mcp-server__get_screenshot",
           "mcp__figma-dev-mode-mcp-server__get_metadata",
           "mcp__figma-dev-mode-mcp-server__get_design_context",
+          // Playwright tools for rendered-page verification. These six are the
+          // exact set plans-cc's plan-execute (visual-comparison stage) and
+          // des-build (`verify <url>`) declare in their frontmatter. Without
+          // them, `permissionMode: "acceptEdits"` denies them and the stage
+          // reports "Visual comparison NOT run: Playwright MCP unavailable".
+          // Add only these. Do NOT add interactive Playwright tools (click,
+          // type, fill_form, run_code_unsafe, etc.).
+          "mcp__playwright__browser_navigate",
+          "mcp__playwright__browser_resize",
+          "mcp__playwright__browser_take_screenshot",
+          "mcp__playwright__browser_evaluate",
+          "mcp__playwright__browser_snapshot",
+          "mcp__playwright__browser_wait_for",
         ],
       },
     });
