@@ -773,6 +773,145 @@ final class TaskRunnerTests: XCTestCase {
         XCTAssertFalse(RunMode.executeYolo.usesTaskID)
     }
 
+    // MARK: - Child environment (#084)
+
+    /// A Dock-launched app inherits launchd's bare PATH, so `spawn` hands the
+    /// child an explicit environment built by the pure
+    /// `TaskRun.buildChildEnvironment`. The login-shell PATH replaces the base
+    /// PATH; every other inherited key rides along untouched.
+    func testChildEnvironmentReplacesPathAndKeepsOtherKeys() {
+        let base = [
+            "PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
+            "HOME": "/Users/me",
+            "USER": "me",
+            "TMPDIR": "/var/folders/xx/T/",
+        ]
+        let env = TaskRun.buildChildEnvironment(
+            base: base,
+            loginPath: "/opt/homebrew/bin:/usr/bin:/bin",
+            nodePath: "/opt/homebrew/bin/node"
+        )
+        XCTAssertEqual(env["PATH"], "/opt/homebrew/bin:/usr/bin:/bin")
+        XCTAssertEqual(env["HOME"], "/Users/me")
+        XCTAssertEqual(env["USER"], "me")
+        XCTAssertEqual(env["TMPDIR"], "/var/folders/xx/T/")
+    }
+
+    /// With no login PATH (shell failed or timed out), the fallback is node's
+    /// own directory, then the common Homebrew prefixes, then the base PATH —
+    /// with duplicates dropped (first occurrence wins).
+    func testChildEnvironmentFallsBackWhenLoginPathMissing() {
+        let base = ["PATH": "/usr/local/bin:/usr/bin:/bin", "HOME": "/Users/me"]
+        let nodePath = "/Users/me/.nvm/versions/node/v22.0.0/bin/node"
+        let expected = [
+            "/Users/me/.nvm/versions/node/v22.0.0/bin",
+            "/opt/homebrew/bin",
+            "/usr/local/bin",
+            "/usr/bin",
+            "/bin",
+        ].joined(separator: ":")
+
+        for loginPath in [nil, "", "   \n"] as [String?] {
+            let env = TaskRun.buildChildEnvironment(
+                base: base, loginPath: loginPath, nodePath: nodePath)
+            XCTAssertEqual(env["PATH"], expected, "loginPath=\(String(describing: loginPath))")
+            XCTAssertEqual(env["HOME"], "/Users/me")
+        }
+    }
+
+    /// The fallback still works when node itself is unknown and the base has
+    /// no PATH at all.
+    func testChildEnvironmentFallbackWithoutNodeOrBasePath() {
+        let env = TaskRun.buildChildEnvironment(base: [:], loginPath: nil, nodePath: nil)
+        XCTAssertEqual(env["PATH"], "/opt/homebrew/bin:/usr/local/bin")
+    }
+
+    /// Node's directory goes first when the login PATH lacks it (e.g. nvm is
+    /// only initialized in an interactive rc file) so `#!/usr/bin/env node`
+    /// shebangs like `npx`'s resolve to the same node the runner uses.
+    func testChildEnvironmentPrependsNodeDirWhenMissingFromLoginPath() {
+        let env = TaskRun.buildChildEnvironment(
+            base: ["PATH": "/usr/bin:/bin"],
+            loginPath: "/usr/local/bin:/usr/bin:/bin",
+            nodePath: "/Users/me/.nvm/versions/node/v22.0.0/bin/node"
+        )
+        XCTAssertEqual(
+            env["PATH"],
+            "/Users/me/.nvm/versions/node/v22.0.0/bin:/usr/local/bin:/usr/bin:/bin"
+        )
+    }
+
+    /// When the login PATH already contains node's directory it is left as-is
+    /// (not moved to the front, not duplicated).
+    func testChildEnvironmentLeavesLoginPathWhenNodeDirPresent() {
+        let env = TaskRun.buildChildEnvironment(
+            base: [:],
+            loginPath: "/usr/bin:/opt/homebrew/bin:/bin",
+            nodePath: "/opt/homebrew/bin/node"
+        )
+        XCTAssertEqual(env["PATH"], "/usr/bin:/opt/homebrew/bin:/bin")
+    }
+
+    /// The login-shell lookup prints marked `__NODE__`/`__PATH__` lines; profile
+    /// scripts may print arbitrary noise (including lines that look similar).
+    /// The parser keeps only the LAST marked line of each kind.
+    func testParseLoginShellOutputTakesLastMarkedLinesAndIgnoresNoise() {
+        let output = """
+        Welcome back! Last login: today
+        __NODE__/usr/bin/stale-node
+        some rc noise __PATH__not-a-marker
+        __NODE__/opt/homebrew/bin/node
+        __PATH__/early:/path
+        more noise
+        __PATH__/opt/homebrew/bin:/usr/bin:/bin
+
+        """
+        let parsed = TaskRun.parseLoginShellOutput(output)
+        XCTAssertEqual(parsed.nodePath, "/opt/homebrew/bin/node")
+        XCTAssertEqual(parsed.path, "/opt/homebrew/bin:/usr/bin:/bin")
+    }
+
+    /// `command -v node` prints nothing when node isn't installed, so there is
+    /// no `__NODE__` line: node is nil but the PATH is still returned.
+    func testParseLoginShellOutputToleratesMissingNodeLine() {
+        let parsed = TaskRun.parseLoginShellOutput("noise\n__PATH__/usr/bin:/bin\n")
+        XCTAssertNil(parsed.nodePath)
+        XCTAssertEqual(parsed.path, "/usr/bin:/bin")
+    }
+
+    /// Empty marked values (and empty output) parse to nil, not "".
+    func testParseLoginShellOutputTreatsEmptyValuesAsNil() {
+        let parsed = TaskRun.parseLoginShellOutput("__NODE__\n__PATH__  \n")
+        XCTAssertNil(parsed.nodePath)
+        XCTAssertNil(parsed.path)
+        let empty = TaskRun.parseLoginShellOutput("")
+        XCTAssertNil(empty.nodePath)
+        XCTAssertNil(empty.path)
+    }
+
+    /// A stderr chunk is split into trimmed, non-empty lines for logging.
+    /// Blank lines and surrounding whitespace are dropped.
+    func testStderrLogLinesSplitsAndTrimsChunk() {
+        let chunk = Data("  first error  \n\n\tsecond line\r\n   \n".utf8)
+        XCTAssertEqual(TaskRun.stderrLogLines(from: chunk), ["first error", "second line"])
+    }
+
+    /// An empty or whitespace-only chunk yields no lines to log.
+    func testStderrLogLinesIgnoresBlankChunk() {
+        XCTAssertEqual(TaskRun.stderrLogLines(from: Data()), [])
+        XCTAssertEqual(TaskRun.stderrLogLines(from: Data(" \n\t\n".utf8)), [])
+    }
+
+    /// Bytes that aren't valid UTF-8 are decoded lossily, not dropped, so a
+    /// partial multi-byte sequence split across chunks still gets logged.
+    func testStderrLogLinesDecodesInvalidUTF8Lossily() {
+        var chunk = Data("bad ".utf8)
+        chunk.append(0xFF)
+        let lines = TaskRun.stderrLogLines(from: chunk)
+        XCTAssertEqual(lines.count, 1)
+        XCTAssertTrue(lines[0].hasPrefix("bad"))
+    }
+
     /// `.reElaborate` is the mode that REQUIRES both arg flags: it refines an
     /// EXISTING already-elaborated task (so `spawn` emits `--task-id`) using the
     /// user's free-text guidance (so `spawn` also emits `--description`). The two

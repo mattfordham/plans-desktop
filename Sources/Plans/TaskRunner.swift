@@ -402,9 +402,13 @@ final class TaskRun {
         let deep = self.deep
         let keep = self.keep
         _Concurrency.Task { [weak self] in
-            let nodePath = await _Concurrency.Task.detached {
-                TaskRun.resolveNodePath()
+            // One login-shell lookup yields both node and the login PATH; the
+            // PATH becomes the child's so `npx`-launched MCP servers resolve.
+            let loginEnv = await _Concurrency.Task.detached {
+                TaskRun.resolveLoginEnvironment()
             }.value
+            let nodePath = loginEnv?.nodePath
+            let loginPath = loginEnv?.path
             guard let self else { return }
             guard self.isRunning else {
                 runnerLog.notice("node resolved but run was already stopped; not spawning")
@@ -416,7 +420,7 @@ final class TaskRun {
                 return
             }
             runnerLog.notice("resolved node: \(nodePath, privacy: .public)")
-            self.spawn(nodePath: nodePath, scriptURL: scriptURL,
+            self.spawn(nodePath: nodePath, loginPath: loginPath, scriptURL: scriptURL,
                        projectPath: projectPath, taskID: taskID, mode: mode,
                        description: description, deep: deep, keep: keep)
         }
@@ -445,11 +449,21 @@ final class TaskRun {
 
     // MARK: - Spawning
 
-    private func spawn(nodePath: String, scriptURL: URL,
+    private func spawn(nodePath: String, loginPath: String?, scriptURL: URL,
                        projectPath: String, taskID: String, mode: RunMode,
                        description: String?, deep: Bool, keep: Bool) {
         let proc = Process()
         proc.executableURL = URL(fileURLWithPath: nodePath)
+        // Give the child the login-shell PATH instead of the bare launchd one a
+        // Dock-launched app inherits; the Agent SDK copies `process.env` into
+        // the Claude CLI, so this is what stdio MCP servers and hooks see.
+        let environment = TaskRun.buildChildEnvironment(
+            base: ProcessInfo.processInfo.environment,
+            loginPath: loginPath,
+            nodePath: nodePath
+        )
+        proc.environment = environment
+        runnerLog.notice("child PATH (\(loginPath == nil ? "fallback" : "login shell", privacy: .public)): \(environment["PATH"] ?? "", privacy: .public)")
         var arguments = [
             scriptURL.path,
             "--project-root", projectPath,
@@ -492,12 +506,33 @@ final class TaskRun {
         proc.standardError = stderrPipe
 
         // Background-queue handler: append bytes to the buffer and decode any
-        // complete lines, hopping each batch to the main actor.
+        // complete lines, hopping each batch to the main actor. The handler is
+        // cleared at EOF rather than in `terminationHandler`: termination can fire
+        // before the last stdout bytes are read, and clearing there would drop
+        // them. Clearing at EOF also stops the handler firing repeatedly with
+        // empty data once the pipe closes.
         stdoutPipe.fileHandleForReading.readabilityHandler = { [weak self] handle in
             let data = handle.availableData
-            guard !data.isEmpty else { return }
+            guard !data.isEmpty else {
+                handle.readabilityHandler = nil  // EOF: stop the drain.
+                return
+            }
             _Concurrency.Task { @MainActor in
                 self?.ingest(data)
+            }
+        }
+
+        // Drain stderr so the child can't block once the pipe buffer (~64 KB)
+        // fills, and log it so spawn failures (missing node, bad PATH, runner
+        // crashes) show up in the unified log. Nothing else reads stderr.
+        stderrPipe.fileHandleForReading.readabilityHandler = { handle in
+            let data = handle.availableData
+            guard !data.isEmpty else {
+                handle.readabilityHandler = nil  // EOF: stop the drain.
+                return
+            }
+            for line in TaskRun.stderrLogLines(from: data) {
+                runnerLog.notice("runner stderr: \(line, privacy: .public)")
             }
         }
 
@@ -695,51 +730,187 @@ final class TaskRun {
         )
     }
 
-    /// A lock-guarded cache of the resolved `node` path, so we only shell out
-    /// once per app run even though `resolveNodePath()` is `nonisolated`.
-    private final class NodePathCache: @unchecked Sendable {
-        private let lock = NSLock()
-        private var value: String?
-
-        func get() -> String? { lock.withLock { value } }
-        func set(_ path: String) { lock.withLock { value = path } }
+    /// What one login-shell lookup yields: the `node` binary's path and the
+    /// login shell's `PATH`. Either may be `nil` (node not installed, or the
+    /// marked line missing from the shell's output).
+    struct LoginShellEnvironment: Sendable, Equatable {
+        var nodePath: String?
+        var path: String?
     }
 
-    private nonisolated static let nodePathCache = NodePathCache()
+    /// A lock-guarded cache of the resolved login-shell environment (node path
+    /// plus login PATH), so we only shell out once per app run even though
+    /// `resolveLoginEnvironment()` is `nonisolated`.
+    private final class LoginEnvironmentCache: @unchecked Sendable {
+        private let lock = NSLock()
+        private var value: LoginShellEnvironment?
 
-    /// Resolves the `node` binary via a login shell so Homebrew/nvm PATHs are
-    /// honored. Caches the result. Returns `nil` when `node` is not found or
-    /// the shell call fails. Must be called OFF the main actor (it blocks).
-    nonisolated static func resolveNodePath() -> String? {
-        if let cached = nodePathCache.get() { return cached }
+        func get() -> LoginShellEnvironment? { lock.withLock { value } }
+        func set(_ env: LoginShellEnvironment) { lock.withLock { value = env } }
+    }
+
+    private nonisolated static let loginEnvironmentCache = LoginEnvironmentCache()
+
+    /// Markers the login-shell lookup prefixes onto its two meaningful lines,
+    /// so noise printed by profile scripts can be told apart from the answer.
+    private nonisolated static let nodeMarker = "__NODE__"
+    private nonisolated static let pathMarker = "__PATH__"
+
+    /// How long the login shell may take before it is terminated. A profile
+    /// that prompts or hangs must not wedge a run's launch.
+    private nonisolated static let loginShellTimeout: TimeInterval = 5
+
+    /// Splits a raw stderr chunk from the child into trimmed, non-empty lines
+    /// for logging. Decodes lossily so invalid or split UTF-8 still gets logged.
+    nonisolated static func stderrLogLines(from data: Data) -> [String] {
+        String(decoding: data, as: UTF8.self)
+            .split(whereSeparator: \.isNewline)
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+    }
+
+    /// Parses the marked output of the login-shell lookup. Keeps the LAST
+    /// `__NODE__` / `__PATH__` line of each kind (profile scripts run first, so
+    /// the lookup's own lines come last) and ignores everything else. Empty
+    /// values parse to `nil`.
+    nonisolated static func parseLoginShellOutput(_ output: String) -> LoginShellEnvironment {
+        var result = LoginShellEnvironment()
+        for rawLine in output.split(whereSeparator: \.isNewline) {
+            let line = String(rawLine)
+            if line.hasPrefix(nodeMarker) {
+                result.nodePath = nonEmpty(String(line.dropFirst(nodeMarker.count)))
+            } else if line.hasPrefix(pathMarker) {
+                result.path = nonEmpty(String(line.dropFirst(pathMarker.count)))
+            }
+        }
+        return result
+    }
+
+    private nonisolated static func nonEmpty(_ value: String) -> String? {
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
+    }
+
+    /// Builds the spawned process's environment: `base` (the app's own
+    /// environment) with `PATH` replaced. A Dock-launched app inherits
+    /// launchd's bare `/usr/bin:/bin:/usr/sbin:/sbin`, so without this the
+    /// runner — and the Claude CLI and stdio MCP servers (`npx …`) it starts —
+    /// can't find `node`/`npx`.
+    ///
+    /// - With a login PATH: use it, prepending node's directory when it isn't
+    ///   already present (so `#!/usr/bin/env node` shebangs find the same node).
+    /// - Without one: node's directory, then `/opt/homebrew/bin`,
+    ///   `/usr/local/bin`, then the base PATH entries.
+    ///
+    /// Duplicate and empty entries are dropped (first occurrence wins).
+    nonisolated static func buildChildEnvironment(
+        base: [String: String],
+        loginPath: String?,
+        nodePath: String?
+    ) -> [String: String] {
+        let nodeDir = nodePath
+            .map { ($0 as NSString).deletingLastPathComponent }
+            .flatMap(nonEmpty)
+        func entries(_ path: String?) -> [String] {
+            (path ?? "").split(separator: ":").map(String.init)
+        }
+
+        var candidates: [String]
+        if let loginPath = loginPath.flatMap(nonEmpty) {
+            let loginEntries = entries(loginPath)
+            candidates = loginEntries
+            if let nodeDir, !loginEntries.contains(nodeDir) {
+                candidates.insert(nodeDir, at: 0)
+            }
+        } else {
+            candidates = (nodeDir.map { [$0] } ?? [])
+                + ["/opt/homebrew/bin", "/usr/local/bin"]
+                + entries(base["PATH"])
+        }
+
+        var seen = Set<String>()
+        let deduped = candidates.filter { !$0.isEmpty && seen.insert($0).inserted }
+
+        var env = base
+        env["PATH"] = deduped.joined(separator: ":")
+        return env
+    }
+
+    /// Accumulates the login shell's stdout across threads (the reader runs on
+    /// a background queue so the caller can enforce a timeout).
+    private final class OutputBox: @unchecked Sendable {
+        private let lock = NSLock()
+        private var data = Data()
+
+        func set(_ newData: Data) { lock.withLock { data = newData } }
+        func get() -> Data { lock.withLock { data } }
+    }
+
+    /// Resolves `node` and the login PATH with ONE login-shell call, so
+    /// Homebrew/nvm setups are honored. Caches the result once node is found.
+    /// Returns `nil` when the shell fails, times out, or `node` is not found.
+    /// Must be called OFF the main actor (it blocks).
+    nonisolated static func resolveLoginEnvironment() -> LoginShellEnvironment? {
+        if let cached = loginEnvironmentCache.get() { return cached }
 
         let proc = Process()
         proc.executableURL = URL(fileURLWithPath: "/bin/zsh")
-        proc.arguments = ["-lc", "command -v node"]
+        proc.arguments = [
+            "-lc",
+            "command -v node | sed 's/^/\(nodeMarker)/'; printf '\(pathMarker)%s\\n' \"$PATH\"",
+        ]
         let pipe = Pipe()
         proc.standardOutput = pipe
-        proc.standardError = Pipe()
+        proc.standardError = FileHandle.nullDevice
+        proc.standardInput = FileHandle.nullDevice
 
         do {
             try proc.run()
-            let data = pipe.fileHandleForReading.readDataToEndOfFile()
-            proc.waitUntilExit()
-            guard proc.terminationStatus == 0 else {
-                runnerLog.error("resolveNodePath: `command -v node` exited \(proc.terminationStatus)")
-                return nil
-            }
-            let path = String(decoding: data, as: UTF8.self)
-                .trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !path.isEmpty else {
-                runnerLog.error("resolveNodePath: `command -v node` returned empty")
-                return nil
-            }
-            nodePathCache.set(path)
-            return path
         } catch {
             runnerLog.error("resolveNodePath: failed to run login shell: \(error.localizedDescription, privacy: .public)")
             return nil
         }
+
+        // Read on a background queue so a hung profile can't block us past the
+        // timeout; the read finishes once the shell (and anything holding its
+        // stdout) exits.
+        let output = OutputBox()
+        let done = DispatchSemaphore(value: 0)
+        let reader = pipe.fileHandleForReading
+        DispatchQueue.global(qos: .userInitiated).async {
+            output.set(reader.readDataToEndOfFile())
+            done.signal()
+        }
+        if done.wait(timeout: .now() + loginShellTimeout) == .timedOut {
+            proc.terminate()
+            runnerLog.error("resolveNodePath: login shell timed out after \(loginShellTimeout)s; terminated")
+            return nil
+        }
+        proc.waitUntilExit()
+
+        let parsed = parseLoginShellOutput(String(decoding: output.get(), as: UTF8.self))
+        guard parsed.nodePath != nil else {
+            runnerLog.error("resolveNodePath: `command -v node` returned empty (shell exited \(proc.terminationStatus))")
+            return nil
+        }
+        if parsed.path == nil {
+            runnerLog.error("resolveNodePath: login shell printed no PATH; child will use fallback PATH")
+        }
+        loginEnvironmentCache.set(parsed)
+        return parsed
+    }
+
+    /// Resolves the `node` binary via a login shell (see
+    /// `resolveLoginEnvironment()`). Returns `nil` when `node` is not found or
+    /// the shell call fails. Must be called OFF the main actor (it blocks).
+    nonisolated static func resolveNodePath() -> String? {
+        resolveLoginEnvironment()?.nodePath
+    }
+
+    /// The login-shell PATH cached by a previous successful resolution, or
+    /// `nil` if none has completed yet (or the shell printed no PATH).
+    nonisolated static func cachedLoginPath() -> String? {
+        loginEnvironmentCache.get()?.path
     }
 }
 
