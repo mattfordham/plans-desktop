@@ -210,7 +210,10 @@ struct PlanDetailView: View {
                 // A kept-worktree task (executed with the `keep` keyword) shows a
                 // muted house glyph — the desktop analogue of the plans-cc
                 // dashboard TUI's `⌂ kept` marker — matching the browser card row.
-                if row.task.isKeptWorktree {
+                // The `**Worktree:**` field can also appear on in-progress tasks,
+                // so `showsKeptWorktreeMarker` (not `isKeptWorktree`) restricts the
+                // display to review-state rows, shared with the browser card (#086).
+                if row.task.showsKeptWorktreeMarker {
                     Text("·").foregroundStyle(.secondary)
                     Image(systemName: TaskStatusIndicator.keptWorktreeSymbol)
                         .imageScale(.small)

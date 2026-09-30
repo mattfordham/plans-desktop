@@ -288,9 +288,21 @@ struct ProjectCard: View {
         /// The id column — plan ids are short numeric strings; 4 characters plus
         /// slack covers every id the parser produces.
         var idWidth: CGFloat = 40
+        /// Rendered width budgeted for the muted house (`⌂ kept`) marker (#086).
+        /// The house SF Symbol at `.imageScale(.small)` in the `.body` face
+        /// renders ~14pt wide; 16 gives a couple of points of slack so the icon
+        /// never overflows the pinned type cell and overlaps the flexible title
+        /// column beside it (`.frame(width:)` does not clip).
+        var keptMarkerWidth: CGFloat = 16
+        /// Inter-element gap INSIDE the type cell, between the `[type]` badge and
+        /// the kept-worktree marker. Shared with `planRow`'s HStack spacing so the
+        /// budgeted width and the rendered spacing are one source of truth (#086).
+        var typeCellSpacing: CGFloat = 4
         /// The `[type]` column, pinned to fit the widest label (`[refactor]` —
-        /// 8 characters plus 2 brackets) so every badge occupies the same width.
-        var typeWidth: CGFloat = 10 * 8.5
+        /// 8 characters plus 2 brackets) PLUS the kept-worktree marker and the
+        /// gap before it (#086), so the widest badge WITH the house icon still
+        /// fits the pinned cell and every badge occupies the same width.
+        var typeWidth: CGFloat = 10 * 8.5 + 16 + 4
         /// The title column flexes, absorbing all remaining width so the row's
         /// single background reaches the trailing edge on every row.
         var titleMaxWidth: CGFloat = .infinity
@@ -807,12 +819,16 @@ struct ProjectCard: View {
             // starts at the same x on every row. A kept-worktree task (executed
             // with the `keep` keyword) appends a muted house glyph after the type
             // badge — the desktop analogue of the plans-cc dashboard TUI's
-            // `⌂ kept` marker. Only review-state tasks carry a live worktree, so
-            // it appears only there; the icon has a `help` tooltip since it
-            // renders label-free. The pinned width fits the widest label
-            // (`[refactor]`), so a short badge no longer leaves the row's
-            // background with an unpainted channel beside it.
-            HStack(spacing: 4) {
+            // `⌂ kept` marker. The `**Worktree:**` field (and thus
+            // `isKeptWorktree`) can ALSO appear on in-progress tasks executing in
+            // a worktree, so it is `showsKeptWorktreeMarker` — not
+            // `isKeptWorktree` — that restricts the display to review-state rows
+            // (#086). The icon has a `help` tooltip since it renders label-free.
+            // The pinned width fits the widest label (`[refactor]`) PLUS the
+            // marker and its gap (`RowColumns.typeWidth`), so a short badge no
+            // longer leaves the row's background with an unpainted channel beside
+            // it and the widest badge's icon never overflows onto the title.
+            HStack(spacing: ProjectCard.rowColumns.typeCellSpacing) {
                 Text(typeText)
                     .font(.system(.body, design: .monospaced))
                     .foregroundStyle(.tertiary)
@@ -821,7 +837,7 @@ struct ProjectCard: View {
                     // for the rendered face (see `monospaceCharacterWidth`).
                     .lineLimit(1)
                     .fixedSize(horizontal: true, vertical: false)
-                if row.task.isKeptWorktree {
+                if row.task.showsKeptWorktreeMarker {
                     Image(systemName: TaskStatusIndicator.keptWorktreeSymbol)
                         .imageScale(.small)
                         .foregroundStyle(.secondary)

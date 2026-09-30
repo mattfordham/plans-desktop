@@ -260,6 +260,17 @@ struct Task: Equatable {
             && lhs.isBacklogged == rhs.isBacklogged
             && lhs.modified == rhs.modified
     }
+
+    /// Whether the muted house (`⌂ kept`) marker should be DISPLAYED for this
+    /// task (#086). The `**Worktree:**` field — and thus `isKeptWorktree` — is
+    /// written by `plan-execute` and survives on IN-PROGRESS tasks too, so
+    /// `isKeptWorktree` alone over-triggers the marker. A *kept* worktree is a
+    /// post-execute artifact awaiting review, so the marker is meaningful only on
+    /// review-state rows. This is a PURE derived property (no stored field, not
+    /// part of `==`): it gates display only, from existing state.
+    var showsKeptWorktreeMarker: Bool {
+        isKeptWorktree && (status == .review || status == .inReview)
+    }
 }
 
 /// A project's parsed tasks plus a per-status count summary (§5.5 step 7).

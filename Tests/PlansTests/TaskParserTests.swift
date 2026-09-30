@@ -149,6 +149,76 @@ final class TaskParserTests: XCTestCase {
         XCTAssertFalse(task.isKeptWorktree)
     }
 
+    // MARK: - Single-file: showsKeptWorktreeMarker (#086)
+
+    func testShowsKeptWorktreeMarkerTrueWhenKeptAndReview() {
+        let text = """
+        # Title
+
+        **ID:** 007
+        **Status:** review
+        **Worktree:** /Users/x/.worktrees/007-x
+        """
+        let task = TaskParser().parse(filename: "007-x.md", text: text, isCompletedDir: false)
+        XCTAssertTrue(task.showsKeptWorktreeMarker)
+    }
+
+    func testShowsKeptWorktreeMarkerTrueWhenKeptAndInReview() {
+        let text = """
+        # Title
+
+        **ID:** 007
+        **Status:** in-review
+        **Worktree:** /Users/x/.worktrees/007-x
+        """
+        let task = TaskParser().parse(filename: "007-x.md", text: text, isCompletedDir: false)
+        XCTAssertTrue(task.showsKeptWorktreeMarker)
+    }
+
+    func testShowsKeptWorktreeMarkerFalseWhenInProgressWithLiveWorktree() {
+        // Mirrors testAllFrontmatterFieldsPresent: an in-progress task can carry
+        // a live **Worktree:** field, but the marker must NOT display there.
+        let text = """
+        # Title
+
+        **ID:** 007
+        **Created:** 2026-06-04T14:41
+        **Type:** feature
+        **Status:** in-progress
+        **Branch:** feature/007-x
+        **Worktree:** /Users/x/.worktrees/007-x
+        **Blocked by:** 001 002
+        """
+        let task = TaskParser().parse(filename: "007-x.md", text: text, isCompletedDir: false)
+        XCTAssertTrue(task.isKeptWorktree)
+        XCTAssertFalse(task.showsKeptWorktreeMarker)
+    }
+
+    func testShowsKeptWorktreeMarkerFalseWhenNotKeptRegardlessOfStatus() {
+        let text = """
+        # Title
+
+        **ID:** 007
+        **Status:** review
+        """
+        let task = TaskParser().parse(filename: "007-x.md", text: text, isCompletedDir: false)
+        XCTAssertFalse(task.isKeptWorktree)
+        XCTAssertFalse(task.showsKeptWorktreeMarker)
+    }
+
+    func testShowsKeptWorktreeMarkerFalseWhenStatusNil() {
+        let text = """
+        # Title
+
+        **ID:** 007
+        **Worktree:** /Users/x/.worktrees/007-x
+        """
+        let task = TaskParser().parse(filename: "007-x.md", text: text, isCompletedDir: false)
+        XCTAssertTrue(task.isKeptWorktree)
+        XCTAssertNil(task.status)
+        XCTAssertFalse(task.showsKeptWorktreeMarker)
+    }
+
     func testAllFrontmatterFieldsAbsent() {
         let task = TaskParser().parse(
             filename: "008-x.md",

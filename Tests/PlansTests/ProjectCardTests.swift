@@ -313,6 +313,31 @@ final class ProjectCardTests: XCTestCase {
         )
     }
 
+    /// The type column must fit the widest label AND the kept-worktree house
+    /// marker beside it (#086). The marker is rendered INSIDE the fixed-width
+    /// type cell, appended after the `[refactor]` badge with the cell's
+    /// inter-element gap; `.frame(width:)` does not clip, so if the budget omits
+    /// the icon and gap the house overflows the cell and overlaps the title.
+    func testTypeColumnFitsWidestLabelPlusKeptMarker() {
+        let font = NSFont.monospacedSystemFont(
+            ofSize: NSFont.preferredFont(forTextStyle: .body).pointSize,
+            weight: .regular
+        )
+        let widest = "[\(TaskType.refactor.label)]"
+        let measured = (widest as NSString)
+            .size(withAttributes: [.font: font])
+            .width
+
+        XCTAssertGreaterThanOrEqual(
+            ProjectCard.rowColumns.typeWidth,
+            measured
+                + ProjectCard.rowColumns.keptMarkerWidth
+                + ProjectCard.rowColumns.typeCellSpacing,
+            "Type column must fit [refactor] PLUS the kept-worktree house marker "
+                + "and the type-cell gap, or the icon overflows and overlaps the title"
+        )
+    }
+
     /// The status and id columns are pinned too, so all three leading columns
     /// align across rows exactly as the Grid used to make them.
     func testLeadingColumnsArePinned() {
