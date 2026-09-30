@@ -309,10 +309,19 @@ struct ProjectCard: View {
         /// Spacing between columns. This is `HStack` spacing INSIDE the row's
         /// background, so it separates columns without breaking the band.
         var columnGap: CGFloat = 8
-        /// Horizontal inset applied INSIDE the row's background, so the band
-        /// extends past the leading status glyph and the trailing action glyph
-        /// rather than stopping flush against them.
-        var rowHorizontalPadding: CGFloat = 8
+        /// The card's horizontal gutter (#087). Every NON-row element — header,
+        /// footer, empty state, the "Backlogged" section label, and capture rows —
+        /// is inset by this so it stays aligned with the row text, while the
+        /// plan-row band ITSELF bleeds edge-to-edge to the card's rounded inner
+        /// edge (the card no longer wraps all content in one horizontal padding).
+        /// The single source of truth for that gutter.
+        var cardHorizontalPadding: CGFloat = 14
+        /// Horizontal inset applied INSIDE the (now full-bleed) row background,
+        /// so the band extends past the leading status glyph and the trailing
+        /// action glyph rather than stopping flush against them. Set to match the
+        /// card gutter (#087) so the row TEXT lines up with the re-inset
+        /// header/footer content even though the band paints edge-to-edge.
+        var rowHorizontalPadding: CGFloat = 14
     }
 
     /// The single source of truth for plan-row column widths, consumed by
@@ -390,8 +399,14 @@ struct ProjectCard: View {
         // Bottom padding matches the header's 14pt top gap. The footer is now
         // always the bottom-most element (a plain HStack with no vertical padding
         // of its own), so it always needs the full 14pt.
+        //
+        // #087: NO card-wide horizontal padding. The plan-row band must bleed
+        // edge-to-edge to the card's rounded inner edge, so instead of one shared
+        // horizontal gutter here, each NON-row element (header, footer, empty
+        // state, "Backlogged" label, capture rows) re-applies
+        // `rowColumns.cardHorizontalPadding` itself — leaving only the plan rows
+        // (and the dividers) full width.
         .padding(.top, 14)
-        .padding(.horizontal, 14)
         .padding(.bottom, 14)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(.background.secondary, in: RoundedRectangle(cornerRadius: 12))
@@ -473,6 +488,10 @@ struct ProjectCard: View {
                     .textCase(.uppercase)
             }
             .foregroundStyle(.secondary)
+            // #087: inset the section LABEL by the card gutter so it aligns with
+            // the header/footer; the backlog `planRow`s below stay full-bleed like
+            // the active rows.
+            .padding(.horizontal, ProjectCard.rowColumns.cardHorizontalPadding)
 
             VStack(spacing: 2) {
                 ForEach(Array(rows.enumerated()), id: \.element.id) { index, row in
@@ -534,6 +553,8 @@ struct ProjectCard: View {
                 }
             }
         }
+        // #087: re-inset by the card gutter — only the plan rows bleed full width.
+        .padding(.horizontal, ProjectCard.rowColumns.cardHorizontalPadding)
     }
 
     /// #076: the per-card task-type filter control, placed in the header between
@@ -624,6 +645,9 @@ struct ProjectCard: View {
                     captureRow(run)
                 }
             }
+            // #087: capture rows are non-plan-row content, so re-inset by the card
+            // gutter (only the plan rows bleed full width).
+            .padding(.horizontal, ProjectCard.rowColumns.cardHorizontalPadding)
         }
     }
 
@@ -687,6 +711,8 @@ struct ProjectCard: View {
             focusToggle
             starToggle
         }
+        // #087: re-inset by the card gutter — only the plan rows bleed full width.
+        .padding(.horizontal, ProjectCard.rowColumns.cardHorizontalPadding)
     }
 
     /// The card's git status — the branch glyph + name plus
@@ -733,6 +759,9 @@ struct ProjectCard: View {
             Text(typeFilter == nil ? "No outstanding plans" : "No matching plans")
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
+                // #087: the empty state is non-row content, so re-inset by the
+                // card gutter (only the plan rows bleed full width).
+                .padding(.horizontal, ProjectCard.rowColumns.cardHorizontalPadding)
         } else {
             // #068 review: a `VStack` of `HStack` rows, NOT a `Grid`.
             //

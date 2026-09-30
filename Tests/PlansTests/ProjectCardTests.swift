@@ -373,4 +373,32 @@ final class ProjectCardTests: XCTestCase {
             "The band must extend past the row content on the leading/trailing edges"
         )
     }
+
+    // MARK: - full-bleed row band (#087)
+
+    /// #087: only the plan-row zebra/hover band bleeds to the card's rounded
+    /// inner edge; every non-row element (header, footer, empty state, the
+    /// "Backlogged" label, capture rows) is re-inset by this single card gutter
+    /// so it stays aligned with the row text. The gutter must be a real, positive
+    /// inset — a zero gutter would leave the header/footer flush against the card
+    /// edge.
+    func testCardHorizontalPaddingIsPositive() {
+        XCTAssertGreaterThan(
+            ProjectCard.rowColumns.cardHorizontalPadding, 0,
+            "The card gutter must inset the non-row content from the card edge"
+        )
+    }
+
+    /// #087: the bled row band paints edge-to-edge, so its INNER text inset must
+    /// be at least the card gutter for the row text to line up with the re-inset
+    /// header/footer content. If the band's inset were smaller than the gutter,
+    /// the row text would sit left of the header/footer text.
+    func testRowInsetKeepsBandTextAlignedWithCardContent() {
+        XCTAssertGreaterThanOrEqual(
+            ProjectCard.rowColumns.rowHorizontalPadding,
+            ProjectCard.rowColumns.cardHorizontalPadding,
+            "The bled band's text inset must match the card gutter so row text "
+                + "aligns with the re-inset header/footer content"
+        )
+    }
 }
