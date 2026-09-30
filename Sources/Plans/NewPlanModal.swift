@@ -421,21 +421,15 @@ struct NewPlanModal: View {
         )
 
         // If any images are staged, persist each one's PNG bytes under
-        // Application Support (NEVER `.plans/`, §2), collect the saved URLs in
-        // staging order, then append all markdown references to the description in
-        // ONE call to the multi-URL flatten helper (#069). A per-image save
-        // failure is logged and skipped — it must never crash or block the
-        // capture, so the surviving images still get referenced.
-        let imageStore = CaptureImageStore()
-        var savedURLs: [URL] = []
-        for imageData in imageDatas {
-            do {
-                savedURLs.append(try imageStore.saveImage(imageData))
-            } catch {
-                modalLog.error("modal Capture: failed to save staged image, skipping it: \(error.localizedDescription, privacy: .public)")
-            }
-        }
-        let description = CaptureImageStore.flattenDescription(trimmed, imageURLs: savedURLs)
+        // Application Support (NEVER `.plans/`, §2) and append all markdown
+        // references to the description via the shared helper (#085), which
+        // saves in staging order and logs-and-skips any per-image save failure so
+        // one bad blob can never crash or block the capture. Empty staging
+        // returns the trimmed description unchanged.
+        let description = CaptureImageStore().saveAndFlatten(
+            description: trimmed,
+            imageDatas: imageDatas
+        )
 
         runner.capture(
             projectPath: projectPath,

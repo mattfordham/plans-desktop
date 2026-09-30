@@ -1,4 +1,7 @@
 import Foundation
+import OSLog
+
+private let captureImageLog = Logger(subsystem: "com.plans.desktop", category: "CaptureImageStore")
 
 /// Persists pasted/dropped images for the "New Plan" capture form (#048) into an
 /// **app-owned** location and flattens an image reference into a plan
@@ -111,5 +114,32 @@ struct CaptureImageStore {
         imageURLs.reduce(description) { partial, url in
             flattenDescription(partial, imageURL: url)
         }
+    }
+
+    /// The end-to-end submit-path helper (#085): saves each staged image's PNG
+    /// bytes under Application Support (via `saveImage`, NEVER `.plans/`, §2),
+    /// collecting the saved URLs in staging order, then returns `description`
+    /// with one markdown image reference appended per saved image (via the
+    /// multi-URL `flattenDescription`).
+    ///
+    /// A per-image save failure is LOGGED AND SKIPPED — never thrown — so one bad
+    /// blob can't crash or block the capture; the surviving images still get
+    /// referenced. An empty `imageDatas` returns `description` unchanged (no
+    /// disk writes, no reference appended).
+    ///
+    /// Shared by `NewPlanModal`, `ElaborateModal`, and `ReElaborateModal` so the
+    /// three capture surfaces stage images identically. An INSTANCE method so
+    /// tests can inject `applicationSupportDirectory` and assert the writes land
+    /// in a temp dir rather than the real container.
+    func saveAndFlatten(description: String, imageDatas: [Data]) -> String {
+        var savedURLs: [URL] = []
+        for imageData in imageDatas {
+            do {
+                savedURLs.append(try saveImage(imageData))
+            } catch {
+                captureImageLog.error("failed to save staged image, skipping it: \(error.localizedDescription, privacy: .public)")
+            }
+        }
+        return Self.flattenDescription(description, imageURLs: savedURLs)
     }
 }

@@ -1229,6 +1229,53 @@ final class PlansStoreTests: XCTestCase {
         XCTAssertEqual(result, input)
     }
 
+    func testSaveAndFlattenReturnsDescriptionUnchangedForEmptyImageDatas() {
+        let appSupport = tempDir.appendingPathComponent("AppSupport")
+        let imageStore = CaptureImageStore(applicationSupportDirectory: appSupport)
+
+        let input = "Fix the login bug"
+        let result = imageStore.saveAndFlatten(description: input, imageDatas: [])
+
+        XCTAssertEqual(result, input)
+    }
+
+    func testSaveAndFlattenSavesEachImageAndAppendsReferencesInOrder() throws {
+        let appSupport = tempDir.appendingPathComponent("AppSupport")
+        let imageStore = CaptureImageStore(applicationSupportDirectory: appSupport)
+
+        let first = Data([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A])
+        let second = Data([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0B])
+
+        let result = imageStore.saveAndFlatten(
+            description: "Fix the login bug",
+            imageDatas: [first, second]
+        )
+
+        // One markdown image reference appended per saved image.
+        XCTAssertTrue(result.hasPrefix("Fix the login bug"))
+        let refCount = result.components(separatedBy: "![pasted image](file://").count - 1
+        XCTAssertEqual(refCount, 2)
+
+        // Extract the saved file paths from the flattened references, in order.
+        let refs = result
+            .components(separatedBy: "![pasted image](file://")
+            .dropFirst()
+            .map { $0.components(separatedBy: ")")[0] }
+        XCTAssertEqual(refs.count, 2)
+
+        // Each saved file exists under the injected AppSupport temp dir and is
+        // NOT inside any `.plans/` directory (§2 hard constraint). The bytes
+        // round-trip in staging order.
+        let expectedBytes = [first, second]
+        for (index, path) in refs.enumerated() {
+            XCTAssertTrue(FileManager.default.fileExists(atPath: path))
+            XCTAssertTrue(path.hasPrefix(appSupport.path))
+            XCTAssertFalse(path.contains("/.plans/"))
+            XCTAssertFalse(URL(fileURLWithPath: path).pathComponents.contains(".plans"))
+            XCTAssertEqual(try Data(contentsOf: URL(fileURLWithPath: path)), expectedBytes[index])
+        }
+    }
+
     func testClearManualOrderRevertsFlagButKeepsOverride() throws {
         let reader = try makeReader(projectPaths: [])
         let defaults = makeDefaults()
