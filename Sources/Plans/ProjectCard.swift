@@ -316,12 +316,16 @@ struct ProjectCard: View {
         /// edge (the card no longer wraps all content in one horizontal padding).
         /// The single source of truth for that gutter.
         var cardHorizontalPadding: CGFloat = 14
-        /// Horizontal inset applied INSIDE the (now full-bleed) row background,
-        /// so the band extends past the leading status glyph and the trailing
-        /// action glyph rather than stopping flush against them. Set to match the
-        /// card gutter (#087) so the row TEXT lines up with the re-inset
-        /// header/footer content even though the band paints edge-to-edge.
-        var rowHorizontalPadding: CGFloat = 14
+        /// Margin between the card's LEADING edge and the start of the row band
+        /// (#087 review), so the band doesn't sit flush against the card's left
+        /// border. The band still bleeds to the trailing edge.
+        var rowBandLeadingMargin: CGFloat = 6
+        /// Horizontal inset applied INSIDE the row background, so the band
+        /// extends past the leading status glyph and the trailing action glyph
+        /// rather than stopping flush against them. Together with
+        /// `rowBandLeadingMargin` it sums to the card gutter (#087) so the row
+        /// TEXT lines up with the re-inset header/footer content.
+        var rowHorizontalPadding: CGFloat = 8
     }
 
     /// The single source of truth for plan-row column widths, consumed by
@@ -930,6 +934,9 @@ struct ProjectCard: View {
             hoveredRowID = hovering ? row.task.id : nil
         }
         .animation(.easeOut(duration: 0.12), value: hoveredRowID)
+        // #087 review: applied AFTER the background so the band stops short of
+        // the card's leading edge while still bleeding to the trailing edge.
+        .padding(.leading, ProjectCard.rowColumns.rowBandLeadingMargin)
     }
 
     /// The trailing action cell for a plan row. While this row's task is being

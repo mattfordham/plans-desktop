@@ -389,16 +389,26 @@ final class ProjectCardTests: XCTestCase {
         )
     }
 
-    /// #087: the bled row band paints edge-to-edge, so its INNER text inset must
-    /// be at least the card gutter for the row text to line up with the re-inset
-    /// header/footer content. If the band's inset were smaller than the gutter,
-    /// the row text would sit left of the header/footer text.
+    /// #087 review: the row band stops short of the card's LEADING edge by a
+    /// small margin (it still bleeds to the trailing edge), so it doesn't sit
+    /// flush against the card's left border.
+    func testRowBandHasLeadingMargin() {
+        XCTAssertGreaterThan(
+            ProjectCard.rowColumns.rowBandLeadingMargin, 0,
+            "The row band must stop short of the card's leading edge"
+        )
+    }
+
+    /// #087: the band's leading margin plus its inner text inset must equal the
+    /// card gutter, so the row text lines up with the re-inset header/footer
+    /// content.
     func testRowInsetKeepsBandTextAlignedWithCardContent() {
-        XCTAssertGreaterThanOrEqual(
-            ProjectCard.rowColumns.rowHorizontalPadding,
+        XCTAssertEqual(
+            ProjectCard.rowColumns.rowBandLeadingMargin
+                + ProjectCard.rowColumns.rowHorizontalPadding,
             ProjectCard.rowColumns.cardHorizontalPadding,
-            "The bled band's text inset must match the card gutter so row text "
-                + "aligns with the re-inset header/footer content"
+            "Band margin + band text inset must match the card gutter so row "
+                + "text aligns with the re-inset header/footer content"
         )
     }
 }
