@@ -74,6 +74,15 @@ struct PlanDetailView: View {
     /// `showReElaborate` since the two actions are gated to disjoint statuses.
     @State private var showElaborate = false
 
+    /// Whether the pending direct-"Execute" sheet (#088) is presented. Raised by
+    /// the header's "Execute" action for a PENDING plan (only shown for a pending,
+    /// non-blocked, non-backlogged task — `canExecutePending`) and lowered by the
+    /// sheet's own Cancel/Execute. Drives the `ExecutePendingModal` for THIS view's
+    /// task, which hands the plan to `plan-execute` to auto-elaborate inline and
+    /// then execute. Kept separate from `showExecute` since the two actions gate to
+    /// disjoint statuses (pending vs elaborated).
+    @State private var showExecutePending = false
+
     /// Whether the "Execute" sheet (#078) is presented. Raised by the "Execute"
     /// header action (only shown for an elaborated/in-progress, non-blocked task)
     /// and lowered by the sheet's own Cancel/Execute. Drives the `ExecuteModal`
@@ -160,6 +169,17 @@ struct PlanDetailView: View {
                 ElaborateModal(taskID: row.task.id, projectPath: row.projectPath)
             }
         }
+        // The pending direct-"Execute" sheet (#088). Same row-resolution shape as
+        // the sheets around it: the Execute action that raises it only renders
+        // inside the `if let row` header for a pending plan, so the unwrap is safe.
+        // The `ExecutePendingModal` hands the OPTIONAL guidance plus the Deep and
+        // Keep flags to the runner in `.execute` mode, which auto-elaborates the
+        // plan inline and then executes it.
+        .sheet(isPresented: $showExecutePending) {
+            if let row {
+                ExecutePendingModal(taskID: row.task.id, projectPath: row.projectPath)
+            }
+        }
         // The "Execute" sheet (#078). Same row-resolution shape as the two sheets
         // above: the Execute action that raises it only renders inside the `if
         // let row` header, so the unwrap is safe. The `ExecuteModal` hands the
@@ -244,6 +264,26 @@ struct PlanDetailView: View {
                             showElaborate = true
                         } label: {
                             Label("Elaborate", systemImage: "sparkles")
+                        }
+                    }
+
+                    // "Execute" (direct) — hands a PENDING plan straight to the
+                    // bundled runner's worktree-isolated `plan-execute` mode,
+                    // which auto-elaborates it inline (optionally Deep + with
+                    // guidance) and then executes it (#088). Available only for a
+                    // pending, non-blocked, non-backlogged task — the same gate as
+                    // Elaborate above — so a pending plan shows Elaborate + Execute
+                    // side by side. Opens the `ExecutePendingModal` rather than
+                    // firing the run straight off the button. `canExecutePending`
+                    // is intentionally disjoint from `canWork` (which stays
+                    // elaborated-only), preserving #027's in-progress exclusion.
+                    if Self.canExecutePending(status: row.task.status,
+                                              isBlocked: row.task.isBlocked,
+                                              isBacklogged: row.task.isBacklogged) {
+                        Button {
+                            showExecutePending = true
+                        } label: {
+                            Label("Execute", systemImage: "play.fill")
                         }
                     }
 
@@ -464,6 +504,26 @@ struct PlanDetailView: View {
     /// status here.
     static func canElaborate(status: TaskStatus?, isBlocked: Bool,
                              isBacklogged: Bool = false) -> Bool {
+        guard !isBacklogged else { return false }
+        guard !isBlocked else { return false }
+        return status == .pending
+    }
+
+    /// Pure predicate for the "direct-Execute" action's availability (#088).
+    /// Available only for a `pending` task that is not blocked and not
+    /// backlogged — exactly the same gate as `canElaborate`, because this action
+    /// is the one-click shortcut that hands a pending plan to `plan-execute`,
+    /// which auto-elaborates it inline (optionally with extra guidance and the
+    /// Deep reasoning pass) and THEN executes it, leaving it in `review`.
+    ///
+    /// This is INTENTIONALLY DISJOINT from `canWork`: `canWork` stays
+    /// elaborated-only so an `in-progress` plan never re-offers Execute (#027's
+    /// guarantee). Pending plans are excluded from `canWork` and handled solely
+    /// here, so the two predicates never both fire for the same status and #027
+    /// is preserved. Backlog is withheld for the same reason as `canElaborate`:
+    /// driving work the user has parked is incoherent — restore it first.
+    static func canExecutePending(status: TaskStatus?, isBlocked: Bool,
+                                  isBacklogged: Bool = false) -> Bool {
         guard !isBacklogged else { return false }
         guard !isBlocked else { return false }
         return status == .pending

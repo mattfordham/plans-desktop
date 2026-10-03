@@ -105,6 +105,14 @@ struct ProjectCard: View {
     /// executable rows are present.
     @State private var executeRequest: ExecuteRequest? = nil
 
+    /// The pending direct-"Execute" request (#088), or `nil` when no direct-Execute
+    /// sheet is open. Set by a pending (un-elaborated) row's `play.fill` glyph to
+    /// that row's task id + project path; an `.sheet(item:)` keyed on it presents
+    /// the `ExecutePendingModal` for exactly that task. Mirrors `executeRequest` —
+    /// a distinct `Identifiable` struct so this sheet stays independently keyed
+    /// from the elaborated-plan Execute sheet and can never present against it.
+    @State private var executePendingRequest: ExecutePendingRequest? = nil
+
     /// #076: the active per-card task-type filter, or `nil` for "All" (no
     /// filtering). Purely view-local transient state (like `hoveredRowID` and the
     /// sheet requests) — it narrows only the body rows shown by this card and is
@@ -446,6 +454,14 @@ struct ProjectCard: View {
         // off it spawns exactly the run the bare glyph used to fire.
         .sheet(item: $executeRequest) { request in
             ExecuteModal(taskID: request.taskID, projectPath: request.projectPath)
+        }
+        // The pending direct-"Execute" sheet (#088), keyed on the requesting
+        // pending row's task the same way the three sheets above are. The
+        // `ExecutePendingModal` hands the OPTIONAL guidance plus the Deep and Keep
+        // flags to the runner in `.execute` mode (the sole `.plans/` writer, §2),
+        // which auto-elaborates the plan inline and then executes it.
+        .sheet(item: $executePendingRequest) { request in
+            ExecutePendingModal(taskID: request.taskID, projectPath: request.projectPath)
         }
     }
 
@@ -1004,17 +1020,30 @@ struct ProjectCard: View {
             } else if PlanDetailView.canElaborate(status: row.task.status,
                                                   isBlocked: row.task.isBlocked,
                                                   isBacklogged: row.task.isBacklogged) {
-                // Elaborate now opens the `ElaborateModal` via the card's
-                // `.sheet(item:)` rather than firing the run straight off the
-                // glyph (#074), so the user can attach optional guidance and
-                // pick Deep first. Submitting the sheet with an empty box
-                // reproduces the previous fire-and-forget behaviour exactly.
-                RowActionGlyph(systemImage: "sparkles", help: "Elaborate this plan") {
-                    cardLog.notice("card Elaborate clicked: task=\(row.task.id, privacy: .public)")
-                    elaborateRequest = ElaborateRequest(
-                        taskID: row.task.id,
-                        projectPath: row.projectPath
-                    )
+                // A pending, non-blocked task surfaces BOTH Elaborate and a
+                // direct-Execute glyph (#088), mirroring the elaborated-row
+                // Refine+Execute pair below: a tight `HStack(spacing: -4)` of two
+                // `RowActionGlyph`s (each a 22pt cell with built-in 8pt leading
+                // padding) so they read as a tight pair within the row's pinned
+                // height. Elaborate (unchanged, #074) opens the `ElaborateModal`
+                // for an optional-guidance + Deep elaboration; direct-Execute
+                // opens the `ExecutePendingModal` (#088), which hands the plan to
+                // `plan-execute` to auto-elaborate inline and then execute.
+                HStack(spacing: -4) {
+                    RowActionGlyph(systemImage: "sparkles", help: "Elaborate this plan") {
+                        cardLog.notice("card Elaborate clicked: task=\(row.task.id, privacy: .public)")
+                        elaborateRequest = ElaborateRequest(
+                            taskID: row.task.id,
+                            projectPath: row.projectPath
+                        )
+                    }
+                    RowActionGlyph(systemImage: "play.fill", help: "Execute this plan directly") {
+                        cardLog.notice("card direct-Execute clicked: task=\(row.task.id, privacy: .public)")
+                        executePendingRequest = ExecutePendingRequest(
+                            taskID: row.task.id,
+                            projectPath: row.projectPath
+                        )
+                    }
                 }
             } else if PlanDetailView.canWork(status: row.task.status,
                                              isBlocked: row.task.isBlocked,
@@ -1123,6 +1152,17 @@ private struct ElaborateRequest: Identifiable {
 /// three sheets stay independently keyed and can never be presented against each
 /// other's state.
 private struct ExecuteRequest: Identifiable {
+    let taskID: String
+    let projectPath: String
+    var id: String { taskID }
+}
+
+/// A pending direct-"Execute" request (#088): the task + project a tapped pending
+/// `play.fill` glyph targets, driving the card's fourth `.sheet(item:)`. A distinct
+/// type from `ExecuteRequest`/`ElaborateRequest`/`ReElaborateRequest` (rather than a
+/// shared one) so the four sheets stay independently keyed and can never be
+/// presented against each other's state.
+private struct ExecutePendingRequest: Identifiable {
     let taskID: String
     let projectPath: String
     var id: String { taskID }

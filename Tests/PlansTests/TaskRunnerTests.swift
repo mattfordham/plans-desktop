@@ -635,6 +635,88 @@ final class TaskRunnerTests: XCTestCase {
         XCTAssertFalse(guidanceOnly.deep)
     }
 
+    // MARK: - Direct-execute of pending plans (#088)
+
+    /// #088 opened `.execute`'s description channel so the direct-Execute dialog's
+    /// optional guidance can ride into the inline auto-elaboration pass. The pure
+    /// `RunMode.usesDescription` flag is exactly what `TaskRun.spawn` consults to
+    /// emit `--description`, so it MUST now report true for `.execute`. Asserted
+    /// directly — no `node` process is spawned.
+    func testExecuteUsesDescription() {
+        XCTAssertTrue(RunMode.execute.usesDescription)
+    }
+
+    /// `PlanDetailView.canExecutePending` is the pure predicate behind the pending
+    /// direct-Execute action's availability (#088). Available only for a
+    /// `pending`, non-blocked, non-backlogged task — the same gate as
+    /// `canElaborate`, and intentionally DISJOINT from `canWork` (which stays
+    /// elaborated-only, preserving #027's in-progress exclusion). Asserted true for
+    /// the one eligible shape and false for every other status, when blocked, and
+    /// when backlogged.
+    @MainActor
+    func testCanExecutePendingGating() {
+        // Pending, not blocked, not backlogged → available.
+        XCTAssertTrue(PlanDetailView.canExecutePending(status: .pending, isBlocked: false))
+
+        // Every non-pending status → unavailable (direct-execute only applies to
+        // an un-elaborated, pending plan).
+        XCTAssertFalse(PlanDetailView.canExecutePending(status: .elaborated, isBlocked: false))
+        XCTAssertFalse(PlanDetailView.canExecutePending(status: .inProgress, isBlocked: false))
+        XCTAssertFalse(PlanDetailView.canExecutePending(status: .review, isBlocked: false))
+        XCTAssertFalse(PlanDetailView.canExecutePending(status: .inReview, isBlocked: false))
+        XCTAssertFalse(PlanDetailView.canExecutePending(status: .completed, isBlocked: false))
+        XCTAssertFalse(PlanDetailView.canExecutePending(status: nil, isBlocked: false))
+
+        // Blocked → unavailable even when pending.
+        XCTAssertFalse(PlanDetailView.canExecutePending(status: .pending, isBlocked: true))
+
+        // Backlogged → unavailable even when pending and non-blocked (a parked
+        // plan must be restored before it can be driven).
+        XCTAssertFalse(PlanDetailView.canExecutePending(status: .pending, isBlocked: false, isBacklogged: true))
+    }
+
+    /// `ExecutePendingModal`'s submit path: `TaskRunner.run(... mode: .execute,
+    /// description:, deep:, keep:)` must register a `TaskRun` that carries ALL
+    /// THREE channels, since they are exactly what `TaskRun.spawn` reads to emit
+    /// `--description`, the valueless `--deep`, and the valueless `--keep`. This
+    /// covers the `run(...)` entry point (distinct from the composition test
+    /// below), mirroring `testExecuteRunViaRunCarriesKeepFlag`. Asserted on the
+    /// registered run's stored properties rather than by spawning a real process.
+    @MainActor
+    func testExecutePendingRunViaRunCarriesDescriptionDeepAndKeep() {
+        let runner = TaskRunner()
+        runner.run(projectPath: "/some/project", taskID: "088", mode: .execute,
+                   description: "Prioritise the migration path", deep: true, keep: true)
+
+        let run = runner.run(for: "088")
+        XCTAssertNotNil(run)
+        XCTAssertEqual(run?.mode, .execute)
+        XCTAssertEqual(run?.taskID, "088")
+        XCTAssertEqual(run?.description, "Prioritise the migration path")
+        XCTAssertEqual(run?.deep, true)
+        XCTAssertEqual(run?.keep, true)
+    }
+
+    /// The direct-Execute dialog's fullest submission at the `TaskRun` level: an
+    /// `.execute` run carrying guidance AND `deep: true` AND `keep: true` retains
+    /// each independently, so `spawn` emits `--task-id` + `--description` + the
+    /// valueless `--deep` + the valueless `--keep` together. This is the
+    /// composition #088 opened up — before it, `.execute` was id (+keep) only and
+    /// could carry no guidance or deep. Mirrors
+    /// `testElaborateRunCarriesDescriptionAndDeepTogether`.
+    @MainActor
+    func testExecuteRunCarriesDescriptionDeepAndKeepTogether() {
+        let run = TaskRun(taskID: "088", mode: .execute,
+                          description: "Honour the offline-first guidance",
+                          deep: true, keep: true)
+        XCTAssertEqual(run.taskID, "088")
+        XCTAssertEqual(run.mode, .execute)
+        XCTAssertEqual(run.description, "Honour the offline-first guidance")
+        XCTAssertTrue(run.deep)
+        XCTAssertTrue(run.keep)
+        XCTAssertFalse(run.isRunning)
+    }
+
     // MARK: - Multiple back-to-back captures (task #029)
 
     /// `capture(...)` now keys every submission under a UNIQUE per-run id of the
@@ -734,11 +816,13 @@ final class TaskRunnerTests: XCTestCase {
 
     /// `RunMode.usesDescription` is the pure flag `TaskRun.spawn` consults to pass
     /// `--description <text>`: true for the three description-driven modes
-    /// (`.capture`, `.captureElaborate`, `.executeYolo`) and for the two
-    /// existing-task modes that can carry guidance (`.reElaborate`,
-    /// `.elaborate`); false for `.execute` / `.delete`, which are fully
-    /// identified by their task id alone. Asserting it directly verifies the
-    /// description wiring without spawning a real `node` process.
+    /// (`.capture`, `.captureElaborate`, `.executeYolo`), the two existing-task
+    /// modes that can carry guidance (`.reElaborate`, `.elaborate`), AND — since
+    /// #088 — `.execute`, whose description is OPTIONAL (it carries the direct-
+    /// execute dialog's guidance folded into an inline elaboration pass); false
+    /// for `.delete`, which is fully identified by its task id alone. Asserting it
+    /// directly verifies the description wiring without spawning a real `node`
+    /// process.
     func testRunModeUsesDescriptionFlag() {
         XCTAssertTrue(RunMode.capture.usesDescription)
         XCTAssertTrue(RunMode.captureElaborate.usesDescription)
@@ -749,8 +833,10 @@ final class TaskRunnerTests: XCTestCase {
         // the flag only says `spawn` MAY emit `--description`, and it does so
         // solely when a non-empty one was actually supplied.
         XCTAssertTrue(RunMode.elaborate.usesDescription)
+        // #088: execute now opens the same OPTIONAL channel — the direct-Execute
+        // dialog's guidance rides it into the inline auto-elaboration pass.
+        XCTAssertTrue(RunMode.execute.usesDescription)
 
-        XCTAssertFalse(RunMode.execute.usesDescription)
         // delete names an EXISTING task by id; there is no free text to pass.
         XCTAssertFalse(RunMode.delete.usesDescription)
     }

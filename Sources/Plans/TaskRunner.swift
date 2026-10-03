@@ -174,8 +174,11 @@ enum RunMode: String {
     /// passes `--description <text>`. True for the description-driven modes
     /// (`.capture` / `.captureElaborate` / `.executeYolo`), for `.reElaborate`
     /// (which folds the user's refinement guidance in alongside its `--task-id`),
-    /// and for `.elaborate`. False for the plain existing-task modes `.execute` /
-    /// `.delete`, which are fully identified by their task id alone. Pure flag
+    /// for `.elaborate`, and for `.execute` (which carries the direct-execute
+    /// dialog's additional-prompting guidance, folded into the inline elaboration
+    /// pass that `plan-execute` runs on a pending plan before implementing it).
+    /// False for the plain existing-task modes `.delete` / `.backlog` /
+    /// `.restore`, which are fully identified by their task id alone. Pure flag
     /// (no I/O) so the arg-shape contract is unit-testable without spawning a
     /// `node` process.
     ///
@@ -183,17 +186,18 @@ enum RunMode: String {
     /// mandatory: `spawn` emits `--description` only when a non-empty one is
     /// actually present. For the capture modes and `.reElaborate` the caller
     /// always supplies one (they are meaningless without it), but `.elaborate`'s
-    /// description is OPTIONAL — a bare `/plan-elaborate <id>` run passes `nil`
-    /// and simply omits the flag, exactly as before.
+    /// and `.execute`'s descriptions are OPTIONAL — a bare `/plan-elaborate <id>`
+    /// or `/plan-execute <id>` run passes `nil` and simply omits the flag,
+    /// exactly as before.
     ///
     /// This is INDEPENDENT of `usesTaskID`: a mode can need both (`.reElaborate`,
-    /// `.elaborate`) or just one — they are not an either/or, so `spawn` consults
-    /// each flag on its own.
+    /// `.elaborate`, `.execute`) or just one — they are not an either/or, so
+    /// `spawn` consults each flag on its own.
     var usesDescription: Bool {
         switch self {
-        case .capture, .captureElaborate, .executeYolo, .reElaborate, .elaborate:
+        case .capture, .captureElaborate, .executeYolo, .reElaborate, .elaborate, .execute:
             return true
-        case .execute, .delete, .backlog, .restore:
+        case .delete, .backlog, .restore:
             return false
         }
     }

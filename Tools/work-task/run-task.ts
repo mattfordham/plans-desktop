@@ -4,7 +4,12 @@
  * Autonomously works a single plans-cc task via the Claude Agent SDK. The
  * `--mode` flag selects which skill drives the run:
  *   - `execute`  (default): drives `plan-execute` to implement the task,
- *                always in `worktree` isolation, leaving it in `review`.
+ *                always in `worktree` isolation, leaving it in `review`. Accepts
+ *                an OPTIONAL `--description`: when the task is still pending
+ *                (un-elaborated), `plan-execute` auto-elaborates it inline and the
+ *                guidance is folded into that elaboration pass (direct-execute,
+ *                #088); it is simply absent for a bare execute of an already
+ *                elaborated plan.
  *
  * The valueless `--keep` flag (#078) requests that the worktree be KEPT after an
  * execute run rather than cleaned up. It is threaded into the execute-bearing
@@ -88,7 +93,9 @@ interface Args {
   /**
    * The free-text description/guidance to act on. Required for
    * capture/captureElaborate/executeYolo AND reElaborate; OPTIONAL for
-   * elaborate (folded into the prompt as user guidance when present).
+   * elaborate and execute (folded into the prompt as user guidance when
+   * present — for execute it feeds the inline auto-elaboration of a pending
+   * plan, #088).
    */
   description?: string;
   /**
@@ -189,15 +196,17 @@ function parseArgs(argv: string[]): Args | null {
   }
 
   // execute / elaborate / delete / backlog / restore operate on an existing
-  // task, so a task id is the only REQUIRED argument. elaborate additionally
-  // accepts an OPTIONAL `--description` (the user's guidance for the pass); it
-  // is folded in when present and simply absent otherwise, so a bare `--mode
-  // elaborate --task-id <id>` behaves exactly as before. execute / delete /
-  // backlog / restore carry no free text at all.
+  // task, so a task id is the only REQUIRED argument. elaborate and execute
+  // additionally accept an OPTIONAL `--description` (the user's guidance for the
+  // pass); it is folded in when present and simply absent otherwise, so a bare
+  // `--mode elaborate --task-id <id>` or `--mode execute --task-id <id>` behaves
+  // exactly as before. For execute (#088) the guidance feeds the inline
+  // auto-elaboration of a pending plan. delete / backlog / restore carry no free
+  // text at all.
   if (!taskId) {
     return null;
   }
-  if (mode === "elaborate") {
+  if (mode === "elaborate" || mode === "execute") {
     return { projectRoot, taskId, mode, description, deep, keep };
   }
   return { projectRoot, taskId, mode, deep, keep };
@@ -240,20 +249,59 @@ function toolDetail(input: unknown): string {
  * #078: when `keep` is true, a trailing ` keep` token is appended to the
  * `/plan-execute <id> worktree` command line so the worktree is kept after the
  * run rather than cleaned up.
+ *
+ * #088 (direct-execute): the task handed off may still be PENDING
+ * (un-elaborated). `plan-execute` stops at an interactive "Not elaborated" gate
+ * in that case, which the unattended runner cannot answer, so the prompt
+ * pre-answers it — the agent is told to choose "Elaborate now" (auto-elaborate
+ * inline, using the `deep` reasoning pass when requested) and THEN execute,
+ * never silently skipping elaboration. `description` is OPTIONAL user guidance;
+ * when present it is folded in as a `"""`-delimited block (mirroring
+ * buildElaboratePrompt) and feeds that inline elaboration pass. When absent the
+ * prompt is emitted without the guidance block, exactly as a bare
+ * `/plan-execute <id>` hand-off always was.
  */
-function buildExecutePrompt(taskId: string, keep: boolean): string {
+function buildExecutePrompt(
+  taskId: string,
+  keep: boolean,
+  deep: boolean,
+  description?: string,
+): string {
+  const guidance = description?.trim()
+    ? [
+        `The user has provided the following guidance for this run — if the task`,
+        `still needs elaborating, fold it into that inline elaboration pass as the`,
+        `direction, and keep it in mind while executing:`,
+        "",
+        `"""`,
+        description.trim(),
+        `"""`,
+        "",
+      ]
+    : [];
   return [
     `Use the \`plan-execute\` skill to work the plans-cc task with id ${taskId}.`,
     `Invoke it in worktree mode: \`/plan-execute ${taskId} worktree${keep ? " keep" : ""}\`.`,
     "",
+    ...guidance,
     "Requirements:",
     `1. The run MUST use a dedicated git worktree for task ${taskId} (the`,
     "   `worktree` argument above). Never edit the main checkout in place —",
     "   worktree isolation is mandatory for this hand-off.",
-    "2. Implement the task fully, following the plan and the repository's",
+    `2. The task may still be un-elaborated (pending). If \`plan-execute\` reaches`,
+    `   its not-elaborated gate (the "Execute anyway / Elaborate now" question),`,
+    `   choose "Elaborate now": auto-elaborate the plan INLINE first${
+      deep ? " (using a deep reasoning pass)" : ""
+    },`,
+    description?.trim()
+      ? "   folding the guidance above into that elaboration, and THEN execute it."
+      : "   and THEN execute it.",
+    "   Never silently skip elaboration — a pending plan has no How checklist to",
+    "   implement until it is elaborated.",
+    "3. Implement the task fully, following the plan and the repository's",
     "   conventions (including TDD where a test suite exists).",
-    "3. Run the targeted tests relevant to your changes and make them pass.",
-    "4. When the work is complete and tests pass, move the task to the `review`",
+    "4. Run the targeted tests relevant to your changes and make them pass.",
+    "5. When the work is complete and tests pass, move the task to the `review`",
     "   state. Do NOT mark it done — leave it in review for human verification.",
     "",
     "Work autonomously to completion. Do not ask for confirmation.",
@@ -613,7 +661,12 @@ function buildPrompt(args: Args): string {
   if (args.mode === "restore") {
     return buildRestorePrompt(args.taskId ?? "");
   }
-  return buildExecutePrompt(args.taskId ?? "", args.keep ?? false);
+  return buildExecutePrompt(
+    args.taskId ?? "",
+    args.keep ?? false,
+    args.deep ?? false,
+    args.description,
+  );
 }
 
 /**
