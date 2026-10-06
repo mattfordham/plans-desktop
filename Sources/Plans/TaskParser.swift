@@ -331,10 +331,24 @@ struct ProjectTasks: Equatable {
     /// asynchronously by `PlansStore.reload()` off the main actor.
     let gitIsDirty: Bool?
 
-    /// Memberwise initializer with `gitBranch` / `gitIsDirty` defaulting to
-    /// `nil`. The explicit init exists so the parser and tests that omit the
-    /// git fields continue to compile unchanged after #024 added them; the
-    /// store reconstructs `ProjectTasks` with the git values supplied.
+    /// Where the project's `.plans/` lives (plans-cc storage mode), or `nil`
+    /// when not yet resolved. Populated asynchronously by the store's git
+    /// second pass alongside `gitBranch` (parsing leaves it `nil`).
+    let plansMode: PlansStorageMode?
+
+    /// Sync state of the `.plans` worktree. Non-`nil` only for branch-mode
+    /// projects once the git second pass has queried it.
+    let plansSync: PlansSyncStatus?
+
+    /// Whether the code repo has any git remote. Queried only for local-mode
+    /// projects, where it gates the "Convert to tracked plans" action; `nil`
+    /// elsewhere and until the git second pass has run.
+    let gitHasRemote: Bool?
+
+    /// Memberwise initializer with the git and plans-storage fields defaulting
+    /// to `nil`. The explicit init exists so the parser and tests that omit
+    /// them continue to compile unchanged; the store reconstructs
+    /// `ProjectTasks` with those values supplied.
     init(
         projectPath: String,
         projectName: String,
@@ -344,7 +358,10 @@ struct ProjectTasks: Equatable {
         activeTasks: [Task],
         backloggedTasks: [Task] = [],
         gitBranch: String? = nil,
-        gitIsDirty: Bool? = nil
+        gitIsDirty: Bool? = nil,
+        plansMode: PlansStorageMode? = nil,
+        plansSync: PlansSyncStatus? = nil,
+        gitHasRemote: Bool? = nil
     ) {
         self.projectPath = projectPath
         self.projectName = projectName
@@ -355,7 +372,43 @@ struct ProjectTasks: Equatable {
         self.backloggedTasks = backloggedTasks
         self.gitBranch = gitBranch
         self.gitIsDirty = gitIsDirty
+        self.plansMode = plansMode
+        self.plansSync = plansSync
+        self.gitHasRemote = gitHasRemote
     }
+}
+
+/// Where a project's `.plans/` directory lives relative to git, per plans-cc's
+/// storage-mode contract (`detectMode` in `lib/plans-git.js`).
+///
+/// - `none`: the project root is not a git repo.
+/// - `local`: `.plans/` is gitignored by the code repo.
+/// - `inline`: `.plans/` is tracked on the code branches.
+/// - `branch`: `.plans/` is its own worktree of a dedicated orphan branch.
+enum PlansStorageMode: String, Equatable, Sendable {
+    case none
+    case local
+    case inline
+    case branch
+}
+
+/// Read-only sync state of a branch-mode `.plans/` worktree, mirroring plans-cc's
+/// `syncStatus`. `ahead` / `behind` are measured against `@{u}` as of the last
+/// fetch; nothing here fetches.
+struct PlansSyncStatus: Equatable, Sendable {
+    /// The `.plans` worktree's checked-out branch, or the configured
+    /// `sync.branch` (default `plans`) when HEAD is detached or unreadable.
+    let branch: String
+    /// The configured `sync.remote` (default `origin`).
+    let remote: String
+    /// Whether the `.plans` branch has an upstream configured.
+    let upstream: Bool
+    /// Local commits not yet on the upstream.
+    let ahead: Int
+    /// Upstream commits not yet in the local branch.
+    let behind: Int
+    /// Whether a rebase was left in progress in the `.plans` worktree.
+    let rebaseStuck: Bool
 }
 
 /// A cheap, comparable fingerprint of a project's `.plans/` state (#066).

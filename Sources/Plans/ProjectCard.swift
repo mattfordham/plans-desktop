@@ -25,9 +25,11 @@ private let cardLog = Logger(subsystem: "com.plans.desktop", category: "ProjectC
 ///   reveals the project's nested `.plans` directory in Finder (#047). When
 ///   there are no active plans the body shows a muted empty state.
 ///
-/// The card is strictly READ-ONLY (§2): it only reads from the injected
-/// `ProjectTasks` and requests the detail overlay on tap. It has NO toggles,
-/// status pickers, How checkboxes, or any FS-mutating calls.
+/// The card never writes `.plans/` itself (§2). It has no status pickers or How
+/// checkboxes. The one way it changes files is its footer context menu (or a
+/// click on the sync glyph), which asks the store to launch the plans-cc `plans-git.js` helper: "Sync plans
+/// now" for branch-mode projects, and "Convert to tracked plans…" (`migrate`,
+/// after confirmation) for local-mode ones (§2.1, §6.1).
 struct ProjectCard: View {
     /// The project this card renders. Read-only; never mutated.
     let project: ProjectTasks
@@ -353,6 +355,56 @@ struct ProjectCard: View {
             return "\(summary)\n\(message)"
         }
         return summary
+    }
+
+    /// The copy for the "Convert to tracked plans…" confirmation alert. The
+    /// question is plans-cc's own `/plan-init branch` confirmation, verbatim.
+    struct ConvertConfirmation: Equatable {
+        let title: String
+        let message: String
+        let confirmButton: String
+    }
+
+    static let convertConfirmation = ConvertConfirmation(
+        title: "Convert to tracked plans?",
+        message: "Move `.plans/` onto a dedicated `plans` branch (pushed to `origin` when it exists)? "
+            + "Every file is copied and verified before the backup is removed.",
+        confirmButton: "Convert"
+    )
+
+    /// The copy for the alert reporting how a convert ended.
+    struct ConvertReport: Equatable {
+        let title: String
+        let message: String
+        let isError: Bool
+    }
+
+    /// Builds the report alert for a finished `migrate`: its `OK:` / `Error:`
+    /// line, any warnings, and, when the helper kept a backup, where the
+    /// user's original plans now are.
+    static func convertReport(for result: PlansGitHelper.MigrateResult) -> ConvertReport {
+        var lines: [String] = []
+        let isError: Bool
+        switch result.outcome {
+        case .ok(let detail):
+            isError = false
+            lines.append("OK: \(detail)")
+        case .error(let message, let backupPath):
+            isError = true
+            lines.append("Error: \(message)")
+            if let backupPath {
+                lines.append("Your original plans are intact at \(backupPath).")
+            }
+        case .helperMissing:
+            isError = true
+            lines.append("Error: the plans-cc helper was not found at \(PlansGitHelper.defaultHelperPath).")
+        }
+        lines += result.warnings.map { "Warning: \($0)" }
+        return ConvertReport(
+            title: isError ? "Convert to tracked plans failed" : "Converted to tracked plans",
+            message: lines.joined(separator: "\n"),
+            isError: isError
+        )
     }
 
     var body: some View {
@@ -733,6 +785,96 @@ struct ProjectCard: View {
         }
         // #087: re-inset by the card gutter — only the plan rows bleed full width.
         .padding(.horizontal, ProjectCard.rowColumns.cardHorizontalPadding)
+        .contextMenu { plansStorageActions }
+    }
+
+    /// The plans-storage actions offered from the footer's context menu: a
+    /// manual sync for branch-mode projects, and converting a local-mode project
+    /// with a remote to branch mode. Empty for every other project.
+    @ViewBuilder
+    private var plansStorageActions: some View {
+        if project.plansMode == .branch {
+            Button("Sync plans now") {
+                store.syncNow(projectPath: project.projectPath)
+            }
+            .disabled(store.syncSkipReason(for: project.projectPath, trigger: .manual) != nil)
+        }
+        if store.convertSkipReason(for: project.projectPath) == nil {
+            Button("Convert to tracked plans…") {
+                confirmAndConvert()
+            }
+        }
+    }
+
+    /// Asks for confirmation, then runs the migrate and reports its outcome.
+    /// Never retries: a failed convert leaves the user to read the error.
+    private func confirmAndConvert() {
+        let confirmation = Self.convertConfirmation
+        let alert = NSAlert()
+        alert.messageText = confirmation.title
+        alert.informativeText = confirmation.message
+        alert.addButton(withTitle: confirmation.confirmButton)
+        alert.addButton(withTitle: "Cancel")
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+
+        let started = store.convertToTrackedPlans(projectPath: project.projectPath) { result in
+            let report = Self.convertReport(for: result)
+            let reportAlert = NSAlert()
+            reportAlert.alertStyle = report.isError ? .warning : .informational
+            reportAlert.messageText = report.title
+            reportAlert.informativeText = report.message
+            reportAlert.addButton(withTitle: "OK")
+            reportAlert.runModal()
+        }
+        if !started {
+            cardLog.notice("convert not started for \(project.projectPath, privacy: .public)")
+        }
+    }
+
+    /// The branch-mode sync glyph, or the in-flight convert spinner. Tapping
+    /// the glyph syncs now (bypassing the debounce and any conflict back-off)
+    /// when a manual sync is allowed.
+    @ViewBuilder
+    private var plansSyncIndicator: some View {
+        if store.pausedPaths.contains(project.projectPath) {
+            HStack(spacing: 4) {
+                ProgressView()
+                    .controlSize(.mini)
+                Text("Converting plans…")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            .help("Moving .plans onto a dedicated plans branch")
+        } else if let state = PlansSyncState.resolve(
+            mode: project.plansMode,
+            status: project.plansSync,
+            lastOutcome: store.lastSyncResult(for: project.projectPath)?.outcome,
+            isSyncing: store.syncingPaths.contains(project.projectPath)
+        ) {
+            let canSync = store.syncSkipReason(for: project.projectPath, trigger: .manual) == nil
+            let tooltip = PlansSyncState.tooltip(
+                for: state,
+                status: project.plansSync,
+                lastResult: store.lastSyncResult(for: project.projectPath)
+            )
+            HStack(spacing: 2) {
+                Image(systemName: state.symbolName)
+                    .imageScale(.small)
+                    .foregroundStyle(state.color)
+                if let counts = state.countText {
+                    Text(counts)
+                        .font(.caption.monospacedDigit())
+                        .foregroundStyle(state.color)
+                }
+            }
+            .contentShape(Rectangle())
+            .onTapGesture {
+                if canSync {
+                    store.syncNow(projectPath: project.projectPath)
+                }
+            }
+            .help(canSync ? tooltip + "\nClick to sync plans now." : tooltip)
+        }
     }
 
     /// The card's git status — the branch glyph + name plus
@@ -757,6 +899,7 @@ struct ProjectCard: View {
                         .imageScale(.small)
                         .foregroundStyle(.orange)
                 }
+                plansSyncIndicator
             }
         }
     }

@@ -762,4 +762,67 @@ final class TaskParserTests: XCTestCase {
         let project = TaskParser().parseProject(at: tempDir.path)
         XCTAssertTrue(project.backloggedTasks.isEmpty)
     }
+
+    // MARK: - Branch-mode worktree layout
+
+    /// In branch mode `.plans` is a git worktree, so it also holds a `.git`
+    /// file, a transient `.git-lock/` mutex, `.gitignore` / `.gitattributes`,
+    /// and possibly an `archive/` tree and a `config.json` `sync` key. None of
+    /// these may surface as tasks, and none may perturb the reload signature
+    /// (a lock appearing and vanishing must not force a re-parse).
+    func testBranchModeWorktreeEntriesAreIgnored() throws {
+        try writeTaskFile(
+            filename: "001-real.md",
+            text: "# Real\n\n**Status:** pending",
+            in: "pending"
+        )
+        try writeTaskFile(
+            filename: "002-done.md",
+            text: "# Done\n\n**Status:** completed",
+            in: "completed"
+        )
+        let parser = TaskParser()
+        let before = parser.projectSignature(at: tempDir.path)
+
+        let plansDir = tempDir.appendingPathComponent(".plans")
+        try "gitdir: /tmp/repo/.git/worktrees/.plans\n".write(
+            to: plansDir.appendingPathComponent(".git"),
+            atomically: true,
+            encoding: .utf8
+        )
+        try ".DS_Store\n.git-lock\n".write(
+            to: plansDir.appendingPathComponent(".gitignore"),
+            atomically: true,
+            encoding: .utf8
+        )
+        try "HISTORY.md merge=union\n".write(
+            to: plansDir.appendingPathComponent(".gitattributes"),
+            atomically: true,
+            encoding: .utf8
+        )
+        try #"{"next_id": 3, "sync": {"remote": "origin", "branch": "plans", "auto_push": true}}"#
+            .write(
+                to: plansDir.appendingPathComponent("config.json"),
+                atomically: true,
+                encoding: .utf8
+            )
+        try makeEmptyDir(".git-lock")
+        try writeTaskFile(
+            filename: "099-stray.md",
+            text: "# Stray\n\n**Status:** in-progress",
+            in: ".git-lock"
+        )
+        try writeTaskFile(
+            filename: "050-archived.md",
+            text: "# Archived\n\n**Status:** completed",
+            in: "archive/2025"
+        )
+
+        let project = parser.parseProject(at: tempDir.path)
+        XCTAssertEqual(project.tasks.map(\.id), ["001", "002"])
+        XCTAssertEqual(project.activeTasks.map(\.id), ["001"])
+        XCTAssertTrue(project.backloggedTasks.isEmpty)
+        XCTAssertEqual(project.counts, [.pending: 1, .completed: 1])
+        XCTAssertEqual(parser.projectSignature(at: tempDir.path), before)
+    }
 }

@@ -37,14 +37,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             guard let store else { return }
             taskRunner?.reconcileFinishedCaptures(against: store.projects)
         }
+        // Background plans sync never starts while a run is in flight in the
+        // same project, so it cannot race the run's own plans commits.
+        store.isProjectBusy = { [weak taskRunner] projectPath in
+            taskRunner?.hasRunningRun(inProject: projectPath) ?? false
+        }
         store.startPolling()
         // Whenever any run finishes, reload immediately so the worked task's new
         // status surfaces rather than waiting for the next 5s poll tick; the
         // reload's post-reload hook (above) then reconciles in the same
         // main-actor turn, so a "creating" spinner row hands off to the new plan
-        // row in one atomic SwiftUI transition.
-        taskRunner.onAnyRunFinished = { [weak store] in
+        // row in one atomic SwiftUI transition. Then sync that project's plans
+        // (branch mode only) so the run's commits and any remote plans meet
+        // without waiting out the sync interval.
+        taskRunner.onAnyRunFinished = { [weak store] projectPath in
             store?.reload()
+            store?.syncAfterRun(inProject: projectPath)
         }
     }
 

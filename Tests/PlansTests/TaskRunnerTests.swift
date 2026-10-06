@@ -414,6 +414,59 @@ final class TaskRunnerTests: XCTestCase {
         XCTAssertFalse(coordinator.hasRunningRuns)
     }
 
+    // MARK: - Per-project run lookup
+
+    @MainActor
+    func testRunProjectPathIsNilBeforeStartForExistingTaskRun() {
+        let run = TaskRun(taskID: "042", mode: .execute)
+        XCTAssertNil(run.runProjectPath)
+    }
+
+    @MainActor
+    func testRunProjectPathUsesCaptureProjectPath() {
+        let run = TaskRun(taskID: "capture:/p:1", mode: .capture, description: "x", projectPath: "/p")
+        XCTAssertEqual(run.runProjectPath, "/p")
+    }
+
+    @MainActor
+    func testRunProjectPathUsesStartedPathForExecuteRun() {
+        let run = TaskRun(taskID: "042", mode: .execute)
+        run.markRunningForTesting(projectPath: "/proj")
+        XCTAssertEqual(run.runProjectPath, "/proj")
+    }
+
+    @MainActor
+    func testHasRunningRunInProjectMatchesOnlyLiveRunsInThatProject() {
+        let coordinator = TaskRunner()
+        let execute = TaskRun(taskID: "042", mode: .execute)
+        execute.markRunningForTesting(projectPath: "/alpha")
+        coordinator.ingestRunForTesting(execute)
+
+        let capture = TaskRun(taskID: "capture:/beta:1", mode: .capture, description: "x", projectPath: "/beta")
+        coordinator.ingestRunForTesting(capture)
+
+        XCTAssertTrue(coordinator.hasRunningRun(inProject: "/alpha"))
+        XCTAssertTrue(coordinator.hasRunningRun(inProject: "/alpha/"), "trailing slash is the same project")
+        XCTAssertFalse(coordinator.hasRunningRun(inProject: "/beta"), "a not-yet-running capture is not in flight")
+        XCTAssertFalse(coordinator.hasRunningRun(inProject: "/gamma"))
+    }
+
+    @MainActor
+    func testHasRunningRunInProjectFalseAfterRunFinishes() {
+        let tmp = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString)
+            .appendingPathComponent("run-outcomes.log")
+        let coordinator = TaskRunner()
+        let run = TaskRun(taskID: "043", mode: .elaborate, outcomeLog: RunOutcomeLog(fileURL: tmp))
+        run.markRunningForTesting(projectPath: "/alpha")
+        coordinator.ingestRunForTesting(run)
+        XCTAssertTrue(coordinator.hasRunningRun(inProject: "/alpha"))
+
+        run.finishForTesting()
+        XCTAssertFalse(coordinator.hasRunningRun(inProject: "/alpha"))
+        XCTAssertEqual(run.runProjectPath, "/alpha", "the path stays readable after finishing")
+    }
+
     // MARK: - Capture mode (task #023)
 
     /// `RunMode` is `String`-backed; the raw value is the `--mode` flag passed

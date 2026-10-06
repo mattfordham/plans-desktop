@@ -1,5 +1,11 @@
 import Foundation
 import Observation
+import OSLog
+
+/// Subsystem logger for the plans sync scheduler. View with:
+///   log stream --predicate 'subsystem == "com.plans.desktop"' --level debug
+private let syncLog = Logger(subsystem: "com.plans.desktop", category: "PlansSync")
+private let migrateLog = Logger(subsystem: "com.plans.desktop", category: "PlansMigrate")
 
 /// The shared, observable application store. Holds the live projects (with their
 /// parsed tasks and per-status counts) plus the current drill-down selection.
@@ -241,6 +247,13 @@ final class PlansStore {
         didSet { defaults.set(showBacklog, forKey: Self.showBacklogKey) }
     }
 
+    /// Whether branch-mode projects are synced in the background (on the poll
+    /// cadence and after a run in the project finishes). Defaults ON. A manual
+    /// `syncNow(projectPath:)` works either way. Persisted on every set.
+    var autoSyncEnabled: Bool = true {
+        didSet { defaults.set(autoSyncEnabled, forKey: Self.autoSyncKey) }
+    }
+
     /// UserDefaults key for the persisted manual card order (array of paths).
     private static let orderKey = "cardOrderOverride"
 
@@ -255,6 +268,9 @@ final class PlansStore {
 
     /// UserDefaults key for the persisted show-backlog flag (#077).
     private static let showBacklogKey = "showBacklog"
+
+    /// UserDefaults key for the persisted auto-sync flag.
+    private static let autoSyncKey = "autoSyncPlans"
 
     /// UserDefaults key for the persisted starred project paths (#035). The
     /// stored value is `Array(starredProjectPaths)` (UserDefaults stores arrays).
@@ -328,6 +344,15 @@ final class PlansStore {
     /// deterministically instead of sleeping. Never call `Date()` directly in
     /// throttle logic — that would make the interval untestable.
     @ObservationIgnored private let now: () -> Date
+
+    /// Runs one blocking `plans-git.js sync` for a project root. Injected so
+    /// tests can script outcomes without spawning node. Always invoked off the
+    /// main thread.
+    @ObservationIgnored private let plansSync: @Sendable (String) -> PlansGitHelper.SyncResult
+
+    /// Runs `plans-git.js migrate` for a project path. Injected so tests can
+    /// script results without spawning node.
+    @ObservationIgnored private let plansMigrate: @Sendable (String) -> PlansGitHelper.MigrateResult
 
     /// The repeating timer that drives live refresh, or `nil` when not polling.
     /// `@ObservationIgnored` because the timer itself is not observable UI state.
@@ -448,7 +473,13 @@ final class PlansStore {
         taskParser: TaskParser = TaskParser(),
         outcomeLogReader: RunOutcomeLogReader = RunOutcomeLogReader(),
         defaults: UserDefaults = .standard,
-        now: @escaping () -> Date = Date.init
+        now: @escaping () -> Date = Date.init,
+        plansSync: @escaping @Sendable (String) -> PlansGitHelper.SyncResult = {
+            PlansGitHelper.sync(projectPath: $0)
+        },
+        plansMigrate: @escaping @Sendable (String) -> PlansGitHelper.MigrateResult = {
+            PlansGitHelper.migrate(projectPath: $0)
+        }
     ) {
         self.registryReader = registryReader
         self.registryWriter = registryWriter
@@ -456,6 +487,8 @@ final class PlansStore {
         self.outcomeLogReader = outcomeLogReader
         self.defaults = defaults
         self.now = now
+        self.plansSync = plansSync
+        self.plansMigrate = plansMigrate
         // Load persisted manual-order state. Assigning the backing fields avoids
         // re-persisting (the `didSet` would write the just-read value back).
         _projectOrderOverride = defaults.stringArray(forKey: Self.orderKey) ?? []
@@ -466,6 +499,8 @@ final class PlansStore {
         // for a missing key, so the default is correctly OFF. Assigning the
         // backing field avoids the `didSet` re-persisting the just-read value.
         _showBacklog = defaults.bool(forKey: Self.showBacklogKey)
+        // Auto-sync defaults ON, so a missing key must not read as `false`.
+        _autoSyncEnabled = defaults.object(forKey: Self.autoSyncKey) as? Bool ?? true
         // Load persisted starred project paths (#035): the stored array round-trips
         // back into the `Set`. Assigning the backing field avoids the `didSet`
         // re-persisting the just-read value.
@@ -643,10 +678,7 @@ final class PlansStore {
         // fields; without this carry-over, every 5s poll would momentarily reset
         // each card's git row to `nil` (hiding the branch + dirty dot) until the
         // async second pass repopulates it — a visible flash on every poll (#024).
-        let priorGitInfo = Dictionary(
-            projects.map { ($0.projectPath, ($0.gitBranch, $0.gitIsDirty)) },
-            uniquingKeysWith: { first, _ in first }
-        )
+        let priorGitInfo = priorGitSnapshot()
 
         // Run the parse pass on the calling (main) thread. This keeps `reload()`
         // synchronous and behavior-identical: `projects` is populated before this
@@ -660,7 +692,8 @@ final class PlansStore {
         let result = performReload(
             priorGitInfo: priorGitInfo,
             cache: parseCache,
-            outcomeCache: outcomeCache
+            outcomeCache: outcomeCache,
+            pausedPaths: pausedPaths
         )
         publishProjects(result.projects)
         parseCache = result.cache
@@ -675,6 +708,7 @@ final class PlansStore {
         // them with live values. Shared with the async poll path — see
         // `startGitSecondPass()` for the full GCD/Sendability rationale.
         startGitSecondPass()
+        scheduleDueSyncs()
 
         // Reconcile finished capture spinner rows against the just-repopulated
         // `projects` on EVERY reload — poll tick included, not only the
@@ -698,9 +732,10 @@ final class PlansStore {
     /// result back on the main thread. Because it never writes the observable
     /// `projects`, SwiftUI is never mutated off-main here.
     private func performReload(
-        priorGitInfo: [String: (String?, Bool?)],
+        priorGitInfo: [String: GitResult],
         cache: [String: CachedParse],
-        outcomeCache: OutcomeCache
+        outcomeCache: OutcomeCache,
+        pausedPaths: Set<String> = []
     ) -> ReloadResult {
         var freshCache: [String: CachedParse] = [:]
         var parsedPaths: [String] = []
@@ -713,7 +748,29 @@ final class PlansStore {
         let freshOutcomeCache = refreshedOutcomeCache(from: outcomeCache)
         let latestOutcomes = freshOutcomeCache.latestByTask
 
-        let projects = registryReader.readProjects().map { project -> ProjectTasks in
+        // The registry only lists projects whose `.plans` exists, which a
+        // migrate briefly moves aside; keep paused projects listed so their
+        // card (and its per-path state) doesn't drop out mid-migrate.
+        var entries = registryReader.readProjects()
+        if !pausedPaths.isEmpty {
+            let live = Set(entries.map(\.path))
+            entries = registryReader.loadRegistry().filter {
+                live.contains($0.path) || pausedPaths.contains($0.path)
+            }
+        }
+
+        let projects = entries.map { project -> ProjectTasks in
+            // A migrate has `.plans` moved aside for a paused path: keep the
+            // last parse instead of reading the missing directory as an empty
+            // project, and skip the signature listing too.
+            if pausedPaths.contains(project.path), let cached = cache[project.path] {
+                freshCache[project.path] = cached
+                return Self.applyFailureOverlay(
+                    to: Self.withGitInfo(cached.tasks, prior: priorGitInfo[project.path]),
+                    latestOutcomes: latestOutcomes
+                )
+            }
+
             // Cheap change detection (#066): one batched directory listing per
             // `.plans` subdirectory, with mtime + size prefetched. Recomputed on
             // EVERY tick so freshness is never gated — only the expensive
@@ -741,23 +798,7 @@ final class PlansStore {
             // where the `.plans/` file itself did not change.
             freshCache[project.path] = CachedParse(signature: signature, tasks: parsed)
 
-            let withGit: ProjectTasks
-            if let prior = priorGitInfo[project.path] {
-                withGit = ProjectTasks(
-                    projectPath: parsed.projectPath,
-                    projectName: parsed.projectName,
-                    lastSeen: parsed.lastSeen,
-                    tasks: parsed.tasks,
-                    counts: parsed.counts,
-                    activeTasks: parsed.activeTasks,
-                    backloggedTasks: parsed.backloggedTasks,
-                    gitBranch: prior.0,
-                    gitIsDirty: prior.1
-                )
-            } else {
-                withGit = parsed
-            }
-
+            let withGit = Self.withGitInfo(parsed, prior: priorGitInfo[project.path])
             return Self.applyFailureOverlay(to: withGit, latestOutcomes: latestOutcomes)
         }
 
@@ -766,6 +807,27 @@ final class PlansStore {
             cache: freshCache,
             parsedPaths: parsedPaths,
             outcomeCache: freshOutcomeCache
+        )
+    }
+
+    /// `parsed` with the last-known git and plans-storage fields from `prior`
+    /// carried over, or `parsed` unchanged when there is no prior snapshot.
+    /// Pure, so it is safe on the background reload path.
+    private static func withGitInfo(_ parsed: ProjectTasks, prior: GitResult?) -> ProjectTasks {
+        guard let prior else { return parsed }
+        return ProjectTasks(
+            projectPath: parsed.projectPath,
+            projectName: parsed.projectName,
+            lastSeen: parsed.lastSeen,
+            tasks: parsed.tasks,
+            counts: parsed.counts,
+            activeTasks: parsed.activeTasks,
+            backloggedTasks: parsed.backloggedTasks,
+            gitBranch: prior.branch,
+            gitIsDirty: prior.dirty,
+            plansMode: prior.mode,
+            plansSync: prior.sync,
+            gitHasRemote: prior.hasRemote
         )
     }
 
@@ -860,7 +922,10 @@ final class PlansStore {
             activeTasks: project.activeTasks.map(overlay),
             backloggedTasks: project.backloggedTasks,
             gitBranch: project.gitBranch,
-            gitIsDirty: project.gitIsDirty
+            gitIsDirty: project.gitIsDirty,
+            plansMode: project.plansMode,
+            plansSync: project.plansSync,
+            gitHasRemote: project.gitHasRemote
         )
     }
 
@@ -920,10 +985,7 @@ final class PlansStore {
 
         // Snapshot prior git info on the main thread (reads the observable
         // `projects`), same carry-over rationale as `reload()` (#024).
-        let priorGitInfo = Dictionary(
-            projects.map { ($0.projectPath, ($0.gitBranch, $0.gitIsDirty)) },
-            uniquingKeysWith: { first, _ in first }
-        )
+        let priorGitInfo = priorGitSnapshot()
 
         // Snapshot the change-gate cache on the main thread too (#066). It is a
         // dictionary of immutable values, so the background pass reads only this
@@ -936,13 +998,15 @@ final class PlansStore {
         // and never touches `self.outcomeCache`; the rebuilt cache is installed
         // back on main under the #059 generation guard, same as the parse cache.
         let outcomeCacheSnapshot = outcomeCache
+        let pausedSnapshot = pausedPaths
 
         nonisolated(unsafe) let unsafeSelf = self
         DispatchQueue.global(qos: .userInitiated).async {
             let result = unsafeSelf.performReload(
                 priorGitInfo: priorGitInfo,
                 cache: cacheSnapshot,
-                outcomeCache: outcomeCacheSnapshot
+                outcomeCache: outcomeCacheSnapshot,
+                pausedPaths: pausedSnapshot
             )
             DispatchQueue.main.async {
                 unsafeSelf.applyReloadResult(result, generation: generation)
@@ -974,6 +1038,7 @@ final class PlansStore {
         outcomeCache = result.outcomeCache
         lastReloadParsedPaths = result.parsedPaths
         startGitSecondPass()
+        scheduleDueSyncs()
         onDidReload?()
     }
 
@@ -1093,7 +1158,10 @@ final class PlansStore {
                 currentTime.timeIntervalSince($0) >= Self.gitThrottleInterval
             } ?? true
 
-            if isStale || changedPaths.contains(path) {
+            if pausedPaths.contains(path) {
+                // Skipped while paused; the resume forces its own re-query.
+                refreshedTimes[path] = lastQueried
+            } else if isStale || changedPaths.contains(path) {
                 pathsToQuery.append(path)
                 refreshedTimes[path] = currentTime
             } else {
@@ -1130,14 +1198,33 @@ final class PlansStore {
         // Nothing survived the throttle: skip the background dispatch entirely so
         // an idle tick costs zero queue hops as well as zero subprocesses.
         guard !paths.isEmpty else { return }
+        queryGitInBackground(paths)
+    }
 
+    /// Queries live git state for `paths` off the main thread and merges it
+    /// back via `applyGitInfo`. MUST be called on the main thread.
+    private func queryGitInBackground(_ paths: [String]) {
         nonisolated(unsafe) let unsafeSelf = self
         DispatchQueue.global(qos: .utility).async {
             var results: [GitResult] = []
             for path in paths {
                 let branch = GitHelper.currentBranch(at: path)
                 let dirty = GitHelper.isDirty(at: path)
-                results.append(GitResult(path: path, branch: branch, dirty: dirty))
+                // The storage mode rides the same throttle as branch/dirty: it
+                // only changes on a migrate/join, which also touches `.plans/`
+                // and so bypasses the window via the signature change. Sync
+                // status is only meaningful (and only costs spawns) in branch
+                // mode.
+                let mode = GitHelper.plansStorageMode(at: path)
+                let sync = mode == .branch
+                    ? GitHelper.plansSyncStatus(at: path, mode: mode)
+                    : nil
+                // Remote presence only gates converting a local-mode project.
+                let hasRemote = mode == .local ? GitHelper.hasRemote(at: path) : nil
+                results.append(GitResult(
+                    path: path, branch: branch, dirty: dirty,
+                    mode: mode, sync: sync, hasRemote: hasRemote
+                ))
             }
             DispatchQueue.main.async {
                 unsafeSelf.applyGitInfo(results)
@@ -1146,11 +1233,52 @@ final class PlansStore {
     }
 
     /// A Sendable carrier for one project's git query results, used to ferry the
-    /// `GitHelper` output from the background queue back to the main queue (#024).
-    private struct GitResult: Sendable {
+    /// `GitHelper` output from the background queue back to the main queue (#024),
+    /// and as the per-path snapshot of last-known git state that a reload carries
+    /// over onto the freshly-parsed projects.
+    struct GitResult: Sendable, Equatable {
         let path: String
         let branch: String?
         let dirty: Bool?
+        let mode: PlansStorageMode?
+        let sync: PlansSyncStatus?
+        let hasRemote: Bool?
+
+        init(
+            path: String,
+            branch: String?,
+            dirty: Bool?,
+            mode: PlansStorageMode? = nil,
+            sync: PlansSyncStatus? = nil,
+            hasRemote: Bool? = nil
+        ) {
+            self.path = path
+            self.branch = branch
+            self.dirty = dirty
+            self.mode = mode
+            self.sync = sync
+            self.hasRemote = hasRemote
+        }
+    }
+
+    /// Snapshots the last-known git fields of every published project, keyed by
+    /// path, so a re-parse can carry them over instead of flashing them back to
+    /// `nil` until the async second pass repopulates them (#024). MUST be called
+    /// on the main thread (it reads the observable `projects`).
+    private func priorGitSnapshot() -> [String: GitResult] {
+        Dictionary(
+            projects.map {
+                ($0.projectPath, GitResult(
+                    path: $0.projectPath,
+                    branch: $0.gitBranch,
+                    dirty: $0.gitIsDirty,
+                    mode: $0.plansMode,
+                    sync: $0.plansSync,
+                    hasRemote: $0.gitHasRemote
+                ))
+            },
+            uniquingKeysWith: { first, _ in first }
+        )
     }
 
     /// Merges the background-gathered git results into `projects` (#024). MUST be
@@ -1168,7 +1296,9 @@ final class PlansStore {
     /// later.
     private func applyGitInfo(_ results: [GitResult]) {
         var merged = projects
-        for result in results {
+        // A query that started before a migrate paused the path may have seen
+        // `.plans` mid-move; the forced re-query after the migrate replaces it.
+        for result in results where !pausedPaths.contains(result.path) {
             guard let index = merged.firstIndex(where: { $0.projectPath == result.path }) else {
                 continue
             }
@@ -1182,10 +1312,300 @@ final class PlansStore {
                 activeTasks: existing.activeTasks,
                 backloggedTasks: existing.backloggedTasks,
                 gitBranch: result.branch,
-                gitIsDirty: result.dirty
+                gitIsDirty: result.dirty,
+                plansMode: result.mode,
+                plansSync: result.sync,
+                gitHasRemote: result.hasRemote
             )
         }
         publishProjects(merged)
+    }
+
+    // MARK: - Plans sync scheduler
+
+    /// What asked for a sync. Each trigger bypasses a different subset of the
+    /// gates in `syncSkipReason(for:trigger:)`.
+    enum SyncTrigger: Equatable {
+        /// The poll cadence: every gate applies, including the debounce.
+        case scheduled
+        /// A run in the project just finished: skips the debounce only.
+        case runFinished
+        /// The user asked: skips the debounce, the auto-sync flag, the conflict
+        /// back-off and the lock check (the helper reports `.locked` itself).
+        case manual
+    }
+
+    /// Why a sync was not started.
+    enum SyncSkipReason: Equatable {
+        case unknownProject
+        case inFlight
+        /// A migrate is running for the project.
+        case paused
+        case autoSyncOff
+        case notBranchMode
+        /// No upstream configured, or the sync status is not known yet.
+        case noUpstream
+        case rebaseStuck
+        case busy
+        case conflictBackoff
+        case locked
+        case debounced
+    }
+
+    /// Minimum spacing between scheduled syncs of one project.
+    static let syncInterval: TimeInterval = 90
+
+    /// plans-cc treats a `.git-lock` older than this as abandoned and breaks
+    /// it (`lockStaleMs`), so only a younger lock means a commit is underway.
+    static let gitLockStaleInterval: TimeInterval = 60
+
+    /// The most recent sync result per project path. Drives the card's sync
+    /// indicator and its tooltip (last warning, renumbers).
+    private(set) var lastSyncResults: [String: PlansGitHelper.SyncResult] = [:]
+
+    /// Project paths with a sync currently running.
+    private(set) var syncingPaths: Set<String> = []
+
+    /// Whether a run is in flight in a project. The app wires this to
+    /// `TaskRunner.hasRunningRun(inProject:)` so a sync never races a run's own
+    /// plans commits. Called on the main thread.
+    @ObservationIgnored var isProjectBusy: (String) -> Bool = { _ in false }
+
+    /// Invoked on the main thread after each sync's result has been recorded.
+    @ObservationIgnored var onDidFinishSync: ((String) -> Void)?
+
+    /// When each project's last sync was started, on the injected clock.
+    @ObservationIgnored private var syncAttemptTimes: [String: Date] = [:]
+
+    /// Projects whose last sync hit an unresolvable conflict. The helper has
+    /// already aborted the rebase, so retrying on a timer would only repeat
+    /// the conflict; these stay out of automatic sync until `syncNow`.
+    @ObservationIgnored private var conflictBackoffPaths: Set<String> = []
+
+    /// The last recorded sync result for `projectPath`, if any.
+    func lastSyncResult(for projectPath: String) -> PlansGitHelper.SyncResult? {
+        lastSyncResults[projectPath]
+    }
+
+    /// Whether automatic sync is paused for `projectPath` after a conflict.
+    func isSyncBackedOff(projectPath: String) -> Bool {
+        conflictBackoffPaths.contains(projectPath)
+    }
+
+    /// Why a `trigger` sync of `projectPath` would not start right now, or
+    /// `nil` when it would. MUST be called on the main thread.
+    func syncSkipReason(for projectPath: String, trigger: SyncTrigger) -> SyncSkipReason? {
+        guard let project = project(matching: projectPath) else { return .unknownProject }
+        let path = project.projectPath
+        if syncingPaths.contains(path) { return .inFlight }
+        if pausedPaths.contains(path) { return .paused }
+        if trigger != .manual, !autoSyncEnabled { return .autoSyncOff }
+        guard project.plansMode == .branch else { return .notBranchMode }
+        guard let status = project.plansSync, status.upstream else { return .noUpstream }
+        if status.rebaseStuck { return .rebaseStuck }
+        if isProjectBusy(path) { return .busy }
+        if trigger != .manual {
+            if conflictBackoffPaths.contains(path) { return .conflictBackoff }
+            if isGitLockHeld(projectPath: path) { return .locked }
+        }
+        if trigger == .scheduled,
+           let last = syncAttemptTimes[path],
+           now().timeIntervalSince(last) < Self.syncInterval {
+            return .debounced
+        }
+        return nil
+    }
+
+    /// Starts a background sync for every project that is due, returning the
+    /// paths it started. Runs on every reload. MUST be called on the main
+    /// thread.
+    @discardableResult
+    func scheduleDueSyncs() -> [String] {
+        let livePaths = Set(projects.map(\.projectPath))
+        syncAttemptTimes = syncAttemptTimes.filter { livePaths.contains($0.key) }
+        conflictBackoffPaths.formIntersection(livePaths)
+        if lastSyncResults.keys.contains(where: { !livePaths.contains($0) }) {
+            lastSyncResults = lastSyncResults.filter { livePaths.contains($0.key) }
+        }
+
+        var started: [String] = []
+        for project in projects where project.plansMode == .branch {
+            let path = project.projectPath
+            guard syncSkipReason(for: path, trigger: .scheduled) == nil else { continue }
+            startSync(path)
+            started.append(path)
+        }
+        return started
+    }
+
+    /// Syncs `projectPath` now, at the user's request: bypasses the debounce
+    /// and the auto-sync flag, and clears any conflict back-off. Returns
+    /// whether a sync started. MUST be called on the main thread.
+    @discardableResult
+    func syncNow(projectPath: String) -> Bool {
+        guard let path = project(matching: projectPath)?.projectPath else { return false }
+        conflictBackoffPaths.remove(path)
+        guard syncSkipReason(for: path, trigger: .manual) == nil else { return false }
+        startSync(path)
+        return true
+    }
+
+    /// Syncs `projectPath` right after a run in it finished, bypassing the
+    /// debounce so plans the run committed reach the remote (and remote plans
+    /// arrive) without waiting out the interval. Returns whether a sync
+    /// started. MUST be called on the main thread.
+    @discardableResult
+    func syncAfterRun(inProject projectPath: String) -> Bool {
+        guard let path = project(matching: projectPath)?.projectPath,
+              syncSkipReason(for: path, trigger: .runFinished) == nil else { return false }
+        startSync(path)
+        return true
+    }
+
+    /// The published project at `projectPath`, compared after standardization
+    /// so a run's path with a trailing slash still finds its project.
+    private func project(matching projectPath: String) -> ProjectTasks? {
+        if let exact = projects.first(where: { $0.projectPath == projectPath }) {
+            return exact
+        }
+        let target = URL(fileURLWithPath: projectPath).standardizedFileURL.path
+        return projects.first {
+            URL(fileURLWithPath: $0.projectPath).standardizedFileURL.path == target
+        }
+    }
+
+    /// Whether plans-cc's `.plans/.git-lock` exists and is younger than its
+    /// stale window. A stale lock is left to the helper, which breaks it.
+    private func isGitLockHeld(projectPath: String) -> Bool {
+        let lockPath = URL(fileURLWithPath: projectPath)
+            .appendingPathComponent(".plans/.git-lock").path
+        guard let attributes = try? FileManager.default.attributesOfItem(atPath: lockPath) else {
+            return false
+        }
+        guard let modified = attributes[.modificationDate] as? Date else { return true }
+        return now().timeIntervalSince(modified) <= Self.gitLockStaleInterval
+    }
+
+    /// Runs the sync for `path` off the main thread, then records the result
+    /// on main. Same GCD + `nonisolated(unsafe)` pattern as the git pass: the
+    /// background closure touches only `plansSync` (an immutable `@Sendable`
+    /// closure) and the path.
+    private func startSync(_ path: String) {
+        syncingPaths.insert(path)
+        syncAttemptTimes[path] = now()
+        let sync = plansSync
+        nonisolated(unsafe) let unsafeSelf = self
+        DispatchQueue.global(qos: .utility).async {
+            let result = sync(path)
+            DispatchQueue.main.async {
+                unsafeSelf.finishSync(path, result: result)
+            }
+        }
+    }
+
+    /// Records a finished sync: the result, the conflict back-off, a log line
+    /// per renumber, and a forced git re-query for the path so ahead/behind
+    /// reflect the pull without waiting out the git throttle.
+    private func finishSync(_ path: String, result: PlansGitHelper.SyncResult) {
+        syncingPaths.remove(path)
+        if result.outcome == .conflict {
+            conflictBackoffPaths.insert(path)
+        }
+        if lastSyncResults[path] != result {
+            lastSyncResults[path] = result
+        }
+        for renumber in result.renumbered {
+            syncLog.notice("sync renumbered #\(renumber.from, privacy: .public) → #\(renumber.to, privacy: .public) in \(path, privacy: .public)")
+        }
+        for warning in result.warnings {
+            syncLog.notice("sync warning in \(path, privacy: .public): \(warning, privacy: .public)")
+        }
+        forceGitRequery(path)
+        onDidFinishSync?(path)
+    }
+
+    /// Re-queries git state for `path` now, outside the throttle window, and
+    /// restarts its window. A no-op for a path that is no longer registered.
+    /// MUST be called on the main thread.
+    private func forceGitRequery(_ path: String) {
+        guard projects.contains(where: { $0.projectPath == path }) else { return }
+        gitQueryTimes[path] = now()
+        lastGitPassQueriedPaths = [path]
+        queryGitInBackground([path])
+    }
+
+    // MARK: - Convert to tracked plans (migrate)
+
+    /// Why "Convert to tracked plans" is unavailable for a project.
+    enum ConvertSkipReason: Equatable {
+        case unknownProject
+        /// Only a local-mode (`.plans` gitignored) project can be converted.
+        case notLocalMode
+        /// No git remote (or not known yet): branch mode syncs through one.
+        case noRemote
+        /// A run is in flight in the project.
+        case busy
+        /// A migrate is already running for the project.
+        case inProgress
+    }
+
+    /// Project paths paused while a migrate runs. `migrate` briefly moves
+    /// `.plans` aside, so these skip re-parsing, the git pass and sync until it
+    /// finishes.
+    private(set) var pausedPaths: Set<String> = []
+
+    /// The convert-availability rule, kept pure so it is testable on its own.
+    static func convertSkipReason(
+        mode: PlansStorageMode?,
+        hasRemote: Bool?,
+        isBusy: Bool,
+        isPaused: Bool
+    ) -> ConvertSkipReason? {
+        if isPaused { return .inProgress }
+        guard mode == .local else { return .notLocalMode }
+        guard hasRemote == true else { return .noRemote }
+        if isBusy { return .busy }
+        return nil
+    }
+
+    /// Why `projectPath` cannot be converted right now, or `nil` when it can.
+    /// MUST be called on the main thread.
+    func convertSkipReason(for projectPath: String) -> ConvertSkipReason? {
+        guard let project = project(matching: projectPath) else { return .unknownProject }
+        let path = project.projectPath
+        return Self.convertSkipReason(
+            mode: project.plansMode,
+            hasRemote: project.gitHasRemote,
+            isBusy: isProjectBusy(path),
+            isPaused: pausedPaths.contains(path)
+        )
+    }
+
+    /// Runs `plans-git.js migrate` for `projectPath` off the main thread, with
+    /// the path paused for the duration, then forces a mode re-query and hands
+    /// the result to `completion` on the main thread. Never retries. Returns
+    /// whether the migrate started. MUST be called on the main thread.
+    @discardableResult
+    func convertToTrackedPlans(
+        projectPath: String,
+        completion: @escaping (PlansGitHelper.MigrateResult) -> Void
+    ) -> Bool {
+        guard let path = project(matching: projectPath)?.projectPath,
+              convertSkipReason(for: path) == nil else { return false }
+        pausedPaths.insert(path)
+        let migrate = plansMigrate
+        nonisolated(unsafe) let unsafeSelf = self
+        nonisolated(unsafe) let unsafeCompletion = completion
+        DispatchQueue.global(qos: .userInitiated).async {
+            let result = migrate(path)
+            DispatchQueue.main.async {
+                unsafeSelf.pausedPaths.remove(path)
+                unsafeSelf.forceGitRequery(path)
+                migrateLog.notice("migrate in \(path, privacy: .public): \(String(describing: result.outcome), privacy: .public)")
+                unsafeCompletion(result)
+            }
+        }
+        return true
     }
 
     /// Begins live refresh: performs an immediate SYNCHRONOUS `reload()`
@@ -1229,11 +1649,22 @@ final class PlansStore {
     func performReloadForTesting(
         priorGitInfo: [String: (String?, Bool?)]
     ) -> [ProjectTasks] {
+        performReloadForTesting(priorGitResults: priorGitInfo.reduce(into: [:]) { acc, entry in
+            acc[entry.key] = GitResult(path: entry.key, branch: entry.value.0, dirty: entry.value.1)
+        })
+    }
+
+    /// Test-only hook: as `performReloadForTesting(priorGitInfo:)`, but taking
+    /// full prior git snapshots so the plans-storage fields' carry-over can be
+    /// exercised too.
+    func performReloadForTesting(
+        priorGitResults: [String: GitResult]
+    ) -> [ProjectTasks] {
         // An empty cache means the change gate (#066) always misses, so this hook
         // exercises the full parse path exactly as it did before the gate landed.
         // An empty outcome cache with `mtime: nil` forces a fresh log read (#079).
         performReload(
-            priorGitInfo: priorGitInfo,
+            priorGitInfo: priorGitResults,
             cache: [:],
             outcomeCache: OutcomeCache(mtime: nil, latestByTask: [:])
         ).projects
@@ -1287,6 +1718,12 @@ final class PlansStore {
     /// the main thread.
     func applyGitInfoForTesting(_ results: [(path: String, branch: String?, dirty: Bool?)]) {
         applyGitInfo(results.map { GitResult(path: $0.path, branch: $0.branch, dirty: $0.dirty) })
+    }
+
+    /// Test-only hook: drives `applyGitInfo` with full results, including the
+    /// plans storage mode and sync status. MUST be called on the main thread.
+    func applyGitInfoForTesting(_ results: [GitResult]) {
+        applyGitInfo(results)
     }
 
     /// Test-only hook: the current monotonic reload generation (#059), so tests

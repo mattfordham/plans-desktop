@@ -2180,4 +2180,718 @@ final class PlansStoreTests: XCTestCase {
             "throttled idle ticks must not republish `projects`"
         )
     }
+
+    // MARK: - plans-cc storage mode and sync status
+
+    private static let branchSync = PlansSyncStatus(
+        branch: "plans", remote: "origin", upstream: true,
+        ahead: 1, behind: 2, rebaseStuck: false
+    )
+
+    func testProjectTasksPlansFieldsDefaultToNil() {
+        let project = ProjectTasks(
+            projectPath: "/p", projectName: "P", lastSeen: "",
+            tasks: [], counts: [:], activeTasks: []
+        )
+        XCTAssertNil(project.plansMode)
+        XCTAssertNil(project.plansSync)
+    }
+
+    func testApplyGitInfoMergesPlansModeAndSyncStatus() throws {
+        let projectDir = try makeProjectDir(name: "alpha")
+        let reader = try makeReader(projectPaths: [projectDir.path])
+        let store = PlansStore(registryReader: reader, defaults: makeDefaults())
+        store.reload()
+
+        store.applyGitInfoForTesting([
+            PlansStore.GitResult(path: projectDir.path, branch: "main", dirty: false,
+                                 mode: .branch, sync: Self.branchSync)
+        ])
+
+        XCTAssertEqual(store.projects.first?.gitBranch, "main")
+        XCTAssertEqual(store.projects.first?.plansMode, .branch)
+        XCTAssertEqual(store.projects.first?.plansSync, Self.branchSync)
+    }
+
+    func testApplyGitInfoPublishesWhenOnlySyncStatusChanges() throws {
+        let projectDir = try makeProjectDir(name: "alpha")
+        let reader = try makeReader(projectPaths: [projectDir.path])
+        let store = PlansStore(registryReader: reader, defaults: makeDefaults())
+        store.reload()
+        store.applyGitInfoForTesting([
+            PlansStore.GitResult(path: projectDir.path, branch: "main", dirty: false,
+                                 mode: .branch, sync: Self.branchSync)
+        ])
+        let publishesBefore = store.projectsPublishCountForTesting
+
+        let behindMore = PlansSyncStatus(
+            branch: "plans", remote: "origin", upstream: true,
+            ahead: 1, behind: 5, rebaseStuck: false
+        )
+        store.applyGitInfoForTesting([
+            PlansStore.GitResult(path: projectDir.path, branch: "main", dirty: false,
+                                 mode: .branch, sync: behindMore)
+        ])
+
+        XCTAssertEqual(store.projectsPublishCountForTesting, publishesBefore + 1)
+        XCTAssertEqual(store.projects.first?.plansSync?.behind, 5)
+    }
+
+    func testLegacyApplyGitInfoHookLeavesPlansFieldsNil() throws {
+        let projectDir = try makeProjectDir(name: "alpha")
+        let reader = try makeReader(projectPaths: [projectDir.path])
+        let store = PlansStore(registryReader: reader, defaults: makeDefaults())
+        store.reload()
+        store.applyGitInfoForTesting([(path: projectDir.path, branch: "main", dirty: false)])
+        XCTAssertNil(store.projects.first?.plansMode)
+        XCTAssertNil(store.projects.first?.plansSync)
+    }
+
+    func testReloadCarriesOverPlansModeAndSyncStatus() throws {
+        let projectDir = try makeProjectDir(name: "alpha")
+        try writeTaskFile(
+            projectDir: projectDir,
+            filename: "001-first.md",
+            text: "# First\n\n**Status:** pending",
+            in: "pending"
+        )
+        let reader = try makeReader(projectPaths: [projectDir.path])
+        let clock = TestClock()
+        let store = PlansStore(registryReader: reader, defaults: makeDefaults(), now: clock.source)
+        store.reload()
+        store.applyGitInfoForTesting([
+            PlansStore.GitResult(path: projectDir.path, branch: "main", dirty: false,
+                                 mode: .branch, sync: Self.branchSync)
+        ])
+
+        // A re-parse (changed `.plans/`) rebuilds the project from the parser,
+        // which must not drop the last-known mode/status.
+        clock.advance(5)
+        try writeTaskFile(
+            projectDir: projectDir,
+            filename: "002-second.md",
+            text: "# Second\n\n**Status:** pending",
+            in: "pending"
+        )
+        store.reload()
+        XCTAssertEqual(store.lastReloadParsedPathsForTesting, [projectDir.path])
+        XCTAssertEqual(store.projects.first?.plansMode, .branch)
+        XCTAssertEqual(store.projects.first?.plansSync, Self.branchSync)
+
+        // Throttled idle ticks keep them too, without republishing.
+        let publishesBefore = store.projectsPublishCountForTesting
+        clock.advance(5)
+        store.reload()
+        XCTAssertEqual(store.lastGitPassQueriedPathsForTesting, [])
+        XCTAssertEqual(store.projects.first?.plansMode, .branch)
+        XCTAssertEqual(store.projects.first?.plansSync, Self.branchSync)
+        XCTAssertEqual(store.projectsPublishCountForTesting, publishesBefore)
+    }
+
+    func testPerformReloadCarriesPriorPlansFields() throws {
+        let projectDir = try makeProjectDir(name: "alpha")
+        let reader = try makeReader(projectPaths: [projectDir.path])
+        let store = PlansStore(registryReader: reader, defaults: makeDefaults())
+
+        let result = store.performReloadForTesting(priorGitResults: [
+            projectDir.path: PlansStore.GitResult(
+                path: projectDir.path, branch: "main", dirty: true,
+                mode: .local, sync: nil
+            )
+        ])
+
+        XCTAssertEqual(result.first?.gitBranch, "main")
+        XCTAssertEqual(result.first?.gitIsDirty, true)
+        XCTAssertEqual(result.first?.plansMode, .local)
+        XCTAssertNil(result.first?.plansSync)
+    }
+
+    func testFailureOverlayPreservesPlansFields() throws {
+        let task = Task(
+            id: "007", title: "Run", type: nil, status: .inProgress, created: nil,
+            branch: nil, isKeptWorktree: false, blockedBy: [], sections: [],
+            howProgress: (done: 0, total: 0), isBlocked: false, isCompletedDir: false,
+            isBacklogged: false, failure: nil, modified: nil
+        )
+        let project = ProjectTasks(
+            projectPath: "/p", projectName: "P", lastSeen: "",
+            tasks: [task], counts: [.inProgress: 1], activeTasks: [task],
+            gitBranch: "main", gitIsDirty: false,
+            plansMode: .branch, plansSync: Self.branchSync
+        )
+        let outcomes: [RunOutcomeKey: RunOutcome] = [
+            RunOutcomeKey(projectPath: "/p", taskID: "007"): makeOutcome(
+                projectPath: "/p", taskID: "007",
+                classification: .truncated, timestamp: "2026-06-04T10:00:00Z"
+            )
+        ]
+
+        let overlaid = PlansStore.applyFailureOverlayForTesting(to: project, latestOutcomes: outcomes)
+
+        XCTAssertNotNil(overlaid.tasks.first?.failure)
+        XCTAssertEqual(overlaid.plansMode, .branch)
+        XCTAssertEqual(overlaid.plansSync, Self.branchSync)
+    }
+
+    /// The real git second pass resolves the storage mode for every queried
+    /// project and only asks for sync status in branch mode.
+    func testGitSecondPassResolvesPlansModeForLocalProject() throws {
+        let projectDir = try makeProjectDir(name: "alpha")
+        func git(_ args: [String]) throws {
+            let proc = Process()
+            proc.executableURL = URL(fileURLWithPath: "/usr/bin/git")
+            proc.arguments = ["-C", projectDir.path] + args
+            proc.standardOutput = Pipe()
+            proc.standardError = Pipe()
+            try proc.run()
+            proc.waitUntilExit()
+        }
+        try git(["init", "-b", "main"])
+        try ".plans/\n".write(
+            to: projectDir.appendingPathComponent(".gitignore"),
+            atomically: true, encoding: .utf8
+        )
+        let reader = try makeReader(projectPaths: [projectDir.path])
+        let store = PlansStore(registryReader: reader, defaults: makeDefaults())
+        store.reload()
+
+        let deadline = Date().addingTimeInterval(10)
+        while store.projects.first?.plansMode == nil, Date() < deadline {
+            RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+        }
+        XCTAssertEqual(store.projects.first?.plansMode, .local)
+        XCTAssertNil(store.projects.first?.plansSync)
+    }
+
+    // MARK: - Plans sync scheduler
+
+    /// Records every injected sync call and returns a scripted result. An
+    /// optional gate holds the sync open so a test can observe it in flight.
+    private final class SyncRecorder: @unchecked Sendable {
+        private let lock = NSLock()
+        private var _calls: [String] = []
+        private var _result = PlansGitHelper.SyncResult(outcome: .synced)
+        var gate: DispatchSemaphore?
+
+        var calls: [String] { lock.withLock { _calls } }
+        var result: PlansGitHelper.SyncResult {
+            get { lock.withLock { _result } }
+            set { lock.withLock { _result = newValue } }
+        }
+
+        var closure: @Sendable (String) -> PlansGitHelper.SyncResult {
+            { [self] path in
+                lock.withLock { _calls.append(path) }
+                gate?.wait()
+                return result
+            }
+        }
+    }
+
+    private struct SyncFixture {
+        let store: PlansStore
+        let clock: TestClock
+        let recorder: SyncRecorder
+        let path: String
+        let projectDir: URL
+    }
+
+    /// One registered project, loaded, with the injected sync closure and a
+    /// test clock. The project is NOT yet marked branch mode; call
+    /// `markBranch` right before each scheduling call, because the real git
+    /// pass (which finds no repo in the temp dir) lands whenever the run loop
+    /// spins and resets the mode.
+    private func makeSyncFixture(defaults: UserDefaults? = nil) throws -> SyncFixture {
+        let projectDir = try makeProjectDir(name: "alpha")
+        let reader = try makeReader(projectPaths: [projectDir.path])
+        let clock = TestClock()
+        let recorder = SyncRecorder()
+        let store = PlansStore(
+            registryReader: reader,
+            defaults: defaults ?? makeDefaults(),
+            now: clock.source,
+            plansSync: recorder.closure
+        )
+        store.reload()
+        return SyncFixture(store: store, clock: clock, recorder: recorder,
+                           path: projectDir.path, projectDir: projectDir)
+    }
+
+    private func markBranch(
+        _ fixture: SyncFixture,
+        mode: PlansStorageMode = .branch,
+        upstream: Bool = true,
+        rebaseStuck: Bool = false
+    ) {
+        let sync = PlansSyncStatus(
+            branch: "plans", remote: "origin", upstream: upstream,
+            ahead: 0, behind: 0, rebaseStuck: rebaseStuck
+        )
+        fixture.store.applyGitInfoForTesting([
+            PlansStore.GitResult(path: fixture.path, branch: "main", dirty: false,
+                                 mode: mode, sync: mode == .branch ? sync : nil)
+        ])
+    }
+
+    /// Waits until the store reports a finished sync for the fixture's path.
+    private func waitForSyncFinish(_ fixture: SyncFixture) {
+        let finished = expectation(description: "sync finished")
+        fixture.store.onDidFinishSync = { path in
+            if path == fixture.path { finished.fulfill() }
+        }
+        wait(for: [finished], timeout: 5)
+        fixture.store.onDidFinishSync = nil
+    }
+
+    func testAutoSyncDefaultsOnAndPersists() throws {
+        let defaults = makeDefaults()
+        let reader = try makeReader(projectPaths: [])
+        let store = PlansStore(registryReader: reader, defaults: defaults)
+        XCTAssertTrue(store.autoSyncEnabled)
+
+        store.autoSyncEnabled = false
+        let reloaded = PlansStore(registryReader: reader, defaults: defaults)
+        XCTAssertFalse(reloaded.autoSyncEnabled)
+    }
+
+    func testScheduleSyncsEligibleBranchProjectAndKeepsResult() throws {
+        let fixture = try makeSyncFixture()
+        fixture.recorder.result = PlansGitHelper.SyncResult(
+            outcome: .synced,
+            renumbered: [PlansGitHelper.Renumber(from: "041", to: "043")]
+        )
+        markBranch(fixture)
+
+        XCTAssertEqual(fixture.store.scheduleDueSyncs(), [fixture.path])
+        XCTAssertTrue(fixture.store.syncingPaths.contains(fixture.path))
+        waitForSyncFinish(fixture)
+
+        XCTAssertEqual(fixture.recorder.calls, [fixture.path])
+        XCTAssertFalse(fixture.store.syncingPaths.contains(fixture.path))
+        XCTAssertEqual(fixture.store.lastSyncResult(for: fixture.path)?.outcome, .synced)
+        XCTAssertEqual(
+            fixture.store.lastSyncResult(for: fixture.path)?.renumbered,
+            [PlansGitHelper.Renumber(from: "041", to: "043")]
+        )
+    }
+
+    func testReloadSchedulesDueSyncs() throws {
+        let fixture = try makeSyncFixture()
+        markBranch(fixture)
+        fixture.store.reload()
+        waitForSyncFinish(fixture)
+        XCTAssertEqual(fixture.recorder.calls, [fixture.path])
+    }
+
+    func testScheduledSyncIsDebouncedForNinetySeconds() throws {
+        let fixture = try makeSyncFixture()
+        markBranch(fixture)
+        fixture.store.scheduleDueSyncs()
+        waitForSyncFinish(fixture)
+
+        fixture.clock.advance(60)
+        markBranch(fixture)
+        XCTAssertEqual(fixture.store.syncSkipReason(for: fixture.path, trigger: .scheduled), .debounced)
+        XCTAssertEqual(fixture.store.scheduleDueSyncs(), [])
+
+        fixture.clock.advance(31)
+        markBranch(fixture)
+        XCTAssertEqual(fixture.store.scheduleDueSyncs(), [fixture.path])
+        waitForSyncFinish(fixture)
+        XCTAssertEqual(fixture.recorder.calls.count, 2)
+    }
+
+    func testInFlightSyncIsNotStartedTwice() throws {
+        let fixture = try makeSyncFixture()
+        let gate = DispatchSemaphore(value: 0)
+        fixture.recorder.gate = gate
+        markBranch(fixture)
+        XCTAssertEqual(fixture.store.scheduleDueSyncs(), [fixture.path])
+
+        fixture.clock.advance(120)
+        XCTAssertEqual(fixture.store.syncSkipReason(for: fixture.path, trigger: .manual), .inFlight)
+        XCTAssertEqual(fixture.store.scheduleDueSyncs(), [])
+        XCTAssertFalse(fixture.store.syncNow(projectPath: fixture.path))
+
+        gate.signal()
+        waitForSyncFinish(fixture)
+        XCTAssertEqual(fixture.recorder.calls.count, 1)
+    }
+
+    func testSchedulerSkipsNonBranchProjects() throws {
+        let fixture = try makeSyncFixture()
+        for mode in [PlansStorageMode.none, .local, .inline] {
+            markBranch(fixture, mode: mode)
+            XCTAssertEqual(fixture.store.syncSkipReason(for: fixture.path, trigger: .scheduled), .notBranchMode)
+            XCTAssertEqual(fixture.store.scheduleDueSyncs(), [])
+        }
+        XCTAssertEqual(fixture.recorder.calls, [])
+    }
+
+    func testSchedulerSkipsProjectWithoutUpstream() throws {
+        let fixture = try makeSyncFixture()
+        markBranch(fixture, upstream: false)
+        XCTAssertEqual(fixture.store.syncSkipReason(for: fixture.path, trigger: .scheduled), .noUpstream)
+        XCTAssertEqual(fixture.store.scheduleDueSyncs(), [])
+    }
+
+    func testSchedulerSkipsStuckRebase() throws {
+        let fixture = try makeSyncFixture()
+        markBranch(fixture, rebaseStuck: true)
+        XCTAssertEqual(fixture.store.syncSkipReason(for: fixture.path, trigger: .scheduled), .rebaseStuck)
+        XCTAssertEqual(fixture.store.syncSkipReason(for: fixture.path, trigger: .manual), .rebaseStuck)
+        XCTAssertEqual(fixture.store.scheduleDueSyncs(), [])
+    }
+
+    func testSchedulerSkipsBusyProject() throws {
+        let fixture = try makeSyncFixture()
+        fixture.store.isProjectBusy = { $0 == fixture.path }
+        markBranch(fixture)
+        XCTAssertEqual(fixture.store.syncSkipReason(for: fixture.path, trigger: .scheduled), .busy)
+        XCTAssertEqual(fixture.store.syncSkipReason(for: fixture.path, trigger: .runFinished), .busy)
+        XCTAssertEqual(fixture.store.scheduleDueSyncs(), [])
+        XCTAssertEqual(fixture.recorder.calls, [])
+    }
+
+    func testSchedulerSkipsWhenAutoSyncIsOff() throws {
+        let fixture = try makeSyncFixture()
+        fixture.store.autoSyncEnabled = false
+        markBranch(fixture)
+        XCTAssertEqual(fixture.store.syncSkipReason(for: fixture.path, trigger: .scheduled), .autoSyncOff)
+        XCTAssertEqual(fixture.store.syncSkipReason(for: fixture.path, trigger: .runFinished), .autoSyncOff)
+        XCTAssertNil(fixture.store.syncSkipReason(for: fixture.path, trigger: .manual))
+        XCTAssertEqual(fixture.store.scheduleDueSyncs(), [])
+    }
+
+    func testSchedulerSkipsFreshGitLockButNotStaleOne() throws {
+        let fixture = try makeSyncFixture()
+        let lockDir = fixture.projectDir.appendingPathComponent(".plans/.git-lock")
+        try FileManager.default.createDirectory(at: lockDir, withIntermediateDirectories: true)
+
+        try FileManager.default.setAttributes(
+            [.modificationDate: fixture.clock.now.addingTimeInterval(-5)],
+            ofItemAtPath: lockDir.path
+        )
+        markBranch(fixture)
+        XCTAssertEqual(fixture.store.syncSkipReason(for: fixture.path, trigger: .scheduled), .locked)
+        XCTAssertEqual(fixture.store.scheduleDueSyncs(), [])
+
+        try FileManager.default.setAttributes(
+            [.modificationDate: fixture.clock.now.addingTimeInterval(-120)],
+            ofItemAtPath: lockDir.path
+        )
+        XCTAssertNil(fixture.store.syncSkipReason(for: fixture.path, trigger: .scheduled),
+                     "a lock older than plans-cc's stale window is broken by the helper itself")
+    }
+
+    func testConflictBacksOffUntilSyncNow() throws {
+        let fixture = try makeSyncFixture()
+        fixture.recorder.result = PlansGitHelper.SyncResult(outcome: .conflict, warnings: ["conflict"])
+        markBranch(fixture)
+        fixture.store.scheduleDueSyncs()
+        waitForSyncFinish(fixture)
+        XCTAssertTrue(fixture.store.isSyncBackedOff(projectPath: fixture.path))
+
+        fixture.clock.advance(600)
+        markBranch(fixture)
+        XCTAssertEqual(fixture.store.syncSkipReason(for: fixture.path, trigger: .scheduled), .conflictBackoff)
+        XCTAssertEqual(fixture.store.syncSkipReason(for: fixture.path, trigger: .runFinished), .conflictBackoff)
+        XCTAssertEqual(fixture.store.scheduleDueSyncs(), [])
+        XCTAssertEqual(fixture.recorder.calls.count, 1)
+
+        fixture.recorder.result = PlansGitHelper.SyncResult(outcome: .synced)
+        XCTAssertTrue(fixture.store.syncNow(projectPath: fixture.path))
+        XCTAssertFalse(fixture.store.isSyncBackedOff(projectPath: fixture.path))
+        waitForSyncFinish(fixture)
+        XCTAssertEqual(fixture.recorder.calls.count, 2)
+        XCTAssertEqual(fixture.store.lastSyncResult(for: fixture.path)?.outcome, .synced)
+
+        fixture.clock.advance(100)
+        markBranch(fixture)
+        XCTAssertEqual(fixture.store.scheduleDueSyncs(), [fixture.path])
+        waitForSyncFinish(fixture)
+    }
+
+    func testSyncNowBypassesDebounceAndAutoSyncFlag() throws {
+        let fixture = try makeSyncFixture()
+        markBranch(fixture)
+        fixture.store.scheduleDueSyncs()
+        waitForSyncFinish(fixture)
+
+        fixture.store.autoSyncEnabled = false
+        fixture.clock.advance(5)
+        markBranch(fixture)
+        XCTAssertTrue(fixture.store.syncNow(projectPath: fixture.path))
+        waitForSyncFinish(fixture)
+        XCTAssertEqual(fixture.recorder.calls.count, 2)
+    }
+
+    func testSyncAfterRunBypassesDebounce() throws {
+        let fixture = try makeSyncFixture()
+        markBranch(fixture)
+        fixture.store.scheduleDueSyncs()
+        waitForSyncFinish(fixture)
+
+        fixture.clock.advance(5)
+        markBranch(fixture)
+        XCTAssertTrue(fixture.store.syncAfterRun(inProject: fixture.path))
+        waitForSyncFinish(fixture)
+        XCTAssertEqual(fixture.recorder.calls.count, 2)
+    }
+
+    func testSyncAfterRunMatchesStandardizedPath() throws {
+        let fixture = try makeSyncFixture()
+        markBranch(fixture)
+        XCTAssertTrue(fixture.store.syncAfterRun(inProject: fixture.path + "/"))
+        waitForSyncFinish(fixture)
+        XCTAssertEqual(fixture.recorder.calls, [fixture.path])
+    }
+
+    func testFinishedSyncForcesGitRequeryForThatPath() throws {
+        let fixture = try makeSyncFixture()
+        fixture.clock.advance(5)
+        fixture.store.reload()
+        XCTAssertEqual(fixture.store.lastGitPassQueriedPathsForTesting, [],
+                       "inside the throttle window the poll must not re-query git")
+
+        markBranch(fixture)
+        XCTAssertTrue(fixture.store.syncNow(projectPath: fixture.path))
+        waitForSyncFinish(fixture)
+        XCTAssertEqual(fixture.store.lastGitPassQueriedPathsForTesting, [fixture.path])
+    }
+
+    // MARK: - Remote presence (gates the Convert action)
+
+    func testApplyGitInfoMergesHasRemote() throws {
+        let projectDir = try makeProjectDir(name: "alpha")
+        let reader = try makeReader(projectPaths: [projectDir.path])
+        let store = PlansStore(registryReader: reader, defaults: makeDefaults())
+        store.reload()
+        XCTAssertNil(store.projects.first?.gitHasRemote)
+
+        store.applyGitInfoForTesting([
+            PlansStore.GitResult(path: projectDir.path, branch: "main", dirty: false,
+                                 mode: .local, hasRemote: true)
+        ])
+        XCTAssertEqual(store.projects.first?.gitHasRemote, true)
+    }
+
+    func testPerformReloadAndFailureOverlayCarryHasRemote() throws {
+        let projectDir = try makeProjectDir(name: "alpha")
+        let reader = try makeReader(projectPaths: [projectDir.path])
+        let store = PlansStore(registryReader: reader, defaults: makeDefaults())
+        let result = store.performReloadForTesting(priorGitResults: [
+            projectDir.path: PlansStore.GitResult(
+                path: projectDir.path, branch: "main", dirty: false,
+                mode: .local, hasRemote: true
+            )
+        ])
+        XCTAssertEqual(result.first?.gitHasRemote, true)
+
+        let task = Task(
+            id: "007", title: "Run", type: nil, status: .inProgress, created: nil,
+            branch: nil, isKeptWorktree: false, blockedBy: [], sections: [],
+            howProgress: (done: 0, total: 0), isBlocked: false, isCompletedDir: false,
+            isBacklogged: false, failure: nil, modified: nil
+        )
+        let project = ProjectTasks(
+            projectPath: "/p", projectName: "P", lastSeen: "",
+            tasks: [task], counts: [.inProgress: 1], activeTasks: [task],
+            plansMode: .local, gitHasRemote: true
+        )
+        let outcomes: [RunOutcomeKey: RunOutcome] = [
+            RunOutcomeKey(projectPath: "/p", taskID: "007"): makeOutcome(
+                projectPath: "/p", taskID: "007",
+                classification: .truncated, timestamp: "2026-06-04T10:00:00Z"
+            )
+        ]
+        let overlaid = PlansStore.applyFailureOverlayForTesting(to: project, latestOutcomes: outcomes)
+        XCTAssertNotNil(overlaid.tasks.first?.failure)
+        XCTAssertEqual(overlaid.gitHasRemote, true)
+    }
+
+    func testGitSecondPassResolvesHasRemoteForLocalProject() throws {
+        let projectDir = try makeProjectDir(name: "alpha")
+        func git(_ args: [String]) throws {
+            let proc = Process()
+            proc.executableURL = URL(fileURLWithPath: "/usr/bin/git")
+            proc.arguments = ["-C", projectDir.path] + args
+            proc.standardOutput = Pipe()
+            proc.standardError = Pipe()
+            try proc.run()
+            proc.waitUntilExit()
+        }
+        try git(["init", "-b", "main"])
+        try git(["remote", "add", "origin", "https://example.invalid/repo.git"])
+        try ".plans/\n".write(
+            to: projectDir.appendingPathComponent(".gitignore"),
+            atomically: true, encoding: .utf8
+        )
+        let reader = try makeReader(projectPaths: [projectDir.path])
+        let store = PlansStore(registryReader: reader, defaults: makeDefaults())
+        store.reload()
+
+        let deadline = Date().addingTimeInterval(10)
+        while store.projects.first?.plansMode == nil, Date() < deadline {
+            RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+        }
+        XCTAssertEqual(store.projects.first?.plansMode, .local)
+        XCTAssertEqual(store.projects.first?.gitHasRemote, true)
+    }
+
+    // MARK: - Convert to tracked plans (migrate)
+
+    func testConvertSkipReasonRule() {
+        XCTAssertNil(PlansStore.convertSkipReason(mode: .local, hasRemote: true, isBusy: false, isPaused: false))
+        XCTAssertEqual(PlansStore.convertSkipReason(mode: nil, hasRemote: true, isBusy: false, isPaused: false), .notLocalMode)
+        for mode in [PlansStorageMode.none, .inline, .branch] {
+            XCTAssertEqual(PlansStore.convertSkipReason(mode: mode, hasRemote: true, isBusy: false, isPaused: false), .notLocalMode)
+        }
+        XCTAssertEqual(PlansStore.convertSkipReason(mode: .local, hasRemote: false, isBusy: false, isPaused: false), .noRemote)
+        XCTAssertEqual(PlansStore.convertSkipReason(mode: .local, hasRemote: nil, isBusy: false, isPaused: false), .noRemote)
+        XCTAssertEqual(PlansStore.convertSkipReason(mode: .local, hasRemote: true, isBusy: true, isPaused: false), .busy)
+        XCTAssertEqual(PlansStore.convertSkipReason(mode: .local, hasRemote: true, isBusy: false, isPaused: true), .inProgress)
+    }
+
+    /// Records every injected migrate call and returns a scripted result,
+    /// optionally held open by a gate.
+    private final class MigrateRecorder: @unchecked Sendable {
+        private let lock = NSLock()
+        private var _calls: [String] = []
+        var result = PlansGitHelper.MigrateResult(outcome: .ok("plans moved to branch plans"))
+        var gate: DispatchSemaphore?
+
+        var calls: [String] { lock.withLock { _calls } }
+
+        var closure: @Sendable (String) -> PlansGitHelper.MigrateResult {
+            { [self] path in
+                lock.withLock { _calls.append(path) }
+                gate?.wait()
+                return lock.withLock { result }
+            }
+        }
+    }
+
+    private struct MigrateFixture {
+        let store: PlansStore
+        let clock: TestClock
+        let recorder: MigrateRecorder
+        let path: String
+        let projectDir: URL
+    }
+
+    private func makeMigrateFixture() throws -> MigrateFixture {
+        let projectDir = try makeProjectDir(name: "alpha")
+        try writeTaskFile(
+            projectDir: projectDir,
+            filename: "001-first.md",
+            text: "# First\n\n**Status:** pending",
+            in: "pending"
+        )
+        let reader = try makeReader(projectPaths: [projectDir.path])
+        let clock = TestClock()
+        let recorder = MigrateRecorder()
+        let store = PlansStore(
+            registryReader: reader,
+            defaults: makeDefaults(),
+            now: clock.source,
+            plansMigrate: recorder.closure
+        )
+        store.reload()
+        return MigrateFixture(store: store, clock: clock, recorder: recorder,
+                              path: projectDir.path, projectDir: projectDir)
+    }
+
+    /// Marks the fixture project local mode with a remote. Call right before
+    /// acting: the real git pass (no repo in the temp dir) resets it whenever
+    /// the run loop spins.
+    private func markLocal(_ fixture: MigrateFixture, hasRemote: Bool = true) {
+        fixture.store.applyGitInfoForTesting([
+            PlansStore.GitResult(path: fixture.path, branch: "main", dirty: false,
+                                 mode: .local, hasRemote: hasRemote)
+        ])
+    }
+
+    func testConvertRefusedUnlessEligible() throws {
+        let fixture = try makeMigrateFixture()
+        markLocal(fixture, hasRemote: false)
+        XCTAssertEqual(fixture.store.convertSkipReason(for: fixture.path), .noRemote)
+        XCTAssertFalse(fixture.store.convertToTrackedPlans(projectPath: fixture.path) { _ in
+            XCTFail("an ineligible convert must not complete")
+        })
+
+        markLocal(fixture)
+        fixture.store.isProjectBusy = { $0 == fixture.path }
+        XCTAssertEqual(fixture.store.convertSkipReason(for: fixture.path), .busy)
+        XCTAssertFalse(fixture.store.convertToTrackedPlans(projectPath: fixture.path) { _ in })
+
+        XCTAssertEqual(fixture.store.convertSkipReason(for: "/nope"), .unknownProject)
+        XCTAssertEqual(fixture.recorder.calls, [])
+    }
+
+    func testConvertPausesThePathWhileMigrateRuns() throws {
+        let fixture = try makeMigrateFixture()
+        let gate = DispatchSemaphore(value: 0)
+        fixture.recorder.gate = gate
+        markLocal(fixture)
+
+        var completed: PlansGitHelper.MigrateResult?
+        let finished = expectation(description: "migrate finished")
+        XCTAssertTrue(fixture.store.convertToTrackedPlans(projectPath: fixture.path) { result in
+            completed = result
+            finished.fulfill()
+        })
+        XCTAssertTrue(fixture.store.pausedPaths.contains(fixture.path))
+        XCTAssertEqual(fixture.store.convertSkipReason(for: fixture.path), .inProgress)
+        XCTAssertFalse(fixture.store.convertToTrackedPlans(projectPath: fixture.path) { _ in })
+
+        // Migrate moves `.plans` aside: a reload must keep the last parse
+        // rather than parse the missing directory as an empty project.
+        try FileManager.default.removeItem(at: fixture.projectDir.appendingPathComponent(".plans"))
+        fixture.clock.advance(60)
+        fixture.store.reload()
+        XCTAssertEqual(fixture.store.lastReloadParsedPathsForTesting, [])
+        XCTAssertEqual(fixture.store.projects.first?.tasks.map(\.id), ["001"])
+        XCTAssertEqual(fixture.store.lastGitPassQueriedPathsForTesting, [],
+                       "a paused path must not be git-queried, even past the throttle window")
+
+        // A git result that lands mid-migrate is dropped for the paused path.
+        fixture.store.applyGitInfoForTesting([
+            PlansStore.GitResult(path: fixture.path, branch: nil, dirty: nil, mode: PlansStorageMode.none)
+        ])
+        XCTAssertEqual(fixture.store.projects.first?.plansMode, .local)
+
+        // Sync stays off for the path too.
+        XCTAssertEqual(fixture.store.syncSkipReason(for: fixture.path, trigger: .manual), .paused)
+
+        gate.signal()
+        wait(for: [finished], timeout: 5)
+        XCTAssertEqual(completed?.outcome, .ok("plans moved to branch plans"))
+        XCTAssertFalse(fixture.store.pausedPaths.contains(fixture.path))
+        XCTAssertEqual(fixture.store.lastGitPassQueriedPathsForTesting, [fixture.path],
+                       "a finished migrate forces a mode re-query")
+        XCTAssertEqual(fixture.recorder.calls, [fixture.path])
+    }
+
+    func testConvertErrorIsReportedAndNotRetried() throws {
+        let fixture = try makeMigrateFixture()
+        fixture.recorder.result = PlansGitHelper.MigrateResult(
+            outcome: .error("verify failed; backup kept at /tmp/plans-backup", backupPath: "/tmp/plans-backup")
+        )
+        markLocal(fixture)
+
+        var completed: PlansGitHelper.MigrateResult?
+        let finished = expectation(description: "migrate finished")
+        XCTAssertTrue(fixture.store.convertToTrackedPlans(projectPath: fixture.path) { result in
+            completed = result
+            finished.fulfill()
+        })
+        wait(for: [finished], timeout: 5)
+
+        XCTAssertEqual(completed?.outcome,
+                       .error("verify failed; backup kept at /tmp/plans-backup", backupPath: "/tmp/plans-backup"))
+        XCTAssertFalse(fixture.store.pausedPaths.contains(fixture.path))
+        RunLoop.main.run(until: Date().addingTimeInterval(0.2))
+        XCTAssertEqual(fixture.recorder.calls.count, 1)
+    }
 }

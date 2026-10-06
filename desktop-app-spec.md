@@ -102,6 +102,48 @@ The distinction that matters, and that must be preserved:
 > stale. Adding **delete** did not introduce mutation, it added one more verb to
 > a runner that already had three.
 
+### 2.1 Sanctioned exception: the plans-cc `plans-git.js` helper
+
+For projects whose `.plans/` lives on a git branch (**branch mode**, §5.1.1),
+the app also spawns one more plans-cc-owned subprocess:
+`node ~/.claude/plans-cc/plans-git.js <subcommand>`, with cwd set to the project
+root. Only two subcommands are ever invoked:
+
+- **`sync`**: pulls the `plans` branch (rebase), renumbers colliding task ids,
+  rebuilds counters, and pushes when it committed something. It aborts a
+  rebase it cannot resolve on its own.
+- **`migrate`**: converts a **local**-mode project to branch mode, but only
+  after the user explicitly confirms the "Convert to tracked plans…" action
+  (§6.1). It moves `.plans/` aside to a backup, creates the orphan `plans`
+  branch worktree, copies and verifies every file, then removes the backup.
+
+This is the same principle as the runner, not a new one. The helper is
+plans-cc code, and it owns the locking (`.plans/.git-lock`), rebase,
+renumber and push semantics. The app does not reimplement any of them. The
+in-process rule still holds without exception: no Swift code path opens a
+`.plans/` file for writing, runs a mutating `git` command against `.plans`, or
+edits the code repo's `.gitignore`. The app's own `git` calls are all
+read-only queries (`rev-parse`, `check-ignore`, `rev-list`, `remote`). They
+never fetch and never take the lock. The app runs the helper with a login-shell
+`node`, `GIT_TERMINAL_PROMPT=0` and `GIT_SSH_COMMAND="ssh -oBatchMode=yes"`, so
+it can never block on a credential prompt. Timeouts are 60s for `sync` and
+180s for `migrate`. The app never retries a failed `migrate`.
+
+The helper always exits 0. The app reads its stdout instead:
+
+| Output line | Meaning to the app |
+|-------------|--------------------|
+| `Renumbered #A → #B` | A task id collided with a remote one and was moved. Shown in the indicator's tooltip and logged. |
+| `Warning: …conflict it cannot resolve automatically — rebase aborted…` | Sync outcome **conflict**. |
+| `Warning: …locked by another commit…` | Sync outcome **locked**: another plans-cc commit held the lock. Not surfaced. |
+| `Warning: plans sync failed…` / `Warning: plans-git failed…` | Sync outcome **failed**. Offline is the common case. |
+| any other `Warning: …` | Kept for the tooltip. The outcome stays **synced**. A failed push, for example, already shows as "ahead". |
+| no output | **synced**. A project with no upstream also prints nothing; the indicator shows "no upstream" from its own status query. |
+| final `OK: …` / `Error: …` (`migrate`) | The convert result. An `Error:` that mentions `backup kept at <path>` names that path to the user. |
+
+A helper that is missing from `~/.claude/plans-cc/plans-git.js` reads as a
+failed sync, and as a failed convert.
+
 Note that this constraint is about **`.plans/` task data**. The registry file at
 `~/.claude/plans-cc/projects.json` is a separate, much simpler artifact: it is
 normally written by the plans-cc tooling itself, and the app only needs to read
@@ -239,6 +281,69 @@ file does. A summary of its behavior is given in §5.5.
 - The three top-level `.md` docs are project-level prose and are **optional to
   parse**. You may surface them later but they are not required for the views in
   §1.
+
+### 5.1.1 Storage modes
+
+plans-cc stores a project's `.plans/` in one of four **storage modes**. The app
+resolves the mode with an exact port of plans-cc `detectMode`
+(`~/.claude/plans-cc/lib/plans-git.js`), checking these rules in order:
+
+| Mode | Rule | Meaning |
+|------|------|---------|
+| `none` | `git -C <root> rev-parse --show-toplevel` fails | The project root isn't a git repo. |
+| `branch` | `git -C <root>/.plans rev-parse --show-toplevel` succeeds, its realpath **equals** realpath(`<root>/.plans`), **and** it differs from the realpath of the root's toplevel | `.plans` is the top of its own worktree. |
+| `local` | `git -C <root> check-ignore -q .plans` succeeds | `.plans` is gitignored by the code repo and never committed. |
+| `inline` | otherwise | `.plans` is tracked in the code repo. |
+
+The "differs from the root's toplevel" clause matters. Without it, a project
+whose root *is* `.plans`'s repo would be misread as branch mode.
+
+**Branch-mode layout.** `.plans/` is a permanent `git worktree` of an
+**orphan** branch (default name `plans`) in the project's own repo. That
+branch shares no history with the code branches. It is checked out at
+`<root>/.plans` and stays put whatever branch the main checkout is on, so a
+capture made while the code checkout is on a review branch still lands on
+`plans`. The code repo ignores `.plans`. `migrate` writes the entry to
+`.git/info/exclude`; plans-cc may also add a slashless `.plans` line to
+`.gitignore`. Execution worktrees under `<root>/.worktrees/<id>-…/` reach the
+same data through a `.plans` symlink. The task-file contract (§5.2–§5.5) is
+**identical** in every mode, so the app parses `.plans/` the same way
+whatever the mode is.
+
+A branch-mode `.plans/` holds entries that local mode doesn't have. The
+parser must ignore all of them:
+
+| Entry | What it is |
+|-------|------------|
+| `.git` (a **file**, not a dir) | The worktree's `gitdir:` pointer. |
+| `.git-lock/` | plans-cc's `mkdir` commit mutex. It's transient, and plans-cc breaks a lock older than 60s (`lockStaleMs`). |
+| `.gitignore` | Ignores `.DS_Store` and `.git-lock` inside the worktree. |
+| `.gitattributes` | Merge drivers: `HISTORY.md merge=union`, `PROGRESS.md merge=ours`, `config.json merge=ours`. |
+| `archive/` | Archived task files. plans-cc scans them only for id allocation, and `lib/parse-tasks.js` doesn't read them. |
+| `config.json` → `sync` | The optional key `{ "remote": "origin", "branch": "plans", "auto_push": true }` (defaults shown). The app reads `sync.branch` (as the fallback branch name) and `sync.remote` for the status query. It never writes the key. |
+
+`backlog/` is a task directory in every mode (see above), not an ignored
+entry. The parser needs no special-casing for any of this. It lists only
+`*.md` files directly inside `pending/`, `completed/` and `backlog/`, and the
+reload signature covers only those three directories, so a lock appearing and
+disappearing doesn't force a re-parse.
+`TaskParserTests.testBranchModeWorktreeEntriesAreIgnored` pins this behavior.
+
+**Sync status** is a port of plans-cc `syncStatus`, queried for branch-mode
+projects only. It reads, without fetching or taking the lock:
+
+- **branch**: `git -C .plans rev-parse --abbrev-ref HEAD`. When that fails or
+  the HEAD is detached, it falls back to `sync.branch`, then to `plans`.
+- **upstream**: whether `rev-parse --abbrev-ref --symbolic-full-name @{u}`
+  succeeds.
+- **ahead / behind**: from `rev-list --left-right --count HEAD...@{u}`. The
+  left count is ahead and the right count is behind.
+- **rebaseStuck**: whether either `rev-parse --git-path rebase-merge` or
+  `rebase-apply` exists.
+
+Because the app never fetches, "behind" is only as fresh as the last `sync`'s
+pull. "Ahead" means local plans commits that a background push hasn't
+delivered yet.
 
 ### 5.2 Task filename format
 
@@ -421,6 +526,49 @@ the six statuses remain distinguishable.
 Type is most useful in the browser window (Surface B) as a per-task badge; the
 glance can ignore type and group purely by status if that reads more cleanly.
 
+### 6.1 Plans sync indicator and storage actions
+
+**Branch-mode** projects (§5.1.1) get one sync glyph in the project card's git
+footer, after the dirty dot. It mirrors the `plans:` line of the plans-cc
+terminal dashboard (`buildPlansLine`). Projects in local, inline or `none`
+mode show nothing, and the app spawns no helper for them. The card has room
+for one mark, so it shows the most severe state, checked in this order:
+
+| Priority | State | Dashboard mark | Color |
+|----------|-------|----------------|-------|
+| 1 | syncing (a sync is running) | `⟳ syncing` | muted `#a89984` |
+| 2 | rebase stuck (`rebaseStuck`) | `⚠ rebase stuck` | red `#cc6666` |
+| 3 | conflict (the last sync's outcome) | `⚠ sync conflict` | red `#cc6666` |
+| 4 | no upstream | `⚠ no upstream` | amber `#fabd2f` |
+| 5 | failed (including offline or a missing helper) | `⚠ sync failed` | amber `#fabd2f` |
+| 6 | ahead / behind | `↑n` / `↓n` | amber `#fabd2f` |
+| 7 | in sync | `✓` | green `#8ec07c` |
+
+Red is reserved for states that need a manual fix. A failed sync is amber
+because offline is the common cause, and it clears on its own. A `locked`
+outcome is never surfaced. The glyph's tooltip carries the state, every
+`Warning:` from the last sync, and any `Renumbered #A → #B` records.
+
+Two actions live in the card footer's context menu (right-click):
+
+- **Sync plans now** (branch mode). Clicking the glyph does the same. It
+  bypasses the debounce, the auto-sync flag and the conflict back-off (§7),
+  and it clears the back-off. It stays disabled while a sync is already
+  running, a migrate is running, the project has no upstream, a rebase is
+  stuck, or a run is in flight in that project. Syncing during a stuck rebase
+  would let the helper abort the user's in-progress resolution.
+- **Convert to tracked plans…** (local mode only). It is offered only when the
+  project has a git remote (`git remote` is non-empty), no run is in flight
+  there, and no convert is already running. It opens a confirmation that uses
+  plans-cc's own wording: "Move `.plans/` onto a dedicated `plans` branch
+  (pushed to `origin` when it exists)? Every file is copied and verified before
+  the backup is removed." On confirm it runs `plans-git.js migrate` (§2.1) and
+  reports the final `OK:` or `Error:` line. If the helper kept a backup, the
+  report names its path. While migrate runs, polling and sync pause for that
+  project, and the card stays listed even though `.plans` is briefly moved
+  aside. The app never retries a convert and never edits or commits the code
+  repo's `.gitignore`.
+
 ---
 
 ## 7. Live-Update Expectation
@@ -445,6 +593,51 @@ and reliable for personal tooling. Polling every few seconds is perfectly
 acceptable. Always re-validate stale projects (§4.3) on each refresh so deleted
 projects drop out.
 
+This app polls every **5s**. The read-only git queries run in a second pass:
+branch, dirty, storage mode, sync status, and whether a local-mode project has
+a remote. That pass is throttled per project. It re-queries on first sight,
+when the `.plans/` signature changes, or after **30s**. Each `git` call has a
+**10s** timeout, and a timed-out query reads as "unknown".
+
+### 7.1 Branch-mode sync cadence
+
+Plans written on another machine reach a branch-mode project's `.plans/` only
+through a `sync`. So the app syncs in the background, without waiting for a
+local plans-cc run. The scheduler runs at the end of every reload. There are
+three triggers:
+
+| Trigger | When | Gates skipped |
+|---------|------|---------------|
+| scheduled | Each reload, at most once per **90s** per project. | none |
+| run finished | Right after any run in that project ends. | the 90s debounce |
+| manual | "Sync plans now" (§6.1). | the debounce, the auto-sync flag, the conflict back-off and the lock check |
+
+Every trigger skips a project that:
+
+- isn't in branch mode,
+- has no upstream, or a sync status that isn't known yet,
+- has a stuck rebase,
+- has a run in flight (so a sync never races a run's own plans commits),
+- is already syncing, or
+- is paused for a migrate.
+
+Automatic triggers also skip:
+
+- a project whose `.plans/.git-lock` is younger than **60s**, since that means a
+  plans-cc commit is underway. plans-cc breaks older locks itself.
+- when auto-sync is off. The flag is the `autoSyncPlans` UserDefaults key, and
+  it defaults to on.
+
+**Conflict back-off.** `sync` aborts a rebase it can't resolve, so another try
+on a timer would only hit the same conflict. After a `conflict` outcome, a
+project is left out of every automatic sync until the user clicks "Sync plans
+now".
+
+Syncs run concurrently in the background, at most one per project. When a
+sync finishes, the app re-queries that project's git status right away. The
+next 5s poll picks up any pulled task files through the normal signature
+change.
+
 ---
 
 ## 8. Acceptance Summary
@@ -467,6 +660,22 @@ A correct build of this app:
 7. **Never writes `.plans/` data in-process** — the app itself never edits or
    moves a task file; all mutation (capture / elaborate / execute / delete) is
    delegated to the bundled runner subprocess, which drives the plans-cc skills
-   (§2).
+   (§2). The one other writer is the plans-cc `plans-git.js` helper (`sync`, and
+   `migrate` after confirmation), spawned as a subprocess (§2.1).
 8. Is native macOS (Swift), menu bar + window, built/installed separately from
    the plans-cc npm package, with no signing/notarization requirement.
+9. **Storage modes:** detects each project's mode (`none` / `local` /
+   `inline` / `branch`) with the `detectMode` rule. It parses a branch-mode
+   `.plans/` worktree exactly like a local one, ignoring the `.git` file,
+   `.git-lock/`, `.gitignore`, `.gitattributes`, `archive/` and the
+   `config.json` `sync` key (§5.1.1). Local- and inline-mode projects look and
+   behave as before: no indicator, and no helper spawns.
+10. **Branch-mode sync:** syncs branch-mode projects in the background
+    (90s debounce, right after a run in the project, or on demand). It never
+    syncs a project that is busy, locked, rebase-stuck, has no upstream, or is
+    backed off after a conflict. Each card shows one sync glyph by the §6.1
+    priority, with a "Sync plans now" action (§7.1).
+11. **Convert:** offers "Convert to tracked plans…" only for local-mode
+    projects that have a remote and no run in flight. It confirms first, runs
+    `plans-git.js migrate` once, and reports `OK:` / `Error:`, including any
+    kept backup path (§6.1).

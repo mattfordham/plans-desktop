@@ -328,6 +328,12 @@ final class TaskRun {
     /// here so the outcome log records the project for EVERY run kind.
     private var outcomeProjectPath: String?
 
+    /// The project this run operates in, for every run kind: the capture-time
+    /// `projectPath` when set, otherwise the path handed to
+    /// `start(projectPath:)`. `nil` only for an existing-task run that has not
+    /// been started. Stays readable after the run finishes.
+    var runProjectPath: String? { projectPath ?? outcomeProjectPath }
+
     /// The durable run-outcome writer, invoked once from `finish(...)`. Injectable
     /// so tests can point it at a temp file (and so a test build with no writable
     /// home still works). Defaults to `~/.claude/plans-cc/run-outcomes.log`.
@@ -655,7 +661,8 @@ final class TaskRun {
     /// Test seam: flips the run into the live `.running` state (`isRunning ==
     /// true`) WITHOUT spawning a `Process`, so the #053 re-key path — which only
     /// fires for a still-running capture — is unit-testable. DEBUG-only.
-    func markRunningForTesting() {
+    func markRunningForTesting(projectPath: String? = nil) {
+        if let projectPath { outcomeProjectPath = projectPath }
         isRunning = true
         phase = .running
     }
@@ -712,7 +719,7 @@ final class TaskRun {
             timestamp: now(),
             taskID: taskID,
             mode: mode.rawValue,
-            projectPath: projectPath ?? outcomeProjectPath ?? "",
+            projectPath: runProjectPath ?? "",
             costUsd: summary?.costUsd ?? 0,
             turns: summary?.turns ?? 0,
             stopReason: lastStopReason,
@@ -930,9 +937,10 @@ final class TaskRunner {
     /// user dismisses it; launching the same task again replaces the entry.
     private(set) var runs: [String: TaskRun] = [:]
 
-    /// A callback invoked whenever any run finishes, so the app can reload the
-    /// store and surface the task's new status. Set by the app at injection.
-    var onAnyRunFinished: (() -> Void)?
+    /// A callback invoked whenever any run finishes, with the project path the
+    /// run worked in, so the app can reload the store, surface the task's new
+    /// status and sync that project's plans. Set by the app at injection.
+    var onAnyRunFinished: ((_ projectPath: String) -> Void)?
 
     init() {}
 
@@ -952,6 +960,21 @@ final class TaskRunner {
     /// Convenience over `runningRunCount` for the common "is anything running?"
     /// branch in the terminate hook.
     var hasRunningRuns: Bool { runningRunCount > 0 }
+
+    /// True when any run of any mode is currently in flight in the project at
+    /// `projectPath`. Paths are compared after standardization, so a trailing
+    /// slash or `.` component does not split one project in two.
+    func hasRunningRun(inProject projectPath: String) -> Bool {
+        let target = Self.standardizedPath(projectPath)
+        return runs.values.contains { run in
+            guard run.isRunning, let path = run.runProjectPath else { return false }
+            return Self.standardizedPath(path) == target
+        }
+    }
+
+    private nonisolated static func standardizedPath(_ path: String) -> String {
+        URL(fileURLWithPath: path).standardizedFileURL.path
+    }
 
     /// Launches a run for `taskID` in `projectPath` with `mode`. If a run for
     /// this task is already in flight, this is a no-op; otherwise it replaces any
@@ -979,7 +1002,7 @@ final class TaskRunner {
                               deep: deep, keep: keep)
         runs[taskID] = taskRun
         taskRun.start(projectPath: projectPath) { [weak self] in
-            self?.onAnyRunFinished?()
+            self?.onAnyRunFinished?(projectPath)
         }
     }
 
@@ -1060,7 +1083,7 @@ final class TaskRunner {
                               deep: deep, keep: keep)
         runs[key] = taskRun
         taskRun.start(projectPath: projectPath) { [weak self] in
-            self?.onAnyRunFinished?()
+            self?.onAnyRunFinished?(projectPath)
         }
     }
 

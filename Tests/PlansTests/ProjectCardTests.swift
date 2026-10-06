@@ -411,4 +411,55 @@ final class ProjectCardTests: XCTestCase {
                 + "text aligns with the re-inset header/footer content"
         )
     }
+
+    // MARK: - Convert to tracked plans (alert copy)
+
+    func testConvertConfirmationUsesPlansCcWording() {
+        let confirmation = ProjectCard.convertConfirmation
+        XCTAssertEqual(confirmation.title, "Convert to tracked plans?")
+        XCTAssertEqual(
+            confirmation.message,
+            "Move `.plans/` onto a dedicated `plans` branch (pushed to `origin` when it exists)? "
+                + "Every file is copied and verified before the backup is removed."
+        )
+        XCTAssertEqual(confirmation.confirmButton, "Convert")
+    }
+
+    func testConvertReportForSuccessCarriesOKLine() {
+        let report = ProjectCard.convertReport(for: PlansGitHelper.MigrateResult(
+            outcome: .ok(".plans is now on branch plans"),
+            warnings: ["push skipped"]
+        ))
+        XCTAssertFalse(report.isError)
+        XCTAssertTrue(report.message.hasPrefix("OK: .plans is now on branch plans"), report.message)
+        XCTAssertTrue(report.message.contains("Warning: push skipped"), report.message)
+    }
+
+    func testConvertReportForErrorCarriesErrorLine() {
+        let report = ProjectCard.convertReport(for: PlansGitHelper.MigrateResult(
+            outcome: .error("plans already exists", backupPath: nil)
+        ))
+        XCTAssertTrue(report.isError)
+        XCTAssertEqual(report.message, "Error: plans already exists")
+    }
+
+    func testConvertReportStatesBackupPathExplicitly() {
+        let backup = "/Users/me/proj/.plans.migrate-backup"
+        let report = ProjectCard.convertReport(for: PlansGitHelper.MigrateResult(
+            outcome: .error("verify failed; backup kept at \(backup)", backupPath: backup)
+        ))
+        XCTAssertTrue(report.isError)
+        XCTAssertTrue(report.message.hasPrefix("Error: verify failed; backup kept at \(backup)"), report.message)
+        XCTAssertTrue(
+            report.message.contains("Your original plans are intact at \(backup)"),
+            report.message
+        )
+    }
+
+    func testConvertReportForMissingHelperIsAnError() {
+        let report = ProjectCard.convertReport(for: PlansGitHelper.MigrateResult(outcome: .helperMissing))
+        XCTAssertTrue(report.isError)
+        XCTAssertTrue(report.message.hasPrefix("Error: "), report.message)
+        XCTAssertTrue(report.message.contains("plans-git.js"), report.message)
+    }
 }
