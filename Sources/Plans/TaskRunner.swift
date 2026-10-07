@@ -927,14 +927,18 @@ final class TaskRun {
 
 /// Coordinates concurrent task runs. One shared instance is created in
 /// `AppDelegate` and injected via `.environment(...)`, so card rows and detail
-/// windows resolve the `TaskRun` for a specific task id. Multiple tasks can run
-/// at once — each gets its own `TaskRun`.
+/// windows resolve the `TaskRun` for a specific (project path, task id) pair.
+/// Multiple tasks can run at once — each gets its own `TaskRun`.
 @MainActor
 @Observable
 final class TaskRunner {
-    /// Active and recently-finished runs, keyed by task id. A run stays in the
-    /// map after finishing so the UI can still show its summary/error until the
-    /// user dismisses it; launching the same task again replaces the entry.
+    /// Active and recently-finished runs, keyed by `runKey(projectPath:taskID:)`
+    /// — the owning project path plus the FULL task id — so the same id in two
+    /// projects, or `1000` vs `100` (#090), never share an entry. A capture's
+    /// synthetic `capture:<path>:<UUID>` id is already project-scoped and unique,
+    /// so it is its own key. A run stays in the map after finishing so the UI
+    /// can still show its summary/error until the user dismisses it; launching
+    /// the same task again replaces the entry.
     private(set) var runs: [String: TaskRun] = [:]
 
     /// A callback invoked whenever any run finishes, with the project path the
@@ -944,11 +948,33 @@ final class TaskRunner {
 
     init() {}
 
-    /// The run for `taskID`, if one exists (active or finished-but-not-dismissed).
-    func run(for taskID: String) -> TaskRun? { runs[taskID] }
+    /// The `runs` key for `taskID` in `projectPath`: the path and full id joined
+    /// by a NUL (which can appear in neither), so distinct pairs never collide.
+    /// A synthetic capture id (`captureKey(projectPath:) + ":" + UUID`) already
+    /// embeds its project and is unique, so it is returned unchanged — letting
+    /// capture rows use the same `(taskID, projectPath)` lookups as plan rows.
+    nonisolated static func runKey(projectPath: String, taskID: String) -> String {
+        if isSyntheticCaptureID(taskID) { return taskID }
+        return projectPath + "\u{0}" + taskID
+    }
 
-    /// True when a run is currently in flight for `taskID`.
-    func isRunning(taskID: String) -> Bool { runs[taskID]?.isRunning ?? false }
+    /// True for a description-driven run's synthetic `capture:<path>:<UUID>` id.
+    /// A real task id never matches: it is a digit run or (for a stray filename)
+    /// at most 3 characters (§5.2).
+    nonisolated static func isSyntheticCaptureID(_ taskID: String) -> Bool {
+        taskID.hasPrefix("capture:")
+    }
+
+    /// The run for `taskID` in `projectPath`, if one exists (active or
+    /// finished-but-not-dismissed).
+    func run(for taskID: String, in projectPath: String) -> TaskRun? {
+        runs[Self.runKey(projectPath: projectPath, taskID: taskID)]
+    }
+
+    /// True when a run is currently in flight for `taskID` in `projectPath`.
+    func isRunning(taskID: String, in projectPath: String) -> Bool {
+        run(for: taskID, in: projectPath)?.isRunning ?? false
+    }
 
     /// How many runs are currently in flight across all tasks. This is the single
     /// source of truth the quit-confirmation hook (`applicationShouldTerminate`)
@@ -994,13 +1020,14 @@ final class TaskRunner {
     /// compiling.
     func run(projectPath: String, taskID: String, mode: RunMode = .execute,
              description: String? = nil, deep: Bool = false, keep: Bool = false) {
-        if let existing = runs[taskID], existing.isRunning {
+        let key = Self.runKey(projectPath: projectPath, taskID: taskID)
+        if let existing = runs[key], existing.isRunning {
             runnerLog.notice("run ignored: task \(taskID, privacy: .public) is already running")
             return
         }
         let taskRun = TaskRun(taskID: taskID, mode: mode, description: description,
                               deep: deep, keep: keep)
-        runs[taskID] = taskRun
+        runs[key] = taskRun
         taskRun.start(projectPath: projectPath) { [weak self] in
             self?.onAnyRunFinished?(projectPath)
         }
@@ -1026,7 +1053,7 @@ final class TaskRunner {
     /// finished-but-not-yet-reconciled ones — NOT just `isRunning` runs. The
     /// spinner row must persist from process exit until reconciliation confirms
     /// the new plan row has appeared and removes the run from `runs` via
-    /// `dismiss(taskID:)`. Because reconciliation (and the manual popover-dismiss
+    /// `dismiss(taskID:in:)`. Because reconciliation (and the manual popover-dismiss
     /// path) is what removes the run from the map, "row visible" is exactly "run
     /// still in `runs`", so the spinner-out / plan-row-in transition is atomic.
     /// An errored capture stays visible INDEFINITELY: reconcile never
@@ -1096,16 +1123,25 @@ final class TaskRunner {
         execute ? .executeYolo : (elaborate ? .captureElaborate : .capture)
     }
 
-    /// Stops the run for `taskID`, if any.
-    func stop(taskID: String) {
-        runs[taskID]?.stop()
+    /// Stops the run for `taskID` in `projectPath`, if any.
+    func stop(taskID: String, in projectPath: String) {
+        run(for: taskID, in: projectPath)?.stop()
     }
 
-    /// Drops a finished run for `taskID` from the map (e.g. when the user closes
-    /// its progress sheet). No-op if the run is still in flight.
-    func dismiss(taskID: String) {
-        if let run = runs[taskID], !run.isRunning {
-            runs[taskID] = nil
+    /// Stops every in-flight run (the quit-confirmation path). Finished runs are
+    /// left alone (their `stop()` is a no-op anyway).
+    func stopAllRunning() {
+        for run in runs.values where run.isRunning {
+            run.stop()
+        }
+    }
+
+    /// Drops a finished run for `taskID` in `projectPath` from the map (e.g. when
+    /// the user closes its progress sheet). No-op if the run is still in flight.
+    func dismiss(taskID: String, in projectPath: String) {
+        let key = Self.runKey(projectPath: projectPath, taskID: taskID)
+        if let run = runs[key], !run.isRunning {
+            runs[key] = nil
         }
     }
 
@@ -1176,9 +1212,17 @@ final class TaskRunner {
             idsByProject[project.projectPath] = Set(project.tasks.map(\.id))
         }
 
-        // Ids already used as run keys aren't claimable as a "new" plan id this
-        // pass (e.g. a prior re-key's real id, or an existing-task run's id).
-        var claimed = Set(runs.keys)
+        // Ids that already have a run IN A PROJECT aren't claimable as that
+        // project's "new" plan id this pass (e.g. a prior re-key's real id, or an
+        // existing-task run's id). Scoped per project: a run for `002` elsewhere
+        // says nothing about this project's `002`. Synthetic capture ids are
+        // never task ids, so they claim nothing.
+        var claimedByProject: [String: Set<String>] = [:]
+        for run in runs.values {
+            guard let path = run.runProjectPath,
+                  !isSyntheticCaptureID(run.taskID) else { continue }
+            claimedByProject[path, default: []].insert(run.taskID)
+        }
 
         // How many RUNNING captures exist per project — a re-key only fires when
         // exactly one running capture is in flight for the project, so a single
@@ -1196,7 +1240,9 @@ final class TaskRunner {
             guard let projectPath = run.projectPath else { continue }
 
             let currentIDs = idsByProject[projectPath] ?? []
-            let newIDs = currentIDs.subtracting(run.baselineTaskIDs).subtracting(claimed)
+            let newIDs = currentIDs
+                .subtracting(run.baselineTaskIDs)
+                .subtracting(claimedByProject[projectPath] ?? [])
 
             if run.isRunning {
                 // Hand off a live capture by re-keying to the real id — but only
@@ -1206,7 +1252,7 @@ final class TaskRunner {
                 if runningCapturesByProject[projectPath] == 1, newIDs.count == 1,
                    let realID = newIDs.first {
                     result.toRekey[run.taskID] = realID
-                    claimed.insert(realID)
+                    claimedByProject[projectPath, default: []].insert(realID)
                 }
                 continue
             }
@@ -1217,7 +1263,7 @@ final class TaskRunner {
             // could read the error (six Ensemble captures were silently
             // swallowed this way when the launcher's API call 400'd). The row
             // persists, rendering its error state, until the user opens the
-            // popover and closes it (the manual `dismiss(taskID:)` path).
+            // popover and closes it (the manual `dismiss(taskID:in:)` path).
             if run.error != nil { continue }
 
             if !newIDs.isEmpty {
@@ -1241,7 +1287,7 @@ final class TaskRunner {
     /// whose bounded fallback has elapsed). Called from the run-finish hand-off
     /// AFTER `store.reload()`, in the same main-actor turn, so SwiftUI paints one
     /// atomic transition (spinner out, plan row in) instead of two frames.
-    /// `dismiss(taskID:)` stays idempotent — it only removes a finished, present
+    /// `dismiss(taskID:in:)` stays idempotent — it only removes a finished, present
     /// run — so a still-running or already-removed run is a safe no-op.
     ///
     /// This is also the deferred terminal-state path for the NEW-TASK launcher
@@ -1255,15 +1301,23 @@ final class TaskRunner {
         // Apply re-keys FIRST and atomically: move each still-running capture's
         // live run from its synthetic key to the real task id, so the spinner
         // hands off to the real plan row while the process stays tracked.
+        // The re-keyed run's map key is its project path + the real id (the
+        // run's `taskID` itself becomes the bare real id, which is what the UI
+        // labels and the runner passes as `--task-id`).
         for (syntheticKey, realID) in decision.toRekey {
-            guard let run = runs[syntheticKey], runs[realID] == nil else { continue }
+            guard let run = runs[syntheticKey], let projectPath = run.projectPath else { continue }
+            let realKey = Self.runKey(projectPath: projectPath, taskID: realID)
+            guard runs[realKey] == nil else { continue }
             run.rekey(to: realID)
-            runs[realID] = run
+            runs[realKey] = run
             runs[syntheticKey] = nil
         }
 
-        for taskID in decision.toDismiss {
-            dismiss(taskID: taskID)
+        // `toDismiss` holds synthetic capture ids, which are their own map keys.
+        for key in decision.toDismiss {
+            if let run = runs[key], !run.isRunning {
+                runs[key] = nil
+            }
         }
     }
 
@@ -1273,8 +1327,10 @@ final class TaskRunner {
     /// spawning a `node` process. DEBUG-only; not part of the shipping API.
     /// (The pure `taskIDsToDismiss(runs:projects:)` helper is the primary test
     /// surface; this exists for tests that prefer to drive the instance method.)
+    /// Keyed like a live run: on the run's project path (`runProjectPath`, set
+    /// for captures and by `markRunningForTesting`/`finishForTesting`) + id.
     func ingestRunForTesting(_ run: TaskRun) {
-        runs[run.taskID] = run
+        runs[Self.runKey(projectPath: run.runProjectPath ?? "", taskID: run.taskID)] = run
     }
     #endif
 }

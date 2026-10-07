@@ -382,14 +382,14 @@ final class TaskRunnerTests: XCTestCase {
         XCTAssertFalse(PlanDetailView.canReElaborate(status: .elaborated, isBlocked: true))
     }
 
-    /// The coordinator tracks runs per task id: `isRunning(taskID:)` is false for
+    /// The coordinator tracks runs per task: `isRunning(taskID:in:)` is false for
     /// an unknown task, and a freshly created `TaskRun` carries the right
     /// identity + mode before it is started.
     @MainActor
     func testCoordinatorTracksRunsPerTask() {
         let coordinator = TaskRunner()
-        XCTAssertFalse(coordinator.isRunning(taskID: "001"))
-        XCTAssertNil(coordinator.run(for: "001"))
+        XCTAssertFalse(coordinator.isRunning(taskID: "001", in: "/p"))
+        XCTAssertNil(coordinator.run(for: "001", in: "/p"))
 
         let run = TaskRun(taskID: "042", mode: .elaborate)
         XCTAssertEqual(run.taskID, "042")
@@ -603,7 +603,7 @@ final class TaskRunnerTests: XCTestCase {
         let runner = TaskRunner()
         runner.run(projectPath: "/some/project", taskID: "078", mode: .execute, keep: true)
 
-        let run = runner.run(for: "078")
+        let run = runner.run(for: "078", in: "/some/project")
         XCTAssertNotNil(run)
         XCTAssertEqual(run?.mode, .execute)
         XCTAssertEqual(run?.taskID, "078")
@@ -619,7 +619,7 @@ final class TaskRunnerTests: XCTestCase {
         let runner = TaskRunner()
         runner.run(projectPath: "/some/project", taskID: "078", mode: .execute, keep: false)
 
-        let run = runner.run(for: "078")
+        let run = runner.run(for: "078", in: "/some/project")
         XCTAssertNotNil(run)
         XCTAssertEqual(run?.mode, .execute)
         XCTAssertEqual(run?.keep, false)
@@ -635,7 +635,7 @@ final class TaskRunnerTests: XCTestCase {
         let runner = TaskRunner()
         runner.run(projectPath: "/some/project", taskID: "078", mode: .execute)
 
-        XCTAssertEqual(runner.run(for: "078")?.keep, false)
+        XCTAssertEqual(runner.run(for: "078", in: "/some/project")?.keep, false)
     }
 
     // MARK: - Optional elaborate guidance + Deep (#074)
@@ -741,7 +741,7 @@ final class TaskRunnerTests: XCTestCase {
         runner.run(projectPath: "/some/project", taskID: "088", mode: .execute,
                    description: "Prioritise the migration path", deep: true, keep: true)
 
-        let run = runner.run(for: "088")
+        let run = runner.run(for: "088", in: "/some/project")
         XCTAssertNotNil(run)
         XCTAssertEqual(run?.mode, .execute)
         XCTAssertEqual(run?.taskID, "088")
@@ -1221,7 +1221,7 @@ final class TaskRunnerTests: XCTestCase {
 
         // The new id (002) appeared → the run was dismissed → the row is gone.
         XCTAssertTrue(runner.runningCaptures(projectPath: "/p").isEmpty)
-        XCTAssertNil(runner.run(for: run.taskID))
+        XCTAssertNil(runner.run(for: run.taskID, in: "/p"))
     }
 
     /// (Step 6.2) Only FINISHED capture runs participate. `isRunning` cannot be
@@ -1313,7 +1313,7 @@ final class TaskRunnerTests: XCTestCase {
             runner.reconcileFinishedCaptures(against: projects)
         }
         XCTAssertTrue(runner.runningCaptures(projectPath: "/p").isEmpty)
-        XCTAssertNil(runner.run(for: run.taskID))
+        XCTAssertNil(runner.run(for: run.taskID, in: "/p"))
     }
 
     /// (Step 6.5) Step-4 visibility: a finished-but-not-yet-dismissed capture is
@@ -1334,12 +1334,12 @@ final class TaskRunnerTests: XCTestCase {
                        [run.taskID])
 
         // dismiss removes it (it is finished + present) → row gone.
-        runner.dismiss(taskID: run.taskID)
+        runner.dismiss(taskID: run.taskID, in: "/p")
         XCTAssertTrue(runner.runningCaptures(projectPath: "/p").isEmpty)
     }
 
     /// (Step 5) The manual popover-dismiss path and reconciliation do not fight:
-    /// `dismiss(taskID:)` is idempotent. (a) Reconciliation dismissing first,
+    /// `dismiss(taskID:in:)` is idempotent. (a) Reconciliation dismissing first,
     /// then a later manual `dismiss` (popover `onDisappear`) is a safe no-op —
     /// the run is already gone. (b) A manual dismiss BEFORE reconciliation simply
     /// removes the run early, and the next reconcile pass finds nothing to do.
@@ -1352,21 +1352,21 @@ final class TaskRunnerTests: XCTestCase {
         runnerA.reconcileFinishedCaptures(
             against: [makeProject(path: "/p", taskIDs: ["001", "002"])]
         )
-        XCTAssertNil(runnerA.run(for: runA.taskID))
-        runnerA.dismiss(taskID: runA.taskID)  // manual popover close, already gone
-        XCTAssertNil(runnerA.run(for: runA.taskID))
+        XCTAssertNil(runnerA.run(for: runA.taskID, in: "/p"))
+        runnerA.dismiss(taskID: runA.taskID, in: "/p")  // manual popover close, already gone
+        XCTAssertNil(runnerA.run(for: runA.taskID, in: "/p"))
 
         // (b) manual-then-reconcile: early manual dismiss leaves nothing to do.
         let runnerB = TaskRunner()
         let runB = makeFinishedCapture(path: "/p", baseline: ["001"])
         runnerB.ingestRunForTesting(runB)
-        runnerB.dismiss(taskID: runB.taskID)  // user closes popover first
-        XCTAssertNil(runnerB.run(for: runB.taskID))
+        runnerB.dismiss(taskID: runB.taskID, in: "/p")  // user closes popover first
+        XCTAssertNil(runnerB.run(for: runB.taskID, in: "/p"))
         // Next reconcile pass: the run is gone, so it is a clean no-op.
         runnerB.reconcileFinishedCaptures(
             against: [makeProject(path: "/p", taskIDs: ["001", "002"])]
         )
-        XCTAssertNil(runnerB.run(for: runB.taskID))
+        XCTAssertNil(runnerB.run(for: runB.taskID, in: "/p"))
     }
 
     // MARK: - Errored captures persist until manual dismissal
@@ -1441,7 +1441,7 @@ final class TaskRunnerTests: XCTestCase {
         XCTAssertEqual(runner.runningCaptures(projectPath: "/p").map(\.taskID),
                        [run.taskID])
 
-        runner.dismiss(taskID: run.taskID)
+        runner.dismiss(taskID: run.taskID, in: "/p")
         XCTAssertTrue(runner.runningCaptures(projectPath: "/p").isEmpty)
     }
 
@@ -1480,7 +1480,7 @@ final class TaskRunnerTests: XCTestCase {
     }
 
     /// Driving the instance-method path re-keys the live run IN PLACE: the same
-    /// object instance is now reachable under the real id, `isRunning(taskID:)`
+    /// object instance is now reachable under the real id, `isRunning(taskID:in:)`
     /// is true for the real id, the synthetic capture row is gone, the live
     /// process still counts toward `runningRunCount`, and the synthetic key no
     /// longer resolves.
@@ -1495,11 +1495,11 @@ final class TaskRunnerTests: XCTestCase {
             against: [makeProject(path: "/p", taskIDs: ["001", "002"])]
         )
 
-        XCTAssertTrue(runner.run(for: "002") === run)
-        XCTAssertTrue(runner.isRunning(taskID: "002"))
+        XCTAssertTrue(runner.run(for: "002", in: "/p") === run)
+        XCTAssertTrue(runner.isRunning(taskID: "002", in: "/p"))
         XCTAssertTrue(runner.runningCaptures(projectPath: "/p").isEmpty)
         XCTAssertEqual(runner.runningRunCount, 1)
-        XCTAssertNil(runner.run(for: syntheticKey))
+        XCTAssertNil(runner.run(for: syntheticKey, in: "/p"))
     }
 
     /// A still-running capture whose project gained NO new id is neither
@@ -1565,6 +1565,115 @@ final class TaskRunnerTests: XCTestCase {
         XCTAssertEqual(run.description, "Add a thing")
         XCTAssertEqual(run.baselineTaskIDs, ["001"])
         XCTAssertEqual(run.projectPath, "/p")
+    }
+
+    // MARK: - Run identity is (project path, full task id) (#090)
+
+    /// Builds an existing-task run for `taskID` in `projectPath` without spawning
+    /// `node`: `markRunningForTesting(projectPath:)` records the run's project so
+    /// `ingestRunForTesting` keys it on (path, id).
+    @MainActor
+    private func makeTaskRun(_ taskID: String, in projectPath: String, running: Bool) -> TaskRun {
+        // A temp outcome log so a finished fixture never appends to the real
+        // `~/.claude/plans-cc/run-outcomes.log`.
+        let log = RunOutcomeLog(fileURL: FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString)
+            .appendingPathComponent("run-outcomes.log"))
+        let run = TaskRun(taskID: taskID, mode: .execute, outcomeLog: log)
+        if running {
+            run.markRunningForTesting(projectPath: projectPath)
+        } else {
+            run.finishForTesting(projectPath: projectPath)
+        }
+        return run
+    }
+
+    /// The same task id in two projects is two independent runs: lookups,
+    /// running state and dismissal never cross projects.
+    @MainActor
+    func testSameTaskIDAcrossProjectsTrackedIndependently() {
+        let runner = TaskRunner()
+        let runA = makeTaskRun("042", in: "/a", running: true)
+        let runB = makeTaskRun("042", in: "/b", running: false)
+        runner.ingestRunForTesting(runA)
+        runner.ingestRunForTesting(runB)
+
+        XCTAssertTrue(runner.run(for: "042", in: "/a") === runA)
+        XCTAssertTrue(runner.run(for: "042", in: "/b") === runB)
+        XCTAssertTrue(runner.isRunning(taskID: "042", in: "/a"))
+        XCTAssertFalse(runner.isRunning(taskID: "042", in: "/b"))
+        XCTAssertNil(runner.run(for: "042", in: "/c"))
+
+        runner.dismiss(taskID: "042", in: "/b")
+        XCTAssertNil(runner.run(for: "042", in: "/b"))
+        XCTAssertTrue(runner.run(for: "042", in: "/a") === runA)
+        XCTAssertEqual(runner.runningRunCount, 1)
+    }
+
+    /// Ids past 999 are distinct run identities: a run for `1000` is not a run
+    /// for `100` (the pre-#090 truncation collapsed them).
+    @MainActor
+    func testFourDigitTaskIDDoesNotShareRunWithThreeDigitPrefix() {
+        let runner = TaskRunner()
+        let run1000 = makeTaskRun("1000", in: "/p", running: true)
+        runner.ingestRunForTesting(run1000)
+
+        XCTAssertTrue(runner.isRunning(taskID: "1000", in: "/p"))
+        XCTAssertFalse(runner.isRunning(taskID: "100", in: "/p"))
+        XCTAssertNil(runner.run(for: "100", in: "/p"))
+
+        let run100 = makeTaskRun("100", in: "/p", running: false)
+        runner.ingestRunForTesting(run100)
+        XCTAssertTrue(runner.run(for: "100", in: "/p") === run100)
+        XCTAssertTrue(runner.run(for: "1000", in: "/p") === run1000)
+    }
+
+    /// Capture reconciliation sees a brand-new `1002` (alongside existing 999,
+    /// 1000, 1001) as the new plan: a running capture re-keys to it, a finished
+    /// one is dismissed.
+    @MainActor
+    func testCaptureReconcileDetectsNewFourDigitTaskID() {
+        let baseline: Set<String> = ["999", "1000", "1001"]
+        let project = makeProject(path: "/p", taskIDs: ["999", "1000", "1001", "1002"])
+
+        let running = makeRunningCapture(path: "/p", baseline: baseline)
+        let decision = TaskRunner.reconcile(runs: [running.taskID: running], projects: [project])
+        XCTAssertEqual(decision.toRekey, [running.taskID: "1002"])
+
+        let finished = makeFinishedCapture(path: "/p", baseline: baseline)
+        XCTAssertTrue(
+            TaskRunner.taskIDsToDismiss(runs: [finished.taskID: finished], projects: [project])
+                .contains(finished.taskID)
+        )
+
+        let runner = TaskRunner()
+        runner.ingestRunForTesting(running)
+        runner.reconcileFinishedCaptures(against: [project])
+        XCTAssertTrue(runner.run(for: "1002", in: "/p") === running)
+        XCTAssertNil(runner.run(for: "100", in: "/p"))
+    }
+
+    /// An existing-task run only claims its id within ITS project: a run for
+    /// `002` in `/q` must not stop a `/p` capture from handing off to `/p`'s new
+    /// `002`, while a run for `002` in `/p` itself still does.
+    @MainActor
+    func testRekeyClaimIsScopedToProject() {
+        let project = makeProject(path: "/p", taskIDs: ["001", "002"])
+
+        let runner = TaskRunner()
+        runner.ingestRunForTesting(makeTaskRun("002", in: "/q", running: true))
+        let capture = makeRunningCapture(path: "/p", baseline: ["001"])
+        runner.ingestRunForTesting(capture)
+        runner.reconcileFinishedCaptures(against: [project])
+        XCTAssertTrue(runner.run(for: "002", in: "/p") === capture)
+
+        let sameProject = TaskRunner()
+        sameProject.ingestRunForTesting(makeTaskRun("002", in: "/p", running: true))
+        let capture2 = makeRunningCapture(path: "/p", baseline: ["001"])
+        sameProject.ingestRunForTesting(capture2)
+        sameProject.reconcileFinishedCaptures(against: [project])
+        XCTAssertEqual(capture2.taskID.hasPrefix("capture:"), true)
+        XCTAssertFalse(sameProject.run(for: "002", in: "/p") === capture2)
     }
 
     // The Node-side `--description` arg shape (capture / executeYolo runs pass

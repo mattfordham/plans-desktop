@@ -108,7 +108,12 @@ struct TaskSection: Equatable {
 /// corresponding line is absent, matching the defensive parsing the spec
 /// requires (every field may be missing).
 struct Task: Equatable {
-    /// The 3-character id taken literally from the start of the filename (§5.2).
+    /// The id taken from the start of the filename (§5.2): the leading ASCII
+    /// digit run before the first `-` (ids are zero-padded to a MINIMUM of 3
+    /// digits, so `1000-x.md` → `"1000"`), falling back to the first 3
+    /// characters when the filename doesn't match. Kept as a `String` so zero
+    /// padding (`"042"`) survives for display; compare with
+    /// `TaskParser.idPrecedes`, never `<`.
     let id: String
 
     /// The title — the text after the first `# ` line, trimmed. `nil` when the
@@ -141,8 +146,9 @@ struct Task: Equatable {
     /// `review` / `in-review` tasks.
     let isKeptWorktree: Bool
 
-    /// The 3-digit ids parsed from `**Blocked by:**` (split on whitespace and
-    /// commas). Empty when the field is absent or lists nothing.
+    /// The ids parsed from `**Blocked by:**` (split on whitespace and commas;
+    /// only tokens matching `^#?([0-9]{3}|[1-9][0-9]{3,})$` are kept, `#`
+    /// stripped). Empty when the field is absent or lists nothing valid.
     let blockedBy: [String]
 
     /// The `## ` sections in file order, each with its heading and verbatim body.
@@ -608,7 +614,7 @@ struct TaskParser {
         }
 
         // §5.5 step 8: active tasks (the five non-completed statuses), sorted by
-        // status priority then id ascending.
+        // status priority then id ascending (numerically, so 999 < 1000).
         let activeTasks = tasks
             .filter { task in
                 guard let status = task.status else { return false }
@@ -618,14 +624,14 @@ struct TaskParser {
                 let lp = lhs.status?.activePriority ?? 0
                 let rp = rhs.status?.activePriority ?? 0
                 if lp != rp { return lp > rp }
-                return lhs.id < rhs.id
+                return Self.idPrecedes(lhs.id, rhs.id)
             }
 
         // #077: backlogged tasks (files under `backlog/`) are kept SEPARATE —
         // never added to `tasks`, `counts`, or `activeTasks`. `isBlocked` is
         // resolved against the SAME completed-ids set as pending tasks. Backlog
         // keeps each task's real `**Status:**` (no status is forced). Sorted like
-        // `activeTasks`: status priority descending, then id ascending.
+        // `activeTasks`: status priority descending, then id ascending (numeric).
         let backloggedParsed = parseTaskFiles(
             in: backlogDir,
             isCompletedDir: false,
@@ -637,7 +643,7 @@ struct TaskParser {
                 let lp = lhs.status?.activePriority ?? 0
                 let rp = rhs.status?.activePriority ?? 0
                 if lp != rp { return lp > rp }
-                return lhs.id < rhs.id
+                return Self.idPrecedes(lhs.id, rhs.id)
             }
 
         let projectName = URL(fileURLWithPath: projectPath).lastPathComponent.titleized()
@@ -721,13 +727,57 @@ struct TaskParser {
         )
     }
 
+    // MARK: - Ids
+
+    /// Extracts the task id from a filename (§5.2), mirroring plans-cc
+    /// `(filename.match(/^(\d+)-/) || [])[1] || filename.slice(0, 3)`: the
+    /// leading digit run before the first `-`, else the first 3 characters
+    /// (or fewer, for a shorter filename). Only ASCII `0`–`9` count as digits —
+    /// JS `\d` is ASCII-only, unlike Swift's `\d` / `Character.isNumber`.
+    static func extractId(fromFilename filename: String) -> String {
+        let digits = filename.prefix(while: Self.isASCIIDigit)
+        let rest = filename.dropFirst(digits.count)
+        if !digits.isEmpty, rest.first == "-" {
+            return String(digits)
+        }
+        return String(filename.prefix(3))
+    }
+
+    /// Strict "a precedes b" ordering for task ids, comparing NUMERICALLY
+    /// (`"999"` before `"1000"`, `"042"` before `"100"`) without converting to an
+    /// integer, so arbitrarily long digit runs can't overflow. Total over all
+    /// strings: all-digit ids order by (leading-zero-stripped length, stripped
+    /// digits, raw string) and sort before non-numeric fallback ids (e.g. `"rea"`
+    /// from a stray filename), which order by raw string.
+    static func idPrecedes(_ lhs: String, _ rhs: String) -> Bool {
+        let lNumeric = !lhs.isEmpty && lhs.allSatisfy(Self.isASCIIDigit)
+        let rNumeric = !rhs.isEmpty && rhs.allSatisfy(Self.isASCIIDigit)
+        if lNumeric != rNumeric { return lNumeric }
+        guard lNumeric else { return lhs < rhs }
+
+        let lDigits = lhs.drop { $0 == "0" }
+        let rDigits = rhs.drop { $0 == "0" }
+        if lDigits.count != rDigits.count { return lDigits.count < rDigits.count }
+        if lDigits != rDigits { return lDigits < rDigits }
+        // Same value, different padding (`"42"` vs `"042"`): fall back to the raw
+        // string so distinct ids never compare equal.
+        return lhs < rhs
+    }
+
+    private static func isASCIIDigit(_ c: Character) -> Bool {
+        c >= "0" && c <= "9" && c.isASCII
+    }
+
+    // MARK: - Single-file parsing
+
     // MARK: - Single-file parsing
 
     /// Parses one task file into a `Task`.
     ///
     /// - Parameters:
     ///   - filename: The file's name (e.g. `006-system-wide-dashboard.md`); the
-    ///     id is the literal first 3 characters (§5.2).
+    ///     id is the leading digit run before the first `-`, else the first 3
+    ///     characters (§5.2; see `extractId(fromFilename:)`).
     ///   - text: The full file contents.
     ///   - isCompletedDir: `true` when the file lives under `completed/`, which
     ///     forces `status` to `.completed` regardless of the `**Status:**` line
@@ -746,9 +796,9 @@ struct TaskParser {
         isBacklogged: Bool = false,
         modified: TimeInterval? = nil
     ) -> Task {
-        // §5.2: the id is literally the first 3 characters of the filename. If
-        // the filename is shorter than 3 characters, take what is there.
-        let id = String(filename.prefix(3))
+        // §5.2: the leading digit run before the first `-` (`1000-x.md` →
+        // "1000"), falling back to the first 3 characters.
+        let id = Self.extractId(fromFilename: filename)
 
         // Split into lines once; reused by every sub-parse. Splitting on "\n"
         // and keeping empty subsequences preserves blank lines in section bodies.
@@ -835,15 +885,28 @@ struct TaskParser {
         return nil
     }
 
-    /// Parses a `**Blocked by:**` raw value into 3-digit ids. The list is split
-    /// on whitespace and commas (§5.5 step 5); empty/whitespace tokens are
-    /// dropped. Returns an empty array when `raw` is `nil` or yields nothing.
+    /// Parses a `**Blocked by:**` raw value into ids (§5.5 step 5), mirroring
+    /// plans-cc: split on whitespace and commas, then keep only tokens matching
+    /// `^#?([0-9]{3}|[1-9][0-9]{3,})$` — exactly 3 digits, or 4+ digits with no
+    /// leading zero — with any `#` stripped. So `#043` → `"043"`, `#1000` →
+    /// `"1000"`, and malformed tokens like `#0430` are dropped (never a
+    /// blocker). Returns an empty array when `raw` is `nil` or yields nothing.
     private static func parseBlockedBy(_ raw: String?) -> [String] {
         guard let raw else { return [] }
         let separators = CharacterSet.whitespaces.union(CharacterSet(charactersIn: ","))
         return raw
             .components(separatedBy: separators)
-            .filter { !$0.isEmpty }
+            .compactMap(blockerId(from:))
+    }
+
+    /// The id in a single `**Blocked by:**` token, or `nil` when the token is
+    /// not a valid id (see `parseBlockedBy`). ASCII digits only.
+    private static func blockerId(from token: String) -> String? {
+        let digits = token.hasPrefix("#") ? token.dropFirst() : Substring(token)
+        guard !digits.isEmpty, digits.allSatisfy(isASCIIDigit) else { return nil }
+        if digits.count == 3 { return String(digits) }
+        if digits.count > 3, digits.first != "0" { return String(digits) }
+        return nil
     }
 
     // MARK: - Sections

@@ -351,8 +351,12 @@ delivered yet.
 NNN-slug.md
 ```
 
-- `NNN` is a **3-digit zero-padded** task id, e.g. `006`, `012`, `001`.
-- The id is literally **the first 3 characters of the filename**.
+- `NNN` is a task id zero-padded to a **minimum** of 3 digits, e.g. `006`, `012`,
+  `001` — and, past 999, `1000`, `1001` (padding never truncates).
+- The id is **the full run of leading digits before the first `-`** (regex
+  `^(\d+)-`, ASCII digits only). Never take a fixed 3-character slice: that turns
+  `1000` and `1001` into the same `100`. Keep the id as a string so `006` keeps its
+  padding. A filename that doesn't match falls back to its first 3 characters.
 - The rest is a human-readable slug derived from the title, e.g.
   `006-system-wide-dashboard.md`.
 - Only files ending in `.md` are task files.
@@ -396,12 +400,12 @@ Elements to parse:
 
   | Field | Required | Notes |
   |-------|----------|-------|
-  | `**ID:**` | yes | The 3-digit id; matches the filename prefix. |
+  | `**ID:**` | yes | The id (3+ digits); matches the filename prefix. |
   | `**Created:**` | usually | A timestamp (ISO-ish, e.g. `2026-04-13T00:00`). Use as a fallback staleness signal. |
   | `**Type:**` | usually | One of the type vocabulary (§5.4). |
   | `**Status:**` | usually | One of the status vocabulary (§5.4). |
   | `**Branch:**` | optional | Git branch name, when the task uses one. |
-  | `**Blocked by:**` | optional | Space/comma-separated list of 3-digit task ids this task depends on. |
+  | `**Blocked by:**` | optional | Space/comma-separated list of task ids this task depends on; a valid token matches `^#?(\d{3}\|[1-9]\d{3,})$` (exactly 3 digits, or 4+ with no leading zero). |
 
   Parse defensively: any field may be absent. A missing `**Status:**` for a file
   in `pending/` should be treated as unknown rather than crashing.
@@ -466,18 +470,25 @@ The plans-cc repo's `lib/parse-tasks.js` is the source of truth. Mirror this
 behavior in Swift:
 
 1. List `.md` files in `pending/`, `completed/`, and `backlog/`.
-2. For each file, derive `id = filename[0..<3]`.
+2. For each file, derive `id` from the leading digit run (`^(\d+)-`), not a
+   fixed 3-character prefix (first 3 characters only as a fallback when the
+   filename doesn't match).
 3. Find the title from the first `# ` line.
 4. Extract `Type`, `Status`, and `Blocked by` via per-line `**Field:**` patterns
    anchored to line start. (`Status` for a `completed/` file is forced to
    `completed`.)
-5. Parse `Blocked by` into a list of 3-digit ids; a task is **blocked** if any of
-   those ids is not present in `completed/`.
+5. Parse `Blocked by` into a list of ids (tokens matching
+   `^#?(\d{3}|[1-9]\d{3,})$`, so `#1000` is valid and `#0430` is not); a task is
+   **blocked** if any of those ids is not present in `completed/`.
 6. Count How-section checkboxes into `{ done, total }` as in §5.3.1.
 7. Produce a per-project summary of counts by status:
    `{ pending, elaborated, in-progress, review, in-review, completed }`.
 8. Sort active tasks by status priority
-   `in-progress > in-review > review > elaborated > pending`, then by id.
+   `in-progress > in-review > review > elaborated > pending`, then by id
+   **numerically** (`999` before `1000`; a string compare gets this backwards).
+   **This app deliberately deviates on the status order (task #028):** it lists
+   `in-review > review > in-progress > elaborated > pending`, surfacing plans
+   awaiting the user first. The numeric id tiebreak is the same.
 9. Files scanned from `backlog/` keep their real `**Status:**` (see §5.4) and are
    carried in a **separate `backloggedTasks` collection**. They are **excluded**
    from the active-task set (`activeTasks`), from the by-status `counts`, and from

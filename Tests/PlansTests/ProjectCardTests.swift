@@ -338,6 +338,25 @@ final class ProjectCardTests: XCTestCase {
         )
     }
 
+    /// plans-cc ids are zero-padded to a MINIMUM of 3 digits, so past task 999
+    /// they grow to `1000`, `10000`, … (#090). The pinned id column must fit
+    /// the MEASURED width of a 5-digit id in the face the id cell renders in,
+    /// or a wide id clips / wraps instead of reading as one token.
+    func testIdColumnFitsMeasuredFiveDigitId() {
+        let font = NSFont.monospacedSystemFont(
+            ofSize: NSFont.preferredFont(forTextStyle: .body).pointSize,
+            weight: .regular
+        )
+        let measured = ("10000" as NSString)
+            .size(withAttributes: [.font: font])
+            .width
+
+        XCTAssertGreaterThanOrEqual(
+            ProjectCard.rowColumns.idWidth, measured,
+            "Id column must fit the MEASURED width of a 5-digit id"
+        )
+    }
+
     /// The status and id columns are pinned too, so all three leading columns
     /// align across rows exactly as the Grid used to make them.
     func testLeadingColumnsArePinned() {

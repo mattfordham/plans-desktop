@@ -295,9 +295,11 @@ struct ProjectCard: View {
         var monospaceCharacterWidth: CGFloat = 8.5
         /// The leading status-glyph column (unchanged from the Grid layout).
         var statusWidth: CGFloat = 20
-        /// The id column — plan ids are short numeric strings; 4 characters plus
-        /// slack covers every id the parser produces.
-        var idWidth: CGFloat = 40
+        /// The id column — plan ids are zero-padded to a MINIMUM of 3 digits, so
+        /// past 999 they grow to `1000`, `10000`, … (#090). Sized for 5
+        /// characters (a 5-digit id measures ~40.2pt, just over the old 40pt);
+        /// ids are leading-aligned, so 3-digit ids line up exactly as before.
+        var idWidth: CGFloat = 5 * 8.5
         /// Rendered width budgeted for the muted house (`⌂ kept`) marker (#086).
         /// The house SF Symbol at `.imageScale(.small)` in the `.body` face
         /// renders ~14pt wide; 16 gives a couple of points of slack so the icon
@@ -761,7 +763,7 @@ struct ProjectCard: View {
             RunProgressSheet(run: run, taskID: run.taskID)
                 .frame(width: 480)
                 .onDisappear {
-                    runner.dismiss(taskID: run.taskID)
+                    runner.dismiss(taskID: run.taskID, in: project.projectPath)
                     store.reload()
                 }
         }
@@ -1004,6 +1006,8 @@ struct ProjectCard: View {
             Text(row.task.id)
                 .font(.system(.body, design: .monospaced))
                 .foregroundStyle(.secondary)
+                // An id is one token; never wrap a wide (4+ digit) id.
+                .lineLimit(1)
                 .frame(width: ProjectCard.rowColumns.idWidth, alignment: .leading)
                 .modifier(OpenDetailOnTap(row: row, onOpenDetail: onOpenDetail))
 
@@ -1108,7 +1112,7 @@ struct ProjectCard: View {
     @ViewBuilder
     private func rowActions(_ row: TaskRow) -> some View {
         Group {
-            if runner.isRunning(taskID: row.task.id) {
+            if runner.isRunning(taskID: row.task.id, in: row.projectPath) {
                 // Tapping the live spinner toggles the run's progress dialog in
                 // place, anchored to the spinner, with the run's live log. The
                 // `.popover` attaches to the bare spinner glyph's BOUNDS (not the
@@ -1130,11 +1134,11 @@ struct ProjectCard: View {
                         // pass. On close, drop the finished run and reload so the
                         // task's new status surfaces — mirrors the detail view's
                         // sheet teardown.
-                        RunProgressSheet(run: runner.run(for: row.task.id),
+                        RunProgressSheet(run: runner.run(for: row.task.id, in: row.projectPath),
                                          taskID: row.task.id)
                             .frame(width: 480)
                             .onDisappear {
-                                runner.dismiss(taskID: row.task.id)
+                                runner.dismiss(taskID: row.task.id, in: row.projectPath)
                                 store.reload()
                             }
                     }

@@ -97,6 +97,33 @@ final class PlanDetailViewTests: XCTestCase {
         XCTAssertNil(url)
     }
 
+    /// Ids past 999 are 4+ digits (#090); the full id resolves its own file.
+    func testResolvesFourDigitIDFile() throws {
+        try writeTaskFile(filename: "100-short.md", in: "pending")
+        try writeTaskFile(filename: "1000-wide.md", in: "pending")
+
+        let url = PlanDetailView.taskFileURL(
+            projectPath: tempDir.path,
+            taskID: "1000",
+            isCompletedDir: false
+        )
+
+        XCTAssertEqual(url?.lastPathComponent, "1000-wide.md")
+    }
+
+    /// The `<id>-` prefix (dash included) keeps `100` from matching `1000-*.md`.
+    func testThreeDigitIDDoesNotMatchFourDigitFile() throws {
+        try writeTaskFile(filename: "1000-wide.md", in: "pending")
+
+        let url = PlanDetailView.taskFileURL(
+            projectPath: tempDir.path,
+            taskID: "100",
+            isCompletedDir: false
+        )
+
+        XCTAssertNil(url)
+    }
+
     // MARK: - RunProgressSheet.scrollTarget
 
     func testScrollTargetReturnsLastLineIDForNonEmptyList() {

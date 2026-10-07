@@ -82,9 +82,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         case .alertFirstButtonReturn:
             // Stop every still-running run; finished-but-not-dismissed runs are
             // left alone (their `stop()` is a no-op anyway).
-            for (taskID, run) in taskRunner.runs where run.isRunning {
-                taskRunner.stop(taskID: taskID)
-            }
+            taskRunner.stopAllRunning()
             return .terminateNow
         default:
             return .terminateCancel

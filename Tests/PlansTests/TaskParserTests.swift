@@ -405,6 +405,168 @@ final class TaskParserTests: XCTestCase {
         XCTAssertFalse(task.isBlocked)
     }
 
+    // MARK: - IDs past 999 (#090)
+
+    // plans-cc ids are zero-padded to a MINIMUM of 3 digits; the id is the
+    // leading digit run before the first `-` (`^(\d+)-`), falling back to the
+    // first 3 characters when that doesn't match.
+
+    func testFourDigitIdsExtractedInFullAndDistinct() {
+        let parser = TaskParser()
+        let a = parser.parse(filename: "1000-a.md", text: "# A", isCompletedDir: false)
+        let b = parser.parse(filename: "1001-b.md", text: "# B", isCompletedDir: false)
+        XCTAssertEqual(a.id, "1000")
+        XCTAssertEqual(b.id, "1001")
+        XCTAssertNotEqual(a.id, b.id)
+    }
+
+    func testThreeDigitIdsExtractUnchanged() {
+        let parser = TaskParser()
+        XCTAssertEqual(parser.parse(filename: "001-x.md", text: "", isCompletedDir: false).id, "001")
+        XCTAssertEqual(parser.parse(filename: "042-y.md", text: "", isCompletedDir: false).id, "042")
+        XCTAssertEqual(parser.parse(filename: "999-z.md", text: "", isCompletedDir: false).id, "999")
+    }
+
+    func testNonMatchingFilenameFallsBackToFirstThreeCharacters() {
+        let parser = TaskParser()
+        XCTAssertEqual(parser.parse(filename: "readme.md", text: "", isCompletedDir: false).id, "rea")
+        XCTAssertEqual(parser.parse(filename: "ab", text: "", isCompletedDir: false).id, "ab")
+        // A digit run without a following `-` doesn't match the rule either.
+        XCTAssertEqual(parser.parse(filename: "1000.md", text: "", isCompletedDir: false).id, "100")
+    }
+
+    func testNonAsciiDigitsAreNotTreatedAsIdDigits() {
+        // Arabic-Indic digits: JS `\d` (plans-cc) doesn't match them, so neither
+        // may we — falls back to the first 3 characters.
+        let task = TaskParser().parse(filename: "١٢٣٤-x.md", text: "", isCompletedDir: false)
+        XCTAssertEqual(task.id, "١٢٣")
+    }
+
+    func testActiveTasksSortIdsNumericallyAcrossThousand() throws {
+        try writeTaskFile(filename: "1000-c.md", text: "# c\n\n**Status:** pending", in: "pending")
+        try writeTaskFile(filename: "999-b.md", text: "# b\n\n**Status:** pending", in: "pending")
+        try writeTaskFile(filename: "998-a.md", text: "# a\n\n**Status:** pending", in: "pending")
+        try writeTaskFile(filename: "042-z.md", text: "# z\n\n**Status:** pending", in: "pending")
+        try writeTaskFile(filename: "001-y.md", text: "# y\n\n**Status:** pending", in: "pending")
+
+        let project = TaskParser().parseProject(at: tempDir.path)
+        XCTAssertEqual(
+            project.activeTasks.map(\.id),
+            ["001", "042", "998", "999", "1000"]
+        )
+    }
+
+    /// Mirrors the manual check: `1000-test-a.md` / `1001-test-b.md` beside a
+    /// `999` task, each with a matching `**ID:**` line, surface as two distinct
+    /// full ids ordered after 999.
+    func testThousandPlusPendingFilesListDistinctAfter999() throws {
+        try writeTaskFile(
+            filename: "1001-test-b.md",
+            text: "# Test B\n\n**ID:** 1001\n**Status:** pending",
+            in: "pending"
+        )
+        try writeTaskFile(
+            filename: "1000-test-a.md",
+            text: "# Test A\n\n**ID:** 1000\n**Status:** pending",
+            in: "pending"
+        )
+        try writeTaskFile(
+            filename: "999-last-three-digit.md",
+            text: "# Last\n\n**ID:** 999\n**Status:** pending",
+            in: "pending"
+        )
+
+        let project = TaskParser().parseProject(at: tempDir.path)
+        XCTAssertEqual(project.activeTasks.map(\.id), ["999", "1000", "1001"])
+    }
+
+    func testBackloggedTasksSortIdsNumericallyAcrossThousand() throws {
+        try writeTaskFile(filename: "1000-c.md", text: "# c\n\n**Status:** pending", in: "backlog")
+        try writeTaskFile(filename: "999-b.md", text: "# b\n\n**Status:** pending", in: "backlog")
+        try writeTaskFile(filename: "998-a.md", text: "# a\n\n**Status:** pending", in: "backlog")
+
+        let project = TaskParser().parseProject(at: tempDir.path)
+        XCTAssertEqual(project.backloggedTasks.map(\.id), ["998", "999", "1000"])
+    }
+
+    func testIdComparatorIsNumericAndTotal() {
+        XCTAssertTrue(TaskParser.idPrecedes("999", "1000"))
+        XCTAssertFalse(TaskParser.idPrecedes("1000", "999"))
+        XCTAssertTrue(TaskParser.idPrecedes("042", "100"))
+        XCTAssertFalse(TaskParser.idPrecedes("042", "042"))
+        // Very long digit runs don't overflow/crash.
+        XCTAssertTrue(TaskParser.idPrecedes("1000", "99999999999999999999999"))
+        // Non-numeric fallbacks are ordered consistently (irreflexive, asymmetric).
+        XCTAssertFalse(TaskParser.idPrecedes("rea", "rea"))
+        XCTAssertNotEqual(TaskParser.idPrecedes("rea", "042"), TaskParser.idPrecedes("042", "rea"))
+    }
+
+    func testBlockedByFourDigitIdBlockedWhilePending() throws {
+        try writeTaskFile(
+            filename: "1001-dependent.md",
+            text: "# Dep\n\n**Status:** pending\n**Blocked by:** #1000",
+            in: "pending"
+        )
+        try writeTaskFile(filename: "1000-blocker.md", text: "# B\n\n**Status:** pending", in: "pending")
+        let project = TaskParser().parseProject(at: tempDir.path)
+        let task = try XCTUnwrap(project.tasks.first { $0.id == "1001" })
+        XCTAssertEqual(task.blockedBy, ["1000"])
+        XCTAssertTrue(task.isBlocked)
+    }
+
+    func testBlockedByFourDigitIdUnblockedOnceCompleted() throws {
+        try writeTaskFile(
+            filename: "1001-dependent.md",
+            text: "# Dep\n\n**Status:** pending\n**Blocked by:** #1000",
+            in: "pending"
+        )
+        // A completed `100-*` must NOT satisfy a `#1000` dependency…
+        try writeTaskFile(filename: "100-other.md", text: "# O", in: "completed")
+        var project = TaskParser().parseProject(at: tempDir.path)
+        XCTAssertTrue(try XCTUnwrap(project.tasks.first { $0.id == "1001" }).isBlocked)
+
+        // …but a completed `1000-*` does.
+        try writeTaskFile(filename: "1000-blocker.md", text: "# B", in: "completed")
+        project = TaskParser().parseProject(at: tempDir.path)
+        XCTAssertFalse(try XCTUnwrap(project.tasks.first { $0.id == "1001" }).isBlocked)
+    }
+
+    func testMalformedBlockedByTokensYieldNoBlocker() throws {
+        // `#0430` (4+ digits with a leading zero) and non-id tokens are rejected.
+        let task = TaskParser().parse(
+            filename: "050-x.md",
+            text: "# X\n\n**Blocked by:** #0430, abc, 12, #",
+            isCompletedDir: false
+        )
+        XCTAssertEqual(task.blockedBy, [])
+
+        try writeTaskFile(
+            filename: "050-x.md",
+            text: "# X\n\n**Status:** pending\n**Blocked by:** #0430",
+            in: "pending"
+        )
+        let project = TaskParser().parseProject(at: tempDir.path)
+        XCTAssertFalse(try XCTUnwrap(project.tasks.first { $0.id == "050" }).isBlocked)
+    }
+
+    func testHashPrefixedAndBareThreeDigitBlockersResolve() throws {
+        let parsed = TaskParser().parse(
+            filename: "051-x.md",
+            text: "# X\n\n**Blocked by:** #043, 044,1000 #12345",
+            isCompletedDir: false
+        )
+        XCTAssertEqual(parsed.blockedBy, ["043", "044", "1000", "12345"])
+
+        try writeTaskFile(
+            filename: "051-x.md",
+            text: "# X\n\n**Status:** pending\n**Blocked by:** #043, 043",
+            in: "pending"
+        )
+        try writeTaskFile(filename: "043-dep.md", text: "# D", in: "completed")
+        let project = TaskParser().parseProject(at: tempDir.path)
+        XCTAssertFalse(try XCTUnwrap(project.tasks.first { $0.id == "051" }).isBlocked)
+    }
+
     // MARK: - Project: completed dir forces status at project level
 
     func testProjectCompletedDirForcesStatusOverFrontmatter() throws {

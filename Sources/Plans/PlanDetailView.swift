@@ -133,8 +133,10 @@ struct PlanDetailView: View {
         // button is the deliberate re-entry. The rule is encoded in the pure
         // `shouldAutoOpenProgress(onAppearRunning:)` helper.
         .onAppear {
-            if let id = row?.task.id,
-               PlanDetailView.shouldAutoOpenProgress(onAppearRunning: runner.isRunning(taskID: id)) {
+            if let row,
+               PlanDetailView.shouldAutoOpenProgress(
+                   onAppearRunning: runner.isRunning(taskID: row.task.id, in: row.projectPath)
+               ) {
                 showProgress = true
             }
         }
@@ -144,10 +146,10 @@ struct PlanDetailView: View {
         // Closing the sheet does NOT stop the run — it keeps going in the
         // background (and stays visible on the card row's inline status).
         .sheet(isPresented: $showProgress) {
-            RunProgressSheet(run: row.map { runner.run(for: $0.task.id) } ?? nil,
+            RunProgressSheet(run: row.map { runner.run(for: $0.task.id, in: $0.projectPath) } ?? nil,
                              taskID: row?.task.id)
                 .onDisappear {
-                    if let id = row?.task.id { runner.dismiss(taskID: id) }
+                    if let row { runner.dismiss(taskID: row.task.id, in: row.projectPath) }
                     store.reload()
                 }
         }
@@ -244,7 +246,7 @@ struct PlanDetailView: View {
             .foregroundStyle(.secondary)
 
             HStack(spacing: 4) {
-                if runner.isRunning(taskID: row.task.id) {
+                if runner.isRunning(taskID: row.task.id, in: row.projectPath) {
                     // This task is being worked: show live status + a way back
                     // into the progress sheet (the run is independent of this
                     // window now). No action buttons while it runs.
@@ -436,7 +438,7 @@ struct PlanDetailView: View {
                 // matching the Execute action exactly — never a silent reload.
                 // Hidden while a run for this task is already in flight so a
                 // second run can't be launched over the first.
-                if !runner.isRunning(taskID: row.task.id) {
+                if !runner.isRunning(taskID: row.task.id, in: row.projectPath) {
                     Button {
                         showExecute = true
                     } label: {
@@ -636,7 +638,7 @@ struct PlanDetailView: View {
     /// user clicked the card spinner to come here). A fresh run started from THIS
     /// view must NOT auto-open the sheet — the dashboard doesn't, and neither
     /// should the detail pop-up (#061); the header's "Show progress" button is the
-    /// deliberate re-entry path. `onAppearRunning` is `runner.isRunning(taskID:)`
+    /// deliberate re-entry path. `onAppearRunning` is `runner.isRunning(taskID:in:)`
     /// evaluated in `.onAppear`; this returns it unchanged, encoding the rule as a
     /// pure, testable decision.
     static func shouldAutoOpenProgress(onAppearRunning: Bool) -> Bool {
