@@ -525,7 +525,8 @@ struct ProjectCard: View {
         // flags to the runner in `.execute` mode (the sole `.plans/` writer, §2),
         // which auto-elaborates the plan inline and then executes it.
         .sheet(item: $executePendingRequest) { request in
-            ExecutePendingModal(taskID: request.taskID, projectPath: request.projectPath)
+            ExecutePendingModal(taskID: request.taskID, projectPath: request.projectPath,
+                                forReview: request.forReview)
         }
         // The "Re-elaborate for review" sheet (#091), keyed on the requesting
         // review-state row's task the same way the four sheets above are. The
@@ -1254,8 +1255,9 @@ struct ProjectCard: View {
                 // re-elaboration OR run another execution pass. Same tight
                 // `HStack(spacing: -4)` of two `RowActionGlyph`s within the row's
                 // pinned height. Refine opens the `ReviewReElaborateModal` (which
-                // resets the plan to pending and re-elaborates); Execute reuses the
-                // elaborated-plan `ExecuteModal` via the shared `executeRequest`.
+                // resets the plan to pending and re-elaborates); Execute opens the
+                // `ExecutePendingModal` in review mode via `executePendingRequest`,
+                // so the user can add context for the extra pass.
                 // `canExecuteReview` and `canReElaborateReview` share the same
                 // review+non-blocked gate, so Refine appears exactly when Execute
                 // does.
@@ -1269,9 +1271,10 @@ struct ProjectCard: View {
                     }
                     RowActionGlyph(systemImage: "play.fill", help: "Execute this plan again") {
                         cardLog.notice("card review-Execute clicked: task=\(row.task.id, privacy: .public)")
-                        executeRequest = ExecuteRequest(
+                        executePendingRequest = ExecutePendingRequest(
                             taskID: row.task.id,
-                            projectPath: row.projectPath
+                            projectPath: row.projectPath,
+                            forReview: true
                         )
                     }
                 }
@@ -1363,6 +1366,9 @@ private struct ExecuteRequest: Identifiable {
 private struct ExecutePendingRequest: Identifiable {
     let taskID: String
     let projectPath: String
+    /// Whether the target is a review-state plan (#091), so the sheet asks for
+    /// context for another pass and hides Deep.
+    var forReview = false
     var id: String { taskID }
 }
 

@@ -573,4 +573,22 @@ final class PlanDetailViewTests: XCTestCase {
         XCTAssertEqual(RunOutcome.Classification.error.failureLabel, "Run errored")
         XCTAssertEqual(RunOutcome.Classification.crashed.failureLabel, "Run crashed")
     }
+
+    // MARK: - Review-state Execute dialog (#091)
+
+    /// A review plan's Execute opens `ExecutePendingModal` in review mode: the
+    /// guidance box asks for context for another pass, and the Deep toggle (an
+    /// elaboration-only option) is hidden since the plan is already elaborated.
+    func testExecuteDialogInReviewModeAsksForContextAndHidesDeep() {
+        XCTAssertEqual(ExecutePendingModal.placeholder(taskID: "091", forReview: true),
+                       "Add optional context for another pass on plan #091…")
+        XCTAssertFalse(ExecutePendingModal.offersDeep(forReview: true))
+    }
+
+    /// The pending direct-Execute dialog (#088) is unchanged by review mode.
+    func testExecuteDialogInPendingModeKeepsGuidanceAndDeep() {
+        XCTAssertEqual(ExecutePendingModal.placeholder(taskID: "088", forReview: false),
+                       "Add optional guidance for executing plan #088…")
+        XCTAssertTrue(ExecutePendingModal.offersDeep(forReview: false))
+    }
 }

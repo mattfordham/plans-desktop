@@ -28,6 +28,11 @@ private let executePendingLog = Logger(subsystem: "com.plans.desktop", category:
 ///
 /// It reuses `NewPlanModal`'s `PlanTextEditor` and editor styling and matches the
 /// sibling run sheets' frame so the modals feel like one family.
+///
+/// It also serves a REVIEW-state plan's Execute (#091) via `forReview`: the box
+/// then collects additional context for another execution pass, and the Deep
+/// toggle is hidden — the plan is already elaborated, so there is no inline
+/// elaboration pass for Deep to deepen.
 struct ExecutePendingModal: View {
     /// The task being executed; fixed for this sheet's lifetime.
     let taskID: String
@@ -35,6 +40,11 @@ struct ExecutePendingModal: View {
     /// The owning project's path; fixed for this sheet's lifetime. Handed to the
     /// runner so the execute run targets the right project's `.plans/`.
     let projectPath: String
+
+    /// Whether this sheet executes a plan in `review` / `in-review` (#091) rather
+    /// than a pending one. Fixed for the sheet's lifetime; drives the placeholder
+    /// copy and whether the Deep toggle is offered.
+    var forReview: Bool = false
 
     /// The "Work this task" runner whose `.execute` run drives plan-execute (the
     /// sole `.plans/` writer, §2).
@@ -79,6 +89,20 @@ struct ExecutePendingModal: View {
 
     /// The trimmed guidance. Empty is allowed — it simply means "no guidance",
     /// and submit stays enabled (see `submit`).
+    /// The editor placeholder: optional guidance for a pending plan's inline
+    /// elaboration, or optional context for another pass on a review plan.
+    static func placeholder(taskID: String, forReview: Bool) -> String {
+        forReview
+            ? "Add optional context for another pass on plan #\(taskID)…"
+            : "Add optional guidance for executing plan #\(taskID)…"
+    }
+
+    /// Whether the Deep toggle is offered. Deep only affects the inline
+    /// elaboration of a pending plan, so a review plan (already elaborated) hides it.
+    static func offersDeep(forReview: Bool) -> Bool {
+        !forReview
+    }
+
     private var trimmedText: String {
         text.trimmingCharacters(in: .whitespacesAndNewlines)
     }
@@ -97,9 +121,11 @@ struct ExecutePendingModal: View {
                 // run, so unlike `NewPlanModal` there is no Execute toggle to
                 // gate them. They sit together in one row like `ElaborateModal`'s
                 // toggle row.
-                Toggle("Deep", isOn: $deep)
-                    .toggleStyle(.checkbox)
-                    .help("Auto-elaborate the plan via a reasoning sub-agent (plans-cc `deep` mode) before executing")
+                if Self.offersDeep(forReview: forReview) {
+                    Toggle("Deep", isOn: $deep)
+                        .toggleStyle(.checkbox)
+                        .help("Auto-elaborate the plan via a reasoning sub-agent (plans-cc `deep` mode) before executing")
+                }
                 Toggle("Keep", isOn: $keep)
                     .toggleStyle(.checkbox)
                     .help("Keep the execution worktree after finishing, so the plan can be reviewed in place")
@@ -158,7 +184,7 @@ struct ExecutePendingModal: View {
                 // font — same alignment trick as `NewPlanModal.editor`. The
                 // wording flags that the field is optional, since submitting an
                 // empty box is a first-class path here.
-                Text("Add optional guidance for executing plan #\(taskID)…")
+                Text(Self.placeholder(taskID: taskID, forReview: forReview))
                     .font(Font(Self.editorFont))
                     .foregroundStyle(.secondary)
                     .padding(.leading, Self.editorInset.width + 5)
@@ -244,7 +270,7 @@ struct ExecutePendingModal: View {
                 imageDatas: imageDatas
             )
         }
-        executePendingLog.notice("modal direct-Execute submitted: task=\(self.taskID, privacy: .public) deep=\(self.deep) keep=\(self.keep) hasGuidance=\(description != nil)")
+        executePendingLog.notice("modal direct-Execute submitted: task=\(self.taskID, privacy: .public) deep=\(self.deep) keep=\(self.keep) hasGuidance=\(description != nil) forReview=\(self.forReview)")
         runner.run(
             projectPath: projectPath,
             taskID: taskID,

@@ -188,7 +188,10 @@ struct PlanDetailView: View {
         // plan inline and then executes it.
         .sheet(isPresented: $showExecutePending) {
             if let row {
-                ExecutePendingModal(taskID: row.task.id, projectPath: row.projectPath)
+                ExecutePendingModal(taskID: row.task.id, projectPath: row.projectPath,
+                                    forReview: Self.canExecuteReview(status: row.task.status,
+                                                                     isBlocked: row.task.isBlocked,
+                                                                     isBacklogged: row.task.isBacklogged))
             }
         }
         // The "Execute" sheet (#078). Same row-resolution shape as the two sheets
@@ -363,14 +366,14 @@ struct PlanDetailView: View {
                     // bundled runner's worktree-isolated `plan-execute` mode for
                     // another execution pass (#091). Available only for a
                     // review/in-review, non-blocked, non-backlogged task — the same
-                    // gate as the review Refine above. Reuses the elaborated
-                    // Execute's `ExecuteModal` sheet (Keep toggle) via the shared
-                    // `showExecute` flag rather than a new sheet.
+                    // gate as the review Refine above. Opens the
+                    // `ExecutePendingModal` sheet (in review mode: optional context
+                    // + Keep) via the shared `showExecutePending` flag.
                     if Self.canExecuteReview(status: row.task.status,
                                              isBlocked: row.task.isBlocked,
                                              isBacklogged: row.task.isBacklogged) {
                         Button {
-                            showExecute = true
+                            showExecutePending = true
                         } label: {
                             Label("Execute", systemImage: "play.fill")
                         }

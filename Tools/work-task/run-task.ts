@@ -279,7 +279,9 @@ function buildExecutePrompt(
     ? [
         `The user has provided the following guidance for this run — if the task`,
         `still needs elaborating, fold it into that inline elaboration pass as the`,
-        `direction, and keep it in mind while executing:`,
+        `direction, and keep it in mind while executing. If the task is resuming`,
+        `from review with its How checklist already complete, treat the guidance`,
+        `as the additional work to do in this pass:`,
         "",
         `"""`,
         description.trim(),
