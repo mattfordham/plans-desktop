@@ -142,6 +142,13 @@ enum RunMode: String {
     case captureElaborate
     case executeYolo
     case reElaborate
+    /// Resets a plan sitting in `review` / `in-review` back to `pending` and
+    /// re-elaborates it from scratch (#091), OPTIONALLY folding in a free-text
+    /// `--description` as the user's guidance and honouring the stored `deep`
+    /// flag. Like `.reElaborate` it names an EXISTING task and may carry a
+    /// description, but it applies to a reviewed (not yet-elaborated) plan — the
+    /// companion to the review-state "execute more" action.
+    case reElaborateReview
     case delete
     /// Defers a pending/elaborated task by driving `plan-backlog` to move its
     /// file from `.plans/pending/` into `.plans/backlog/` (#077 follow-up).
@@ -152,18 +159,19 @@ enum RunMode: String {
 
     /// Whether this mode operates on an EXISTING task, so `TaskRun.spawn` passes
     /// `--task-id <id>`. True for the existing-task modes `.execute` /
-    /// `.elaborate` / `.reElaborate` / `.delete` / `.backlog` / `.restore`;
-    /// false for the description-driven modes (`.capture` / `.captureElaborate` /
-    /// `.executeYolo`), whose task does not exist yet. Pure flag (no I/O) so the
-    /// arg-shape contract is unit-testable without spawning a `node` process.
+    /// `.elaborate` / `.reElaborate` / `.reElaborateReview` / `.delete` /
+    /// `.backlog` / `.restore`; false for the description-driven modes
+    /// (`.capture` / `.captureElaborate` / `.executeYolo`), whose task does not
+    /// exist yet. Pure flag (no I/O) so the arg-shape contract is unit-testable
+    /// without spawning a `node` process.
     ///
-    /// This is INDEPENDENT of `usesDescription`: `.reElaborate` and `.elaborate`
-    /// are the modes where both are true (they work an existing task and may
-    /// carry free-text guidance), so `spawn` can emit `--task-id` AND
-    /// `--description` for them.
+    /// This is INDEPENDENT of `usesDescription`: `.reElaborate`,
+    /// `.reElaborateReview` and `.elaborate` are the modes where both are true
+    /// (they work an existing task and may carry free-text guidance), so `spawn`
+    /// can emit `--task-id` AND `--description` for them.
     var usesTaskID: Bool {
         switch self {
-        case .execute, .elaborate, .reElaborate, .delete, .backlog, .restore:
+        case .execute, .elaborate, .reElaborate, .reElaborateReview, .delete, .backlog, .restore:
             return true
         case .capture, .captureElaborate, .executeYolo:
             return false
@@ -173,8 +181,9 @@ enum RunMode: String {
     /// Whether this mode carries a free-text `--description`, so `TaskRun.spawn`
     /// passes `--description <text>`. True for the description-driven modes
     /// (`.capture` / `.captureElaborate` / `.executeYolo`), for `.reElaborate`
-    /// (which folds the user's refinement guidance in alongside its `--task-id`),
-    /// for `.elaborate`, and for `.execute` (which carries the direct-execute
+    /// and `.reElaborateReview` (which fold the user's refinement guidance in
+    /// alongside their `--task-id`), for `.elaborate`, and for `.execute` (which
+    /// carries the direct-execute
     /// dialog's additional-prompting guidance, folded into the inline elaboration
     /// pass that `plan-execute` runs on a pending plan before implementing it).
     /// False for the plain existing-task modes `.delete` / `.backlog` /
@@ -195,7 +204,7 @@ enum RunMode: String {
     /// `spawn` consults each flag on its own.
     var usesDescription: Bool {
         switch self {
-        case .capture, .captureElaborate, .executeYolo, .reElaborate, .elaborate, .execute:
+        case .capture, .captureElaborate, .executeYolo, .reElaborate, .reElaborateReview, .elaborate, .execute:
             return true
         case .delete, .backlog, .restore:
             return false

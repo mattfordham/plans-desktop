@@ -415,6 +415,97 @@ final class PlanDetailViewTests: XCTestCase {
                                                      isBacklogged: false))
     }
 
+    // MARK: - Review actions (#091 — Execute-more / Re-Elaborate from review)
+
+    /// Both review actions share one eligibility: a plan in `review` / `in-review`
+    /// that is NOT blocked and NOT backlogged. This pins the positive case — the
+    /// only states where either button renders.
+    @MainActor
+    func testReviewActionsAreOfferedForReviewAndInReviewWhenEligible() {
+        for status in [TaskStatus.review, .inReview] {
+            let label = "status \(status.rawValue)"
+            XCTAssertTrue(
+                PlanDetailView.canExecuteReview(status: status, isBlocked: false,
+                                                isBacklogged: false),
+                "Execute-more must render for an eligible reviewed plan — \(label)"
+            )
+            XCTAssertTrue(
+                PlanDetailView.canReElaborateReview(status: status, isBlocked: false,
+                                                    isBacklogged: false),
+                "Re-Elaborate must render for an eligible reviewed plan — \(label)"
+            )
+        }
+    }
+
+    /// The backlog gate holds across EVERY status for both review actions, so no
+    /// status combination can smuggle a review action onto a parked plan.
+    @MainActor
+    func testNoReviewActionSurvivesBacklogAtAnyStatus() {
+        let statuses: [TaskStatus?] = TaskStatus.allCases.map { $0 } + [nil]
+
+        for status in statuses {
+            for isBlocked in [false, true] {
+                let label = "status \(status?.rawValue ?? "nil") / isBlocked=\(isBlocked)"
+                XCTAssertFalse(
+                    PlanDetailView.canExecuteReview(status: status, isBlocked: isBlocked,
+                                                    isBacklogged: true),
+                    "Execute-more must stay hidden on a backlogged plan — \(label)"
+                )
+                XCTAssertFalse(
+                    PlanDetailView.canReElaborateReview(status: status, isBlocked: isBlocked,
+                                                        isBacklogged: true),
+                    "Re-Elaborate must stay hidden on a backlogged plan — \(label)"
+                )
+            }
+        }
+    }
+
+    /// The blocked gate holds across EVERY status for both review actions — a
+    /// blocked plan offers no review action regardless of status or backlog.
+    @MainActor
+    func testNoReviewActionSurvivesBlockedAtAnyStatus() {
+        let statuses: [TaskStatus?] = TaskStatus.allCases.map { $0 } + [nil]
+
+        for status in statuses {
+            for isBacklogged in [false, true] {
+                let label = "status \(status?.rawValue ?? "nil") / isBacklogged=\(isBacklogged)"
+                XCTAssertFalse(
+                    PlanDetailView.canExecuteReview(status: status, isBlocked: true,
+                                                    isBacklogged: isBacklogged),
+                    "Execute-more must stay hidden on a blocked plan — \(label)"
+                )
+                XCTAssertFalse(
+                    PlanDetailView.canReElaborateReview(status: status, isBlocked: true,
+                                                        isBacklogged: isBacklogged),
+                    "Re-Elaborate must stay hidden on a blocked plan — \(label)"
+                )
+            }
+        }
+    }
+
+    /// Both review actions are gated to the review states: for every NON-review
+    /// status they stay withheld even when otherwise eligible (not blocked, not
+    /// backlogged), so neither renders on a pending/elaborated/in-progress/etc plan.
+    @MainActor
+    func testReviewActionsWithheldForNonReviewStatusesWhenOtherwiseEligible() {
+        let nonReview = TaskStatus.allCases.filter { $0 != .review && $0 != .inReview }
+        let statuses: [TaskStatus?] = nonReview.map { $0 } + [nil]
+
+        for status in statuses {
+            let label = "status \(status?.rawValue ?? "nil")"
+            XCTAssertFalse(
+                PlanDetailView.canExecuteReview(status: status, isBlocked: false,
+                                                isBacklogged: false),
+                "Execute-more must stay hidden outside review — \(label)"
+            )
+            XCTAssertFalse(
+                PlanDetailView.canReElaborateReview(status: status, isBlocked: false,
+                                                    isBacklogged: false),
+                "Re-Elaborate must stay hidden outside review — \(label)"
+            )
+        }
+    }
+
     // MARK: - PlanDetailView.shouldAutoOpenProgress
 
     func testAutoOpensProgressWhenAlreadyRunningOnAppear() {

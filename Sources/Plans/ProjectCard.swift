@@ -115,6 +115,16 @@ struct ProjectCard: View {
     /// from the elaborated-plan Execute sheet and can never present against it.
     @State private var executePendingRequest: ExecutePendingRequest? = nil
 
+    /// The pending "Re-elaborate for review" request (#091), or `nil` when no
+    /// review-Refine sheet is open. Set by a review-state (review/in-review),
+    /// non-blocked row's `sparkles` glyph to that row's task id + project path; an
+    /// `.sheet(item:)` keyed on it presents the `ReviewReElaborateModal` for exactly
+    /// that task, which resets the plan to pending and re-elaborates it. Mirrors
+    /// `reElaborateRequest` — a distinct `Identifiable` struct so this sheet stays
+    /// independently keyed from the elaborated-plan Refine sheet and can never
+    /// present against it.
+    @State private var reviewReElaborateRequest: ReviewReElaborateRequest? = nil
+
     /// #076: the active per-card task-type filter, or `nil` for "All" (no
     /// filtering). Purely view-local transient state (like `hoveredRowID` and the
     /// sheet requests) — it narrows only the body rows shown by this card and is
@@ -516,6 +526,14 @@ struct ProjectCard: View {
         // which auto-elaborates the plan inline and then executes it.
         .sheet(item: $executePendingRequest) { request in
             ExecutePendingModal(taskID: request.taskID, projectPath: request.projectPath)
+        }
+        // The "Re-elaborate for review" sheet (#091), keyed on the requesting
+        // review-state row's task the same way the four sheets above are. The
+        // `ReviewReElaborateModal` hands the OPTIONAL guidance plus the Deep flag
+        // to the runner in `.reElaborateReview` mode (the sole `.plans/` writer,
+        // §2), which resets the plan to pending and re-elaborates it.
+        .sheet(item: $reviewReElaborateRequest) { request in
+            ReviewReElaborateModal(taskID: request.taskID, projectPath: request.projectPath)
         }
     }
 
@@ -1224,6 +1242,39 @@ struct ProjectCard: View {
                         )
                     }
                 }
+            } else if PlanDetailView.canExecuteReview(status: row.task.status,
+                                                      isBlocked: row.task.isBlocked,
+                                                      isBacklogged: row.task.isBacklogged)
+                        || PlanDetailView.canReElaborateReview(status: row.task.status,
+                                                               isBlocked: row.task.isBlocked,
+                                                               isBacklogged: row.task.isBacklogged) {
+                // A review-state (review/in-review), non-blocked task surfaces BOTH
+                // Refine and Execute (#091) — mirroring the elaborated-row pair
+                // above — so the user can push the plan back to pending for a fresh
+                // re-elaboration OR run another execution pass. Same tight
+                // `HStack(spacing: -4)` of two `RowActionGlyph`s within the row's
+                // pinned height. Refine opens the `ReviewReElaborateModal` (which
+                // resets the plan to pending and re-elaborates); Execute reuses the
+                // elaborated-plan `ExecuteModal` via the shared `executeRequest`.
+                // `canExecuteReview` and `canReElaborateReview` share the same
+                // review+non-blocked gate, so Refine appears exactly when Execute
+                // does.
+                HStack(spacing: -4) {
+                    RowActionGlyph(systemImage: "sparkles", help: "Re-elaborate this plan for review") {
+                        cardLog.notice("card review-Refine clicked: task=\(row.task.id, privacy: .public)")
+                        reviewReElaborateRequest = ReviewReElaborateRequest(
+                            taskID: row.task.id,
+                            projectPath: row.projectPath
+                        )
+                    }
+                    RowActionGlyph(systemImage: "play.fill", help: "Execute this plan again") {
+                        cardLog.notice("card review-Execute clicked: task=\(row.task.id, privacy: .public)")
+                        executeRequest = ExecuteRequest(
+                            taskID: row.task.id,
+                            projectPath: row.projectPath
+                        )
+                    }
+                }
             } else {
                 // No action for this status: an empty spacer of the same height
                 // so the row's vertical metrics match action-bearing rows.
@@ -1310,6 +1361,17 @@ private struct ExecuteRequest: Identifiable {
 /// shared one) so the four sheets stay independently keyed and can never be
 /// presented against each other's state.
 private struct ExecutePendingRequest: Identifiable {
+    let taskID: String
+    let projectPath: String
+    var id: String { taskID }
+}
+
+/// A pending "Re-elaborate for review" request (#091): the task + project a tapped
+/// review-state `sparkles` glyph targets, driving the card's fifth `.sheet(item:)`.
+/// A distinct type from the other request structs (rather than a shared one) so the
+/// five sheets stay independently keyed and can never be presented against each
+/// other's state.
+private struct ReviewReElaborateRequest: Identifiable {
     let taskID: String
     let projectPath: String
     var id: String { taskID }

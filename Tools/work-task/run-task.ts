@@ -78,6 +78,7 @@ type Mode =
   | "execute"
   | "elaborate"
   | "reElaborate"
+  | "reElaborateReview"
   | "capture"
   | "captureElaborate"
   | "executeYolo"
@@ -156,6 +157,7 @@ function parseArgs(argv: string[]): Args | null {
         value !== "execute" &&
         value !== "elaborate" &&
         value !== "reElaborate" &&
+        value !== "reElaborateReview" &&
         value !== "capture" &&
         value !== "captureElaborate" &&
         value !== "executeYolo" &&
@@ -195,18 +197,24 @@ function parseArgs(argv: string[]): Args | null {
     return { projectRoot, taskId, mode, description, deep, keep };
   }
 
-  // execute / elaborate / delete / backlog / restore operate on an existing
-  // task, so a task id is the only REQUIRED argument. elaborate and execute
-  // additionally accept an OPTIONAL `--description` (the user's guidance for the
-  // pass); it is folded in when present and simply absent otherwise, so a bare
-  // `--mode elaborate --task-id <id>` or `--mode execute --task-id <id>` behaves
-  // exactly as before. For execute (#088) the guidance feeds the inline
-  // auto-elaboration of a pending plan. delete / backlog / restore carry no free
-  // text at all.
+  // execute / elaborate / reElaborateReview / delete / backlog / restore operate
+  // on an existing task, so a task id is the only REQUIRED argument. elaborate,
+  // execute, and reElaborateReview additionally accept an OPTIONAL `--description`
+  // (the user's guidance for the pass); it is folded in when present and simply
+  // absent otherwise, so a bare `--mode elaborate --task-id <id>`,
+  // `--mode execute --task-id <id>`, or `--mode reElaborateReview --task-id <id>`
+  // behaves exactly as the un-guided pass. For execute (#088) the guidance feeds
+  // the inline auto-elaboration of a pending plan; for reElaborateReview (#091) it
+  // drives the re-elaboration after the plan is reset to pending. delete / backlog
+  // / restore carry no free text at all.
   if (!taskId) {
     return null;
   }
-  if (mode === "elaborate" || mode === "execute") {
+  if (
+    mode === "elaborate" ||
+    mode === "execute" ||
+    mode === "reElaborateReview"
+  ) {
     return { projectRoot, taskId, mode, description, deep, keep };
   }
   return { projectRoot, taskId, mode, deep, keep };
@@ -397,6 +405,63 @@ function buildReElaboratePrompt(
     "   decision, make the most reasonable choice yourself and record it in the",
     "   task's Assumptions section (flagged as a discovered assumption).",
     "3. Research the codebase as needed to keep the plan accurate.",
+    "4. Leave the task in the `elaborated` state when done. Do NOT execute it.",
+    "",
+    "Work autonomously to completion. Do not ask for confirmation.",
+  ].join("\n");
+}
+
+/**
+ * Build the prompt for a `reElaborateReview` run (#091). The plan is currently in
+ * `review` / `in-review`; the user wants to throw the current plan away and
+ * re-elaborate it from scratch. We FIRST reset the task file's `**Status:**`
+ * header line back to `pending` IN PLACE (the file stays in `.plans/pending/`),
+ * THEN drive `/plan-elaborate <id>` again so the whole plan is re-researched. An
+ * OPTIONAL `description` is folded in as further direction for the elaboration.
+ * Like the other hand-offs this is unattended, so the agent must work
+ * autonomously and record reasonable assumptions instead of asking.
+ */
+function buildReviewReElaboratePrompt(
+  taskId: string,
+  deep: boolean,
+  description?: string,
+): string {
+  const guidance = description?.trim()
+    ? [
+        `The user has provided the following guidance for this re-elaboration —`,
+        `fold it into the plan as the direction for this pass:`,
+        "",
+        `"""`,
+        description.trim(),
+        `"""`,
+        "",
+      ]
+    : [];
+  return [
+    `The plans-cc task with id ${taskId} is currently in review. The user wants to`,
+    `send it BACK to pending and re-elaborate it from scratch. Do this in two`,
+    `steps:`,
+    "",
+    `1. Edit the task's markdown file in \`.plans/pending/\` (its filename starts`,
+    `   with ${taskId}-): change its \`**Status:**\` header line to read`,
+    `   \`**Status:** pending\`. Leave the file where it is — do NOT move it out of`,
+    `   \`.plans/pending/\`.`,
+    `2. Then use the \`plan-elaborate\` skill to research and re-flesh out the task:`,
+    "",
+    // #065: trailing ` deep` token END-ANCHORED as the final token on the line,
+    // matching the other elaborate-bearing builders.
+    `/plan-elaborate ${taskId}${deep ? " deep" : ""}`,
+    "",
+    ...guidance,
+    "Requirements:",
+    "1. Perform the status reset to `pending` FIRST, before running the",
+    "   elaboration, so `plan-elaborate` sees a pending task to work on.",
+    "2. Work fully autonomously. Do NOT ask the user any questions — there is no",
+    "   interactive UI to answer them. Where the skill would prompt for a design",
+    "   decision, make the most reasonable choice yourself and record it in the",
+    "   task's Assumptions section (flagged as a discovered assumption).",
+    "3. Research the codebase as needed and produce a complete How checklist,",
+    "   Verification criteria, and Impact Scope per the skill's conventions.",
     "4. Leave the task in the `elaborated` state when done. Do NOT execute it.",
     "",
     "Work autonomously to completion. Do not ask for confirmation.",
@@ -643,6 +708,13 @@ function buildPrompt(args: Args): string {
       args.taskId ?? "",
       args.description ?? "",
       args.deep ?? false,
+    );
+  }
+  if (args.mode === "reElaborateReview") {
+    return buildReviewReElaboratePrompt(
+      args.taskId ?? "",
+      args.deep ?? false,
+      args.description,
     );
   }
   if (args.mode === "elaborate") {

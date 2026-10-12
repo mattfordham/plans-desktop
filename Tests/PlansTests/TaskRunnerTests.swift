@@ -728,6 +728,61 @@ final class TaskRunnerTests: XCTestCase {
         XCTAssertFalse(PlanDetailView.canExecutePending(status: .pending, isBlocked: false, isBacklogged: true))
     }
 
+    /// `PlanDetailView.canExecuteReview` is the pure predicate behind the
+    /// review-state "execute more" action's availability (#091). Available only
+    /// for a plan in `review` or `inReview`, non-blocked and non-backlogged — the
+    /// two statuses that mean an Execute run has finished and the result is awaiting
+    /// the user's eye. Asserted true for both eligible shapes and false for every
+    /// other status, when blocked, and when backlogged.
+    @MainActor
+    func testCanExecuteReviewGating() {
+        // Both review states, not blocked, not backlogged → available.
+        XCTAssertTrue(PlanDetailView.canExecuteReview(status: .review, isBlocked: false))
+        XCTAssertTrue(PlanDetailView.canExecuteReview(status: .inReview, isBlocked: false))
+
+        // Every non-review status → unavailable.
+        XCTAssertFalse(PlanDetailView.canExecuteReview(status: .pending, isBlocked: false))
+        XCTAssertFalse(PlanDetailView.canExecuteReview(status: .elaborated, isBlocked: false))
+        XCTAssertFalse(PlanDetailView.canExecuteReview(status: .inProgress, isBlocked: false))
+        XCTAssertFalse(PlanDetailView.canExecuteReview(status: .completed, isBlocked: false))
+        XCTAssertFalse(PlanDetailView.canExecuteReview(status: nil, isBlocked: false))
+
+        // Blocked → unavailable even in a review state.
+        XCTAssertFalse(PlanDetailView.canExecuteReview(status: .review, isBlocked: true))
+        XCTAssertFalse(PlanDetailView.canExecuteReview(status: .inReview, isBlocked: true))
+
+        // Backlogged → unavailable even in a review state and non-blocked.
+        XCTAssertFalse(PlanDetailView.canExecuteReview(status: .review, isBlocked: false, isBacklogged: true))
+        XCTAssertFalse(PlanDetailView.canExecuteReview(status: .inReview, isBlocked: false, isBacklogged: true))
+    }
+
+    /// `PlanDetailView.canReElaborateReview` is the pure predicate behind the
+    /// review-state "re-elaborate" action's availability (#091). It shares the
+    /// SAME eligibility as `canExecuteReview`: a plan in `review` or `inReview`,
+    /// non-blocked and non-backlogged. Asserted true for both eligible shapes and
+    /// false for every other status, when blocked, and when backlogged.
+    @MainActor
+    func testCanReElaborateReviewGating() {
+        // Both review states, not blocked, not backlogged → available.
+        XCTAssertTrue(PlanDetailView.canReElaborateReview(status: .review, isBlocked: false))
+        XCTAssertTrue(PlanDetailView.canReElaborateReview(status: .inReview, isBlocked: false))
+
+        // Every non-review status → unavailable.
+        XCTAssertFalse(PlanDetailView.canReElaborateReview(status: .pending, isBlocked: false))
+        XCTAssertFalse(PlanDetailView.canReElaborateReview(status: .elaborated, isBlocked: false))
+        XCTAssertFalse(PlanDetailView.canReElaborateReview(status: .inProgress, isBlocked: false))
+        XCTAssertFalse(PlanDetailView.canReElaborateReview(status: .completed, isBlocked: false))
+        XCTAssertFalse(PlanDetailView.canReElaborateReview(status: nil, isBlocked: false))
+
+        // Blocked → unavailable even in a review state.
+        XCTAssertFalse(PlanDetailView.canReElaborateReview(status: .review, isBlocked: true))
+        XCTAssertFalse(PlanDetailView.canReElaborateReview(status: .inReview, isBlocked: true))
+
+        // Backlogged → unavailable even in a review state and non-blocked.
+        XCTAssertFalse(PlanDetailView.canReElaborateReview(status: .review, isBlocked: false, isBacklogged: true))
+        XCTAssertFalse(PlanDetailView.canReElaborateReview(status: .inReview, isBlocked: false, isBacklogged: true))
+    }
+
     /// `ExecutePendingModal`'s submit path: `TaskRunner.run(... mode: .execute,
     /// description:, deep:, keep:)` must register a `TaskRun` that carries ALL
     /// THREE channels, since they are exactly what `TaskRun.spawn` reads to emit
@@ -748,6 +803,24 @@ final class TaskRunnerTests: XCTestCase {
         XCTAssertEqual(run?.description, "Prioritise the migration path")
         XCTAssertEqual(run?.deep, true)
         XCTAssertEqual(run?.keep, true)
+    }
+
+    /// The Re-Elaborate-Review dialog (#091) registers a `.reElaborateReview`
+    /// run through `run(...)`, carrying optional guidance and `deep` the same way
+    /// the pending-execute path does. Mirrors
+    /// `testExecutePendingRunViaRunCarriesDescriptionDeepAndKeep`.
+    @MainActor
+    func testReElaborateReviewRunViaRunCarriesDescriptionAndDeep() {
+        let runner = TaskRunner()
+        runner.run(projectPath: "/some/project", taskID: "091",
+                   mode: .reElaborateReview, description: "note", deep: true)
+
+        let run = runner.run(for: "091", in: "/some/project")
+        XCTAssertNotNil(run)
+        XCTAssertEqual(run?.mode, .reElaborateReview)
+        XCTAssertEqual(run?.taskID, "091")
+        XCTAssertEqual(run?.description, "note")
+        XCTAssertEqual(run?.deep, true)
     }
 
     /// The direct-Execute dialog's fullest submission at the `TaskRun` level: an
@@ -889,6 +962,9 @@ final class TaskRunnerTests: XCTestCase {
         // #088: execute now opens the same OPTIONAL channel — the direct-Execute
         // dialog's guidance rides it into the inline auto-elaboration pass.
         XCTAssertTrue(RunMode.execute.usesDescription)
+        // #091: re-elaborating a review-state plan resets it to pending and
+        // re-elaborates it, carrying the user's free-text guidance.
+        XCTAssertTrue(RunMode.reElaborateReview.usesDescription)
 
         // delete names an EXISTING task by id; there is no free text to pass.
         XCTAssertFalse(RunMode.delete.usesDescription)
@@ -904,6 +980,8 @@ final class TaskRunnerTests: XCTestCase {
         XCTAssertTrue(RunMode.execute.usesTaskID)
         XCTAssertTrue(RunMode.elaborate.usesTaskID)
         XCTAssertTrue(RunMode.reElaborate.usesTaskID)
+        // #091: re-elaborating a review-state plan names that EXISTING task by id.
+        XCTAssertTrue(RunMode.reElaborateReview.usesTaskID)
         // delete targets an existing task file, so it is id-addressed too.
         XCTAssertTrue(RunMode.delete.usesTaskID)
 

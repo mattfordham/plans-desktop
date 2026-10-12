@@ -90,6 +90,15 @@ struct PlanDetailView: View {
     /// run the button used to fire directly.
     @State private var showExecute = false
 
+    /// Whether the "Re-elaborate for review" sheet (#091) is presented. Raised by
+    /// the "Refine" header action for a REVIEW-state plan (only shown for a
+    /// review/in-review, non-blocked, non-backlogged task — `canReElaborateReview`)
+    /// and lowered by the sheet's own Cancel/Refine. Drives the
+    /// `ReviewReElaborateModal` for THIS view's task, which resets the plan to
+    /// pending and re-elaborates it. Kept separate from `showReElaborate` since
+    /// that gates to the elaborated state while this gates to review.
+    @State private var showReviewReElaborate = false
+
     /// The resolved row for `rowID` across all projects' active rows, or `nil`
     /// when absent. Re-derived from the live store on each render.
     private var row: TaskRow? {
@@ -190,6 +199,17 @@ struct PlanDetailView: View {
         .sheet(isPresented: $showExecute) {
             if let row {
                 ExecuteModal(taskID: row.task.id, projectPath: row.projectPath)
+            }
+        }
+        // The "Re-elaborate for review" sheet (#091). Same row-resolution shape as
+        // the sheets above: the Refine action that raises it only renders inside
+        // the `if let row` header for a review-state plan, so the unwrap is safe.
+        // The `ReviewReElaborateModal` hands the OPTIONAL guidance plus the Deep
+        // flag to the runner in `.reElaborateReview` mode, which resets the plan to
+        // pending and re-elaborates it.
+        .sheet(isPresented: $showReviewReElaborate) {
+            if let row {
+                ReviewReElaborateModal(taskID: row.task.id, projectPath: row.projectPath)
             }
         }
         // NOTE: dismissing the detail pane deliberately does NOT stop the run.
@@ -313,6 +333,42 @@ struct PlanDetailView: View {
                     if Self.canWork(status: row.task.status,
                                     isBlocked: row.task.isBlocked,
                                     isBacklogged: row.task.isBacklogged) {
+                        Button {
+                            showExecute = true
+                        } label: {
+                            Label("Execute", systemImage: "play.fill")
+                        }
+                    }
+
+                    // "Refine" (review) — resets a REVIEW-state plan back to
+                    // pending and re-elaborates it with the user's optional
+                    // guidance (#091). Available only for a review/in-review,
+                    // non-blocked, non-backlogged task — so a review plan shows
+                    // BOTH Refine and Execute side by side. Opens the
+                    // `ReviewReElaborateModal` first (optional guidance + Deep)
+                    // rather than firing the run straight off the button. Shares
+                    // the pending Elaborate's `sparkles` glyph since both drive
+                    // plan-elaborate.
+                    if Self.canReElaborateReview(status: row.task.status,
+                                                 isBlocked: row.task.isBlocked,
+                                                 isBacklogged: row.task.isBacklogged) {
+                        Button {
+                            showReviewReElaborate = true
+                        } label: {
+                            Label("Refine", systemImage: "sparkles")
+                        }
+                    }
+
+                    // "Execute" (review) — re-runs a REVIEW-state plan through the
+                    // bundled runner's worktree-isolated `plan-execute` mode for
+                    // another execution pass (#091). Available only for a
+                    // review/in-review, non-blocked, non-backlogged task — the same
+                    // gate as the review Refine above. Reuses the elaborated
+                    // Execute's `ExecuteModal` sheet (Keep toggle) via the shared
+                    // `showExecute` flag rather than a new sheet.
+                    if Self.canExecuteReview(status: row.task.status,
+                                             isBlocked: row.task.isBlocked,
+                                             isBacklogged: row.task.isBacklogged) {
                         Button {
                             showExecute = true
                         } label: {
@@ -544,6 +600,32 @@ struct PlanDetailView: View {
         guard !isBacklogged else { return false }
         guard !isBlocked else { return false }
         return status == .elaborated
+    }
+
+    /// Pure predicate for the review-state "execute more" action's availability
+    /// (#091). Available only for a plan in `review` / `in-review` that is not
+    /// blocked and not backlogged — the two statuses that mean an Execute run has
+    /// finished and the result is awaiting the user's review. The action hands the
+    /// reviewed plan back to `plan-execute` for a further pass.
+    /// Withheld from a BACKLOGGED plan for the same reason as `canReElaborate`:
+    /// driving work the user has parked is incoherent — restore it first.
+    static func canExecuteReview(status: TaskStatus?, isBlocked: Bool,
+                                 isBacklogged: Bool = false) -> Bool {
+        guard !isBacklogged else { return false }
+        guard !isBlocked else { return false }
+        return status == .review || status == .inReview
+    }
+
+    /// Pure predicate for the review-state "re-elaborate" action's availability
+    /// (#091). Shares the SAME eligibility as `canExecuteReview` — a plan in
+    /// `review` / `in-review` that is not blocked and not backlogged — because
+    /// both review actions are offered together. The action resets the reviewed
+    /// plan back to `pending` and re-elaborates it from scratch.
+    static func canReElaborateReview(status: TaskStatus?, isBlocked: Bool,
+                                     isBacklogged: Bool = false) -> Bool {
+        guard !isBacklogged else { return false }
+        guard !isBlocked else { return false }
+        return status == .review || status == .inReview
     }
 
     /// Pure predicate for the "Backlog" action's availability (#077 follow-up),
@@ -947,7 +1029,7 @@ struct RunProgressSheet: View {
     private var modeVerb: String {
         switch run?.mode {
         case .elaborate: return "Elaborating"
-        case .reElaborate: return "Refining"
+        case .reElaborate, .reElaborateReview: return "Refining"
         case .capture: return "Capturing"
         case .captureElaborate: return "Capturing & elaborating"
         case .executeYolo: return "Capturing & executing"
