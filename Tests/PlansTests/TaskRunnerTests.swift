@@ -75,6 +75,143 @@ final class TaskRunnerTests: XCTestCase {
         XCTAssertThrowsError(try decode(#"{"kind":"mystery"}"#))
     }
 
+    // MARK: - Denied tool calls (task #092)
+
+    /// A `{"kind":"denied","tool":"…"}` line decodes into `.denied(tool:)`,
+    /// reusing the existing `tool` coding key — the Swift mirror of the segment-1
+    /// Node contract addition. This is the keystone the run's accumulation path
+    /// depends on.
+    func testDecodesDenied() throws {
+        let event = try decode(#"{"kind":"denied","tool":"mcp__sentry__get_sentry_resource"}"#)
+        guard case let .denied(tool) = event else {
+            return XCTFail("expected .denied, got \(event)")
+        }
+        XCTAssertEqual(tool, "mcp__sentry__get_sentry_resource")
+    }
+
+    /// A `.denied` event round-trips through encode → decode unchanged, so the
+    /// NDJSON contract is symmetric (mirrors the other per-kind shapes).
+    func testDeniedRoundTripsThroughEncodeDecode() throws {
+        let original = RunEvent.denied(tool: "mcp__sentry__search_issues")
+        let data = try JSONEncoder().encode(original)
+        let decoded = try JSONDecoder().decode(RunEvent.self, from: data)
+        XCTAssertEqual(decoded, original)
+    }
+
+    /// `parseLines` decodes a `denied` line interleaved with other kinds, so the
+    /// non-terminal denial signal flows through the exact splitter the live
+    /// stream uses.
+    func testParseLinesDecodesDeniedAmongOtherKinds() {
+        let stream = #"{"kind":"text","chunk":"thinking"}"# + "\n"
+            + #"{"kind":"denied","tool":"mcp__sentry__search_errors"}"# + "\n"
+            + #"{"kind":"done","costUsd":0.1,"turns":2,"stopReason":"end_turn"}"# + "\n"
+        var buffer = Data(stream.utf8)
+
+        let events = RunEvent.parseLines(from: &buffer)
+
+        XCTAssertEqual(events.count, 3)
+        guard case let .denied(tool) = events[1] else {
+            return XCTFail("expected .denied at index 1, got \(events[1])")
+        }
+        XCTAssertEqual(tool, "mcp__sentry__search_errors")
+    }
+
+    /// Feeding several `denied` lines (with a repeat) through the run's ingest
+    /// path accumulates `deniedTools` in arrival order WITH duplicates (so the
+    /// count preserves retries) while `deniedToolNames` dedups to the distinct
+    /// set. This is exactly what the UI count + name-list render from.
+    @MainActor
+    func testDeniedLinesAccumulateWithDuplicateCountAndDistinctSet() {
+        let run = TaskRun(taskID: "092", mode: .elaborate)
+        run.ingestForTesting(
+            #"{"kind":"denied","tool":"mcp__sentry__search_issues"}"# + "\n"
+            + #"{"kind":"denied","tool":"mcp__sentry__search_issues"}"# + "\n"
+            + #"{"kind":"denied","tool":"mcp__sentry__search_errors"}"# + "\n"
+        )
+
+        // Ordered, duplicates kept → per-call count is 3.
+        XCTAssertEqual(run.deniedTools,
+                       ["mcp__sentry__search_issues",
+                        "mcp__sentry__search_issues",
+                        "mcp__sentry__search_errors"])
+        XCTAssertEqual(run.deniedTools.count, 3)
+        // Distinct set dedups the retried tool → 2 names.
+        XCTAssertEqual(run.deniedToolNames,
+                       ["mcp__sentry__search_issues", "mcp__sentry__search_errors"])
+        XCTAssertEqual(run.deniedToolNames.count, 2)
+    }
+
+    /// A `denied` line is NON-fatal: it must not set the run's `error` nor
+    /// populate `summary` (those are reserved for the terminal `error`/`done`
+    /// events). The run continues as if the tool simply wasn't used.
+    @MainActor
+    func testDeniedLineDoesNotSetErrorOrSummary() {
+        let run = TaskRun(taskID: "092", mode: .elaborate)
+        run.ingestForTesting(
+            #"{"kind":"denied","tool":"mcp__sentry__update_issue"}"# + "\n"
+        )
+        XCTAssertFalse(run.deniedTools.isEmpty)
+        XCTAssertNil(run.error, "a denial is non-fatal and must not latch an error")
+        XCTAssertNil(run.summary, "a denial must not populate the run summary")
+    }
+
+    /// Regression guard for `parseLines`: now that `.denied` is a real kind, an
+    /// UNKNOWN `kind` must STILL be skipped gracefully (not decoded, not fatal),
+    /// so a future contract addition degrades to "fewer lines" rather than
+    /// aborting the whole stream.
+    func testParseLinesStillSkipsUnknownKindAlongsideDenied() {
+        let stream = #"{"kind":"denied","tool":"mcp__sentry__find_projects"}"# + "\n"
+            + #"{"kind":"future_kind","payload":"x"}"# + "\n"  // unknown → skipped
+            + #"{"kind":"text","chunk":"after"}"# + "\n"
+        var buffer = Data(stream.utf8)
+
+        let events = RunEvent.parseLines(from: &buffer)
+
+        // The unknown line is dropped; the denied and text lines survive.
+        XCTAssertEqual(events.count, 2)
+        guard case .denied = events[0] else {
+            return XCTFail("expected .denied at index 0, got \(events[0])")
+        }
+        guard case let .text(chunk) = events[1] else {
+            return XCTFail("expected .text at index 1, got \(events[1])")
+        }
+        XCTAssertEqual(chunk, "after")
+        XCTAssertTrue(buffer.isEmpty)
+    }
+
+    /// On finish, a run with denials carries the tally into its durable
+    /// `RunOutcome`: `deniedToolCount` preserves the per-call count (retries
+    /// included) while `deniedTools` is the sorted DISTINCT set — the diagnostic
+    /// "this run finished but couldn't reach Sentry" that survives the sheet.
+    @MainActor
+    func testFinishWritesDeniedToolTallyIntoOutcome() throws {
+        let tmp = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString)
+            .appendingPathComponent("run-outcomes.log")
+        let run = TaskRun(
+            taskID: "092", mode: .elaborate,
+            outcomeLog: RunOutcomeLog(fileURL: tmp), now: { "t" }
+        )
+        run.ingestForTesting(
+            #"{"kind":"denied","tool":"mcp__sentry__search_issues"}"# + "\n"
+            + #"{"kind":"denied","tool":"mcp__sentry__search_issues"}"# + "\n"
+            + #"{"kind":"denied","tool":"mcp__sentry__search_errors"}"# + "\n"
+            + #"{"kind":"done","costUsd":0.5,"turns":9,"stopReason":"end_turn"}"# + "\n"
+        )
+        run.finishForTesting(projectPath: "/proj")
+
+        let outcome = try JSONDecoder().decode(
+            RunOutcome.self,
+            from: Data(try String(contentsOf: tmp, encoding: .utf8).split(separator: "\n")[0].utf8)
+        )
+        // A denial is non-fatal, so the run is still classified `.completed`.
+        XCTAssertEqual(outcome.classification, .completed)
+        XCTAssertEqual(outcome.deniedToolCount, 3, "per-call count keeps retries")
+        XCTAssertEqual(outcome.deniedTools,
+                       ["mcp__sentry__search_errors", "mcp__sentry__search_issues"],
+                       "distinct set, sorted")
+    }
+
     func testLoggedEventGetsUniqueIdentityPerWrapper() throws {
         let event = try decode(#"{"kind":"text","chunk":"a"}"#)
         let a = LoggedEvent(event: event)

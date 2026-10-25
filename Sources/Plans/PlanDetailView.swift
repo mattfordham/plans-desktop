@@ -119,6 +119,17 @@ struct PlanDetailView: View {
                         if let failure = row.task.failure {
                             failureSection(row, failure: failure)
                         }
+                        // Task #092: a non-fatal DENIAL note for a run that reached
+                        // for tools not on the allowlist. Surfaced from the live
+                        // `TaskRun` (the detail body's only run handle) so it shows
+                        // EVEN WHEN the run otherwise finished cleanly — the user
+                        // needs to know the plan may be built on incomplete
+                        // information. Distinct from the red `failureSection`: this
+                        // is a caution (orange), not a failure.
+                        if let run = runner.run(for: row.task.id, in: row.projectPath),
+                           !run.deniedTools.isEmpty {
+                            deniedToolsSection(run)
+                        }
                         ForEach(Array(row.task.sections.enumerated()), id: \.offset) { _, section in
                             sectionView(section)
                         }
@@ -519,6 +530,49 @@ struct PlanDetailView: View {
     /// is unit-testable without the view; a `nil` failure (healthy) hides both.
     static func canRetry(failure: TaskFailure?) -> Bool {
         failure != nil
+    }
+
+    /// The non-fatal DENIAL note (task #092): a caution surface shown when the
+    /// run reached for one or more tools that were not on the allowlist and the
+    /// SDK refused them. Unlike `failureSection` (a terminal, red failure), this
+    /// is a WARNING — the run may well have finished cleanly (e.g. "elaborated"),
+    /// but it could not reach those tools, so the plan may be built on incomplete
+    /// information. It uses a muted-orange/caution treatment (an
+    /// exclamation-triangle glyph on a faint orange panel) to read as a notice,
+    /// not an error. It shows the per-call count and the DISTINCT tool names
+    /// (sorted) so the user can see exactly which tools were refused.
+    private func deniedToolsSection(_ run: TaskRun) -> some View {
+        let count = run.deniedTools.count
+        let names = Array(run.deniedToolNames).sorted()
+        return VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 8) {
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .imageScale(.medium)
+                Text("\(count) tool call\(count == 1 ? "" : "s") denied — the plan may be "
+                     + "built on incomplete information")
+                    .fontWeight(.semibold)
+                    .fixedSize(horizontal: false, vertical: true)
+                Spacer(minLength: 0)
+            }
+
+            if !names.isEmpty {
+                VStack(alignment: .leading, spacing: 2) {
+                    ForEach(names, id: \.self) { name in
+                        Text(name)
+                            .font(.system(.callout, design: .monospaced))
+                    }
+                }
+            }
+        }
+        .foregroundStyle(.orange)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(12)
+        .background(Color.orange.opacity(0.12))
+        .clipShape(RoundedRectangle(cornerRadius: 8))
+        .overlay(
+            RoundedRectangle(cornerRadius: 8)
+                .strokeBorder(Color.orange.opacity(0.4), lineWidth: 1)
+        )
     }
 
     /// A one-line human-readable summary of a run failure (#079) — the
@@ -1012,6 +1066,16 @@ struct RunProgressSheet: View {
 
             logList
 
+            // Task #092: the persistent denial note in the run-summary area. Shown
+            // whenever the run hit one or more denied tool calls, EVEN WHEN it
+            // finished cleanly — a caution, visually distinct from the red
+            // `errorBanner` above. Sits beside the cost/turns summary so the user
+            // sees the plan may be built on incomplete information.
+            if let run, !run.deniedTools.isEmpty {
+                deniedSummary(count: run.deniedTools.count,
+                              names: Array(run.deniedToolNames).sorted())
+            }
+
             if let summary = run?.summary {
                 summaryRow(summary)
             }
@@ -1142,6 +1206,20 @@ struct RunProgressSheet: View {
         case let .text(chunk):
             Text(chunk)
                 .font(.callout)
+        case let .denied(tool):
+            // Task #092: a non-fatal denied tool call. Shown inline as a muted
+            // warning line (NOT the red error banner) since the run continues.
+            HStack(alignment: .firstTextBaseline, spacing: 6) {
+                Image(systemName: "exclamationmark.triangle")
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+                Text("Tool not allowed:")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Text(tool)
+                    .font(.system(.caption, design: .monospaced))
+                    .foregroundStyle(.secondary)
+            }
         case .done, .error:
             // Rendered out-of-band as the summary row / error banner.
             EmptyView()
@@ -1152,6 +1230,33 @@ struct RunProgressSheet: View {
         Text(String(format: "$%.2f · %d turns", summary.costUsd, summary.turns))
             .font(.callout)
             .foregroundStyle(.secondary)
+    }
+
+    /// The run-summary denial note (task #092): a caution row listing the count
+    /// of denied tool calls and the distinct tool names, orange rather than red
+    /// (the denial is non-fatal — the run still finished). Mirrors the detail
+    /// view's `deniedToolsSection` so the same information persists whether the
+    /// user watches the sheet or returns to the plan body afterwards.
+    private func deniedSummary(count: Int, names: [String]) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(alignment: .firstTextBaseline, spacing: 6) {
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .imageScale(.small)
+                Text("\(count) tool call\(count == 1 ? "" : "s") denied — the plan may be "
+                     + "built on incomplete information")
+                    .font(.callout)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            if !names.isEmpty {
+                Text(names.joined(separator: ", "))
+                    .font(.system(.caption, design: .monospaced))
+            }
+        }
+        .foregroundStyle(.orange)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(8)
+        .background(Color.orange.opacity(0.12))
+        .clipShape(RoundedRectangle(cornerRadius: 6))
     }
 
     private func errorBanner(_ message: String) -> some View {

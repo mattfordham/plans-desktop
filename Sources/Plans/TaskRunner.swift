@@ -15,10 +15,11 @@ private let runnerLog = Logger(subsystem: "com.plans.desktop", category: "TaskRu
 ///
 /// - `{"kind":"activity","tool":"Edit","detail":"…"}`
 /// - `{"kind":"text","chunk":"…"}`
+/// - `{"kind":"denied","tool":"mcp__sentry__…"}`
 /// - `{"kind":"done","costUsd":<number>,"turns":<number>,"stopReason":"…"}`
 /// - `{"kind":"error","message":"…"}`
 ///
-/// As long as this enum decodes those four shapes, the UI never needs to know
+/// As long as this enum decodes those shapes, the UI never needs to know
 /// the SDK changed — the NDJSON contract is the only coupling point.
 ///
 /// This is a pure value enum (no stored identity — Swift enums can't carry
@@ -33,6 +34,10 @@ enum RunEvent: Codable, Equatable {
     case done(costUsd: Double, turns: Int, stopReason: String?)
     /// Terminal error line carrying a human-readable message.
     case error(message: String)
+    /// A NON-terminal signal (task #092): the agent reached for a tool that was
+    /// not on the allowlist and the SDK refused it. The run continues and still
+    /// finishes — this is distinct from `error`, which is terminal.
+    case denied(tool: String)
 
     private enum CodingKeys: String, CodingKey {
         case kind, tool, detail, chunk, costUsd, turns, stopReason, message
@@ -57,6 +62,10 @@ enum RunEvent: Codable, Equatable {
         case "error":
             let message = try container.decode(String.self, forKey: .message)
             self = .error(message: message)
+        case "denied":
+            // Reuses the existing `tool` key (task #092).
+            let tool = try container.decode(String.self, forKey: .tool)
+            self = .denied(tool: tool)
         default:
             // Unknown `kind`: throw a clear DecodingError. The caller
             // (`RunEvent.parseLines`) catches per-line decode failures and skips
@@ -88,6 +97,9 @@ enum RunEvent: Codable, Equatable {
         case let .error(message):
             try container.encode("error", forKey: .kind)
             try container.encode(message, forKey: .message)
+        case let .denied(tool):
+            try container.encode("denied", forKey: .kind)
+            try container.encode(tool, forKey: .tool)
         }
     }
 
@@ -315,6 +327,17 @@ final class TaskRun {
     /// The decoded progress stream, in arrival order, for the scrolling log.
     /// Each entry wraps a `RunEvent` with a stable `UUID` for SwiftUI iteration.
     private(set) var lines: [LoggedEvent] = []
+
+    /// Every denied tool call (task #092), in arrival order and WITH duplicates:
+    /// if the agent retries a not-allowed tool three times this holds three
+    /// entries, so both the raw count (`deniedTools.count`) and the distinct set
+    /// (`deniedToolNames`) are derivable. A denial is NON-fatal — it never sets
+    /// `error` or `summary`; it is surfaced to the UI / durable outcome only.
+    private(set) var deniedTools: [String] = []
+
+    /// The DISTINCT set of denied tool names, for a UI that wants to list which
+    /// tools were refused without the per-retry duplication.
+    var deniedToolNames: Set<String> { Set(deniedTools) }
 
     /// Populated from the terminal `done` event: the run's cost and turn count.
     private(set) var summary: (costUsd: Double, turns: Int)?
@@ -643,6 +666,11 @@ final class TaskRun {
             }
         case let .error(message):
             error = message
+        case let .denied(tool):
+            // A denied tool call is NON-fatal (task #092): accumulate it for the
+            // UI / durable outcome, but do NOT touch `error` or `summary` — the
+            // run is still running/finishing normally.
+            deniedTools.append(tool)
         case .activity, .text:
             break
         }
@@ -733,7 +761,11 @@ final class TaskRun {
             turns: summary?.turns ?? 0,
             stopReason: lastStopReason,
             errorMessage: error,
-            classification: classification
+            classification: classification,
+            // Task #092: carry the denial tally into the durable record. The
+            // count preserves retries; the distinct names aid diagnosis.
+            deniedToolCount: deniedTools.count,
+            deniedTools: Array(deniedToolNames).sorted()
         )
         outcomeLog.append(outcome)
     }

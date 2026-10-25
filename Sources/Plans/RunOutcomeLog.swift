@@ -50,6 +50,19 @@ struct RunOutcome: Codable, Equatable {
     /// The derived terminal state (see `classify`).
     let classification: Classification
 
+    /// How many tool calls the run had DENIED because the tool wasn't on the
+    /// allowlist (task #092) — counts retries, so three refused attempts at the
+    /// same tool is `3`. A denial is NON-fatal and never changes `classification`;
+    /// this is a diagnostic ("the run finished but couldn't reach Sentry"). 0 for
+    /// a run with no denials. Decode-optional (see the custom `init(from:)`) so
+    /// old `run-outcomes.log` lines written before this field still parse.
+    var deniedToolCount: Int = 0
+
+    /// The DISTINCT denied tool names (task #092), for a richer diagnostic than
+    /// the bare count. Empty when nothing was denied. Decode-optional for
+    /// backward compatibility with pre-#092 log lines.
+    var deniedTools: [String] = []
+
     /// The coarse terminal state of a run, derived from its raw signals. This is
     /// the field a user scans to triage: a `truncated` or `crashed` run is one
     /// that almost certainly stranded its task before reaching review.
@@ -143,6 +156,51 @@ struct RunOutcome: Codable, Equatable {
             return .error
         }
         return .completed
+    }
+}
+
+// MARK: - Backward-compatible Codable
+
+extension RunOutcome {
+    private enum CodingKeys: String, CodingKey {
+        case timestamp, taskID, mode, projectPath, costUsd, turns
+        case stopReason, errorMessage, classification
+        case deniedToolCount, deniedTools
+    }
+
+    /// Explicit decoder so pre-#092 `run-outcomes.log` lines — which have no
+    /// `deniedToolCount`/`deniedTools` keys — still decode: the two #092 fields
+    /// use `decodeIfPresent` and fall back to their zero/empty defaults. Living
+    /// in an extension preserves the auto-synthesized memberwise initializer that
+    /// `TaskRun.writeOutcome()` and the tests construct outcomes with.
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        self.timestamp = try c.decode(String.self, forKey: .timestamp)
+        self.taskID = try c.decode(String.self, forKey: .taskID)
+        self.mode = try c.decode(String.self, forKey: .mode)
+        self.projectPath = try c.decode(String.self, forKey: .projectPath)
+        self.costUsd = try c.decode(Double.self, forKey: .costUsd)
+        self.turns = try c.decode(Int.self, forKey: .turns)
+        self.stopReason = try c.decodeIfPresent(String.self, forKey: .stopReason)
+        self.errorMessage = try c.decodeIfPresent(String.self, forKey: .errorMessage)
+        self.classification = try c.decode(Classification.self, forKey: .classification)
+        self.deniedToolCount = try c.decodeIfPresent(Int.self, forKey: .deniedToolCount) ?? 0
+        self.deniedTools = try c.decodeIfPresent([String].self, forKey: .deniedTools) ?? []
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(timestamp, forKey: .timestamp)
+        try c.encode(taskID, forKey: .taskID)
+        try c.encode(mode, forKey: .mode)
+        try c.encode(projectPath, forKey: .projectPath)
+        try c.encode(costUsd, forKey: .costUsd)
+        try c.encode(turns, forKey: .turns)
+        try c.encodeIfPresent(stopReason, forKey: .stopReason)
+        try c.encodeIfPresent(errorMessage, forKey: .errorMessage)
+        try c.encode(classification, forKey: .classification)
+        try c.encode(deniedToolCount, forKey: .deniedToolCount)
+        try c.encode(deniedTools, forKey: .deniedTools)
     }
 }
 

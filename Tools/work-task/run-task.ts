@@ -49,8 +49,12 @@
  * Output contract: NDJSON on stdout, one JSON object per line:
  *   {"kind":"activity","tool":"Edit","detail":"…"}
  *   {"kind":"text","chunk":"…"}
+ *   {"kind":"denied","tool":"mcp__sentry__…"}
  *   {"kind":"done","costUsd":N,"turns":N,"stopReason":"…"}
  *   {"kind":"error","message":"…"}
+ * The `denied` line is a NON-fatal signal (task #092): a tool call the agent
+ * reached for was refused because it wasn't on the allowlist. The run still
+ * continues and finishes normally — this is a distinct signal from `error`.
  * Raw SDK message shapes are never emitted; they are mapped to the above.
  */
 
@@ -244,6 +248,30 @@ function toolDetail(input: unknown): string {
     if (typeof c === "string" && c.length > 0) {
       return c.length > 200 ? c.slice(0, 197) + "…" : c;
     }
+  }
+  return "";
+}
+
+/**
+ * Flatten a `tool_result` block's `content` to a single string for substring
+ * inspection (task #092). The SDK models tool-result content as EITHER a plain
+ * string OR an array of content blocks (`{type:"text", text:"…"}`); we coerce
+ * both to text so the permission-denial marker can be detected uniformly.
+ */
+function toolResultText(content: unknown): string {
+  if (typeof content === "string") {
+    return content;
+  }
+  if (Array.isArray(content)) {
+    return content
+      .map((b) => {
+        if (typeof b === "string") return b;
+        if (b && typeof b === "object" && typeof (b as Record<string, unknown>).text === "string") {
+          return (b as Record<string, unknown>).text as string;
+        }
+        return "";
+      })
+      .join("");
   }
   return "";
 }
@@ -795,6 +823,104 @@ function readTaskStatus(
 /** Terminal states an execute task must reach so the run counts as finished. */
 const TERMINAL_TASK_STATUSES = new Set(["review", "in-review"]);
 
+/**
+ * Built-in, always-on tool allowlist (task #092 refactor). Includes the Skill
+ * tool (so the agent can invoke the plan-* skills this hand-off drives — without
+ * it on the allowlist, the Skill invocation is denied and the agent flails), the
+ * Agent (subagent) tool, plus the tools the skills need to do real work.
+ *
+ * This is the SAFE DEFAULT: it is always applied, and user config may only
+ * EXTEND it (never remove an entry), so no guardrail can be turned off from
+ * `.plans/config.json`.
+ */
+const BASE_ALLOWED_TOOLS: string[] = [
+  "Skill",
+  "Agent",
+  "Task",
+  "Read",
+  "Write",
+  "Edit",
+  "Bash",
+  "Glob",
+  "Grep",
+  "TodoWrite",
+  // Read-only Figma verification tools. des-build's self-verification
+  // visual diff was hard-denied under `permissionMode: "acceptEdits"`
+  // because MCP tools are not auto-approved and these weren't
+  // allowlisted (task #051 root cause), which stranded the run. That
+  // fix allowlisted only screenshot + metadata, so des-build still
+  // cleared its get_metadata preflight and then aborted mid-build at
+  // Step 5 when it reached get_design_context. These three are the
+  // complete set des-build declares in its frontmatter, and all three
+  // are READ-ONLY, so they are safe to allow. Do NOT add any Figma
+  // write/edit tools here.
+  "mcp__figma-dev-mode-mcp-server__get_screenshot",
+  "mcp__figma-dev-mode-mcp-server__get_metadata",
+  "mcp__figma-dev-mode-mcp-server__get_design_context",
+  // Playwright tools for rendered-page verification. These six are the
+  // exact set plans-cc's plan-execute (visual-comparison stage) and
+  // des-build (`verify <url>`) declare in their frontmatter. Without
+  // them, `permissionMode: "acceptEdits"` denies them and the stage
+  // reports "Visual comparison NOT run: Playwright MCP unavailable".
+  // Add only these. Do NOT add interactive Playwright tools (click,
+  // type, fill_form, run_code_unsafe, etc.).
+  "mcp__playwright__browser_navigate",
+  "mcp__playwright__browser_resize",
+  "mcp__playwright__browser_take_screenshot",
+  "mcp__playwright__browser_evaluate",
+  "mcp__playwright__browser_snapshot",
+  "mcp__playwright__browser_wait_for",
+  // Read-only Sentry tools (task #092). Under
+  // `permissionMode: "acceptEdits"` MCP tools are not auto-approved, so
+  // a headless capture/elaborate run that reaches for Sentry was
+  // hard-denied ("haven't granted it yet") and the agent flailed. These
+  // are the Sentry query/inspection tools — all READ-ONLY, so they are
+  // safe to allow unattended. Write tools (specifically
+  // `mcp__sentry__update_issue`) are deliberately EXCLUDED so an
+  // unattended run can never mutate Sentry issues. Keep this list narrow
+  // and tool-by-tool — do NOT add a `mcp__sentry__*` wildcard, which
+  // would pull in the write/mutation tools too.
+  "mcp__sentry__get_sentry_resource",
+  "mcp__sentry__search_issues",
+  "mcp__sentry__search_errors",
+  "mcp__sentry__search_events",
+  "mcp__sentry__search_traces",
+  "mcp__sentry__search_logs",
+  "mcp__sentry__analyze_issue_with_seer",
+  "mcp__sentry__find_organizations",
+  "mcp__sentry__find_projects",
+];
+
+/**
+ * Read an OPTIONAL per-project extra-allowed-tools list from
+ * `<projectRoot>/.plans/config.json` under the `extraAllowedTools` key (task
+ * #092). The value must be an array of strings; anything else is ignored.
+ *
+ * This can only EXTEND the built-in allowlist — it is concatenated onto
+ * `BASE_ALLOWED_TOOLS` by the caller, never used to remove an entry. Returns
+ * `[]` on ANY failure (file missing, unparseable JSON, key absent, or value not
+ * a string array) and NEVER throws, so a malformed config can never strand a
+ * run.
+ */
+function readExtraAllowedTools(projectRoot: string): string[] {
+  try {
+    const configPath = path.join(projectRoot, ".plans", "config.json");
+    const raw = fs.readFileSync(configPath, "utf8");
+    const parsed = JSON.parse(raw);
+    const extra = parsed?.extraAllowedTools;
+    if (
+      Array.isArray(extra) &&
+      extra.every((t) => typeof t === "string")
+    ) {
+      return extra as string[];
+    }
+  } catch {
+    // Missing file, bad JSON, or any other read failure: fall back to the
+    // built-in base only. Never throw.
+  }
+  return [];
+}
+
 async function main(): Promise<void> {
   const args = parseArgs(process.argv.slice(2));
   if (!args) {
@@ -806,56 +932,31 @@ async function main(): Promise<void> {
   }
 
   try {
+    // Combine the built-in safe-default allowlist with any per-project
+    // extensions from `.plans/config.json` (`extraAllowedTools`). Config may
+    // only EXTEND — the base is always present — and we dedupe so a repeated
+    // entry doesn't appear twice.
+    const allowedTools = Array.from(
+      new Set([
+        ...BASE_ALLOWED_TOOLS,
+        ...readExtraAllowedTools(args.projectRoot),
+      ]),
+    );
+
     const response = query({
       prompt: buildPrompt(args),
       options: {
         cwd: args.projectRoot,
         permissionMode: "acceptEdits",
         maxBudgetUsd: MAX_BUDGET_USD,
-        // Include the Skill tool (so the agent can invoke the plan-* skills this
-        // hand-off drives — without it on the allowlist, the Skill invocation is
-        // denied and the agent flails), the Agent (subagent) tool, plus the
-        // tools the skills need to do real work.
-        allowedTools: [
-          "Skill",
-          "Agent",
-          "Task",
-          "Read",
-          "Write",
-          "Edit",
-          "Bash",
-          "Glob",
-          "Grep",
-          "TodoWrite",
-          // Read-only Figma verification tools. des-build's self-verification
-          // visual diff was hard-denied under `permissionMode: "acceptEdits"`
-          // because MCP tools are not auto-approved and these weren't
-          // allowlisted (task #051 root cause), which stranded the run. That
-          // fix allowlisted only screenshot + metadata, so des-build still
-          // cleared its get_metadata preflight and then aborted mid-build at
-          // Step 5 when it reached get_design_context. These three are the
-          // complete set des-build declares in its frontmatter, and all three
-          // are READ-ONLY, so they are safe to allow. Do NOT add any Figma
-          // write/edit tools here.
-          "mcp__figma-dev-mode-mcp-server__get_screenshot",
-          "mcp__figma-dev-mode-mcp-server__get_metadata",
-          "mcp__figma-dev-mode-mcp-server__get_design_context",
-          // Playwright tools for rendered-page verification. These six are the
-          // exact set plans-cc's plan-execute (visual-comparison stage) and
-          // des-build (`verify <url>`) declare in their frontmatter. Without
-          // them, `permissionMode: "acceptEdits"` denies them and the stage
-          // reports "Visual comparison NOT run: Playwright MCP unavailable".
-          // Add only these. Do NOT add interactive Playwright tools (click,
-          // type, fill_form, run_code_unsafe, etc.).
-          "mcp__playwright__browser_navigate",
-          "mcp__playwright__browser_resize",
-          "mcp__playwright__browser_take_screenshot",
-          "mcp__playwright__browser_evaluate",
-          "mcp__playwright__browser_snapshot",
-          "mcp__playwright__browser_wait_for",
-        ],
+        allowedTools,
       },
     });
+
+    // Maps a `tool_use` block's id → tool name so a later denied `tool_result`
+    // (which carries only the `tool_use_id`, not the name) can be resolved back
+    // to the tool the agent tried to call. Task #092.
+    const toolUseNames = new Map<string, string>();
 
     for await (const message of response) {
       switch (message.type) {
@@ -864,6 +965,10 @@ async function main(): Promise<void> {
           if (Array.isArray(blocks)) {
             for (const block of blocks) {
               if (block?.type === "tool_use") {
+                // Record id → name so a denied tool_result can be named later.
+                if (typeof block.id === "string") {
+                  toolUseNames.set(block.id, String(block.name ?? "unknown"));
+                }
                 emit({
                   kind: "activity",
                   tool: String(block.name ?? "unknown"),
@@ -930,6 +1035,44 @@ async function main(): Promise<void> {
             turns: message.num_turns ?? 0,
             stopReason,
           });
+          break;
+        }
+        case "user": {
+          // Tool RESULTS (including permission denials) arrive on `user`-type
+          // messages whose content is an array of `tool_result` blocks. When a
+          // tool the agent reached for was NOT on the allowlist, the SDK injects
+          // a result whose text contains the marker below. We surface that as a
+          // distinct, NON-fatal `denied` line (task #092): the run is NOT failed
+          // and continues — unlike `error`, which is terminal. We do NOT set
+          // the summary/error for a denial.
+          const blocks = message.message?.content;
+          if (Array.isArray(blocks)) {
+            for (const block of blocks) {
+              if (block?.type !== "tool_result") {
+                continue;
+              }
+              // A tool_result's content is either a plain string or an array of
+              // content blocks ({type:"text", text:"…"}); flatten both to text.
+              const text = toolResultText(block.content);
+              // The SDK's exact wording is:
+              //   "Claude requested permissions to use <TOOL>, but you haven't
+              //    granted it yet."
+              // Match on the stable tail substring so minor prefix changes
+              // don't silently stop detecting denials.
+              if (!text.includes("haven't granted it yet")) {
+                continue;
+              }
+              // tool_result carries only the tool_use_id, not the name — map it
+              // back via the id→name table; fall back to "unknown".
+              const id =
+                typeof block.tool_use_id === "string"
+                  ? block.tool_use_id
+                  : undefined;
+              const resolvedName =
+                (id && toolUseNames.get(id)) || "unknown";
+              emit({ kind: "denied", tool: resolvedName });
+            }
+          }
           break;
         }
         default:

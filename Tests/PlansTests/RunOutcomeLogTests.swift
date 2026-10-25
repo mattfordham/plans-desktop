@@ -102,6 +102,51 @@ final class RunOutcomeLogTests: XCTestCase {
         XCTAssertEqual(decoded.stopReason, "stranded_at_in_progress")
     }
 
+    // MARK: - Denied-tool fields backward compatibility (task #092)
+
+    /// An OLD-format `run-outcomes.log` line — written before #092 and so lacking
+    /// the `deniedToolCount` / `deniedTools` keys entirely — must STILL decode,
+    /// with the two new fields falling back to their zero/empty defaults. This
+    /// guards the backward-compat `decodeIfPresent` so a user's existing log
+    /// never becomes unreadable after the upgrade.
+    func testOldFormatLineWithoutDeniedFieldsDecodesWithDefaults() throws {
+        let url = try writeLog([
+            #"{"costUsd":4.6,"stopReason":"end_turn","taskID":"724","turns":17,"projectPath":"/proj","mode":"elaborate","timestamp":"2026-09-02T19:36:28Z","classification":"completed"}"#,
+        ])
+        let reader = RunOutcomeLogReader(fileURL: url)
+        let outcomes = reader.read()
+        XCTAssertEqual(outcomes.count, 1)
+        XCTAssertEqual(outcomes[0].taskID, "724")
+        // The #092 fields were absent → defaults, not a decode failure.
+        XCTAssertEqual(outcomes[0].deniedToolCount, 0)
+        XCTAssertEqual(outcomes[0].deniedTools, [])
+    }
+
+    /// A NEW-format outcome carrying a denial tally round-trips through the
+    /// writer's encode and the reader's decode unchanged — both the per-call
+    /// `deniedToolCount` and the distinct `deniedTools` list survive.
+    func testNewFormatOutcomeWithDeniedFieldsRoundTrips() throws {
+        let url = tempDir.appendingPathComponent("run-outcomes.log")
+        let log = RunOutcomeLog(fileURL: url)
+        var outcome = RunOutcome(
+            timestamp: "2026-10-25T10:00:00Z", taskID: "092", mode: "elaborate",
+            projectPath: "/proj", costUsd: 0.5, turns: 9,
+            stopReason: "end_turn", errorMessage: nil, classification: .completed
+        )
+        outcome.deniedToolCount = 3
+        outcome.deniedTools = ["mcp__sentry__search_errors", "mcp__sentry__search_issues"]
+        log.append(outcome)
+
+        let contents = try String(contentsOf: url, encoding: .utf8)
+        let lines = contents.split(separator: "\n", omittingEmptySubsequences: true)
+        XCTAssertEqual(lines.count, 1)
+        let decoded = try JSONDecoder().decode(RunOutcome.self, from: Data(lines[0].utf8))
+        XCTAssertEqual(decoded.deniedToolCount, 3)
+        XCTAssertEqual(decoded.deniedTools,
+                       ["mcp__sentry__search_errors", "mcp__sentry__search_issues"])
+        XCTAssertEqual(decoded, outcome)
+    }
+
     // MARK: - Writing (append-only, JSON-per-line)
 
     func testAppendsOneJSONLinePerOutcome() throws {
