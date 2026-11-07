@@ -197,37 +197,19 @@ struct BrowserWindow: View {
                     .help("Show or hide backlogged (deferred) plans")
                 }
                 // #101: a window-wide indicator of how many plans are currently
-                // in progress across EVERY project. Its label is the shared
-                // `.inProgress` glyph + a running count, tinted amber from the
-                // status vocabulary (never inlined). The whole item is SUPPRESSED
-                // at zero — mirroring `smartViewRow` / `iconSpaceCounts`, which
-                // hide a zero count. The dropdown lists each running plan; a tap
-                // selects the In-progress smart view and opens that plan's detail.
+                // in progress across EVERY project, suppressed at zero (mirroring
+                // `smartViewRow` / `iconSpaceCounts`). It opens a popover rather
+                // than a `Menu`: NSMenu items can't wrap or cap their width, so
+                // long plan titles produced an unbounded single-line menu.
                 let runningRows = BrowserViewModel.runningPlanRows(in: store.projects)
                 if !runningRows.isEmpty {
                     ToolbarItem {
-                        Menu {
-                            ForEach(runningRows) { row in
-                                Button {
-                                    // Select the cross-project In-progress smart
-                                    // view, then open this plan in the detail column.
-                                    store.browserSelection = .smart(.inProgress)
-                                    selectedRowID = row.id
-                                } label: {
-                                    Label {
-                                        Text("\(row.projectName) — \(row.title ?? row.task.id)")
-                                    } icon: {
-                                        Image(systemName: TaskStatus.inProgress.symbolName)
-                                            .foregroundStyle(TaskStatus.inProgress.glanceColor)
-                                    }
-                                }
-                            }
-                        } label: {
-                            Label("\(runningRows.count)", systemImage: TaskStatus.inProgress.symbolName)
-                                .labelStyle(.titleAndIcon)
+                        RunningPlansIndicator(rows: runningRows) { row in
+                            // Select the cross-project In-progress smart view,
+                            // then open this plan in the detail column.
+                            store.browserSelection = .smart(.inProgress)
+                            selectedRowID = row.id
                         }
-                        .foregroundStyle(TaskStatus.inProgress.glanceColor)
-                        .help("Plans currently in progress across all projects")
                     }
                 }
             }
@@ -642,6 +624,78 @@ enum SidebarSelection: Equatable, Hashable {
 /// Pure, SwiftUI-free view-model helpers for the browser so the filter/sort
 /// logic is unit-testable as plain values (segment 2 tests these directly).
 /// This namespace performs NO I/O and never mutates `.plans/` data.
+/// The toolbar's running-plans indicator (#101): the `.inProgress` glyph plus a
+/// count, opening a fixed-width popover that lists each running plan with its
+/// title wrapping onto multiple lines and the project name beneath.
+private struct RunningPlansIndicator: View {
+    let rows: [TaskRow]
+    let onOpen: (TaskRow) -> Void
+
+    @State private var isOpen = false
+
+    var body: some View {
+        Button {
+            isOpen.toggle()
+        } label: {
+            Label("\(rows.count)", systemImage: TaskStatus.inProgress.symbolName)
+                .labelStyle(.titleAndIcon)
+        }
+        .foregroundStyle(TaskStatus.inProgress.glanceColor)
+        .help("Plans currently in progress across all projects")
+        .popover(isPresented: $isOpen, arrowEdge: .bottom) {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 2) {
+                    ForEach(rows) { row in
+                        RunningPlanRow(row: row) {
+                            isOpen = false
+                            onOpen(row)
+                        }
+                    }
+                }
+                .padding(6)
+            }
+            .frame(width: 320)
+            .frame(maxHeight: 420)
+            .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+}
+
+/// One wrapping row in the running-plans popover, highlighted on hover.
+private struct RunningPlanRow: View {
+    let row: TaskRow
+    let onOpen: () -> Void
+
+    @State private var isHovered = false
+
+    var body: some View {
+        Button(action: onOpen) {
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                Image(systemName: TaskStatus.inProgress.symbolName)
+                    .foregroundStyle(TaskStatus.inProgress.glanceColor)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(row.title ?? row.task.id)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .multilineTextAlignment(.leading)
+                    Text(row.projectName)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                Spacer(minLength: 0)
+            }
+            .padding(.horizontal, 8)
+            .padding(.vertical, 6)
+            .contentShape(Rectangle())
+            .background(
+                RoundedRectangle(cornerRadius: 6)
+                    .fill(isHovered ? Color.primary.opacity(0.08) : Color.clear)
+            )
+        }
+        .buttonStyle(.plain)
+        .onHover { isHovered = $0 }
+    }
+}
+
 enum BrowserViewModel {
     /// The label shown on the toolbar revert control while the manual card order
     /// is active (#017 step 4). Pure constant — kept here (rather than inline in
