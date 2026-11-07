@@ -1072,11 +1072,7 @@ private struct StarToggleGlyph: View {
 /// unreliably in this layout), but sized to match the header status badges
 /// (`imageScale(.large)`) rather than the smaller per-row action glyphs, so it
 /// reads as a peer of the count badges sitting in the same header row.
-///
-/// #098: no longer `private` so the single-project `TaskListView` reuses the exact
-/// same "+" affordance the card header uses (matching the `OpenDetailOnTap` /
-/// `PlanRowActions` un-private precedent).
-struct CaptureGlyph: View {
+private struct CaptureGlyph: View {
     let action: () -> Void
 
     @State private var hovering = false

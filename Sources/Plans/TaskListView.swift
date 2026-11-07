@@ -247,14 +247,34 @@ struct TaskListView: View {
     }
 
     /// #098: single-project only — the card header's controls on their own row
-    /// above sort/group, so the fixed-size count badges always have room: the
-    /// "+" new-plan glyph leading, the type filter and status badges trailing.
+    /// above sort/group, so the fixed-size count badges always have room: a
+    /// labelled "New Plan" button leading; the backlog toggle, type filter and
+    /// status badges trailing.
     private func projectHeader(_ project: ProjectTasks) -> some View {
-        HStack(spacing: 8) {
+        @Bindable var store = store
+        return HStack(spacing: 12) {
             if let onNewPlan {
-                CaptureGlyph { onNewPlan(project.projectPath) }
+                Button {
+                    onNewPlan(project.projectPath)
+                } label: {
+                    Label("New Plan", systemImage: "plus.circle")
+                        .labelStyle(.titleAndIcon)
+                }
+                .fixedSize()
+                .help("Capture a new plan in \(project.projectName)")
             }
             Spacer(minLength: 8)
+            // The same persisted `store.showBacklog` the window toolbar toggles.
+            Toggle(isOn: $store.showBacklog) {
+                Label("Backlog",
+                      systemImage: store.showBacklog ? "archivebox.fill" : "archivebox")
+                    .labelStyle(.titleAndIcon)
+            }
+            .toggleStyle(.button)
+            .buttonStyle(.borderless)
+            .fixedSize()
+            .foregroundStyle(store.showBacklog ? AnyShapeStyle(.tint) : AnyShapeStyle(.primary))
+            .help("Show or hide backlogged (deferred) plans")
             TaskTypeFilterMenu(selection: $typeFilter)
             ProjectStatusBadges(project: project)
         }
