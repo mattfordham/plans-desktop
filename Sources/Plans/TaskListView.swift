@@ -189,6 +189,17 @@ struct TaskListView: View {
     /// highlighted. `nil` highlights nothing.
     var selectedRowID: TaskRow.ID? = nil
 
+    /// #098: the project this list belongs to, supplied ONLY for the single-project
+    /// view. When non-nil (together with `onNewPlan`) the control bar gains the
+    /// card header's "+" new-plan affordance plus trailing per-status count badges.
+    /// `nil` for the cross-project smart-view list, which renders unchanged.
+    var project: ProjectTasks? = nil
+
+    /// #098: invoked with a project path when the single-project "+" is tapped, so
+    /// the presenting window can raise the new-plan flow. `nil` (the smart-view
+    /// case) hides the "+" entirely.
+    var onNewPlan: ((String) -> Void)? = nil
+
     /// The shared store, read for the persisted sort/group selection.
     @Environment(PlansStore.self) private var store
 
@@ -221,6 +232,13 @@ struct TaskListView: View {
     @ViewBuilder
     private var controlBar: some View {
         HStack(spacing: 12) {
+            // #098: single-project only — the card header's exact "+" new-plan
+            // affordance, leading the sort/group menus. Gated on both props so the
+            // cross-project smart-view bar is byte-for-byte unchanged.
+            if let project, let onNewPlan {
+                CaptureGlyph { onNewPlan(project.projectPath) }
+            }
+
             Menu {
                 ForEach(TaskSort.allCases, id: \.rawValue) { sort in
                     Button {
@@ -254,6 +272,25 @@ struct TaskListView: View {
             .help("Group tasks")
 
             Spacer(minLength: 0)
+
+            // #098: single-project only — the per-status count badges, trailing the
+            // bar exactly as they trail the card header. Same view vocabulary as
+            // `ProjectCard`'s header badges (symbol in `glanceColor`, dimmed to 10%
+            // white at zero, count text) so a project reads identically on its card
+            // and in this single-project list.
+            if let project {
+                ForEach(BrowserViewModel.statusCounts(project), id: \.status) { entry in
+                    HStack(spacing: 4) {
+                        Image(systemName: entry.status.symbolName)
+                            .imageScale(.large)
+                            .foregroundStyle(entry.count == 0 ? Color.white.opacity(0.1) : entry.status.glanceColor)
+                            .frame(width: 20, alignment: .center)
+                        Text("\(entry.count)")
+                            .font(.body)
+                            .foregroundStyle(entry.count == 0 ? Color.white.opacity(0.1) : Color.secondary)
+                    }
+                }
+            }
         }
         .padding(.horizontal, ProjectCard.rowColumns.cardHorizontalPadding)
         .padding(.vertical, 8)

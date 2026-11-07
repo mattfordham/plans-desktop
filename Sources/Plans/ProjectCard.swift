@@ -103,10 +103,11 @@ struct ProjectCard: View {
     /// The status counts to show in the header, in `glanceOrder`. EVERY status
     /// is included; statuses absent from `counts` or with a `0` count surface as
     /// a `0` and are rendered dimmed (50% white) rather than dropped.
+    ///
+    /// #098: delegates to the shared `BrowserViewModel.statusCounts(_:)` — the
+    /// single source of truth also used by the single-project `TaskListView`.
     private var statusCounts: [(status: TaskStatus, count: Int)] {
-        TaskStatus.glanceOrder.map { status in
-            (status, project.counts[status] ?? 0)
-        }
+        BrowserViewModel.statusCounts(project)
     }
 
     /// The clickable plan rows for this card: the active plans in `TaskParser`'s
@@ -1053,7 +1054,11 @@ private struct StarToggleGlyph: View {
 /// unreliably in this layout), but sized to match the header status badges
 /// (`imageScale(.large)`) rather than the smaller per-row action glyphs, so it
 /// reads as a peer of the count badges sitting in the same header row.
-private struct CaptureGlyph: View {
+///
+/// #098: no longer `private` so the single-project `TaskListView` reuses the exact
+/// same "+" affordance the card header uses (matching the `OpenDetailOnTap` /
+/// `PlanRowActions` un-private precedent).
+struct CaptureGlyph: View {
     let action: () -> Void
 
     @State private var hovering = false

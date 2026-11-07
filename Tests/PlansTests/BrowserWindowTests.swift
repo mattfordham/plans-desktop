@@ -49,6 +49,7 @@ final class BrowserWindowTests: XCTestCase {
         name: String,
         lastSeen: String = "",
         tasks: [Task] = [],
+        counts: [TaskStatus: Int] = [:],
         activeTasks: [Task] = [],
         backloggedTasks: [Task] = []
     ) -> ProjectTasks {
@@ -57,7 +58,7 @@ final class BrowserWindowTests: XCTestCase {
             projectName: name,
             lastSeen: lastSeen,
             tasks: tasks,
-            counts: [:],
+            counts: counts,
             activeTasks: activeTasks,
             backloggedTasks: backloggedTasks
         )

@@ -348,12 +348,14 @@ struct BrowserWindow: View {
                 onOpenDetail: { selectedRowID = $0 },
                 selectedRowID: selectedRowID
             )
-        case .project:
+        case .project(let path):
             TaskListView(
                 rows: displayedRows,
                 showsProjectLabel: false,
                 onOpenDetail: { selectedRowID = $0 },
-                selectedRowID: selectedRowID
+                selectedRowID: selectedRowID,
+                project: store.projects.first { $0.projectPath == path },
+                onNewPlan: { newPlanRequest = NewPlanRequest(projectPath: $0) }
             )
         }
     }
@@ -811,6 +813,20 @@ enum BrowserViewModel {
                 projectName: project.projectName,
                 task: task
             )
+        }
+    }
+
+    /// The per-status count badges for ONE project, in `TaskStatus.glanceOrder`
+    /// (#098). The SINGLE SOURCE OF TRUTH for the header/control-bar badges shown
+    /// both on a project card and in the single-project `TaskListView`.
+    ///
+    /// EVERY `glanceOrder` status appears, in that order; a status absent from
+    /// `project.counts` (or present with `0`) surfaces as a `0` entry rather than
+    /// being dropped, so callers can render it dimmed as "present-but-empty". Does
+    /// no I/O or SwiftUI work.
+    static func statusCounts(_ project: ProjectTasks) -> [(status: TaskStatus, count: Int)] {
+        TaskStatus.glanceOrder.map { status in
+            (status, project.counts[status] ?? 0)
         }
     }
 
