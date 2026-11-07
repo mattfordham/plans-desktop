@@ -230,25 +230,15 @@ struct BrowserWindow: View {
     }
 
     /// The left column: a selectable `List` bound to `store.browserSelection`.
-    /// Top-to-bottom — a "Status" section of smart views, an optional
-    /// Favourites section (starred projects), the all-projects entry, and a
-    /// Projects section listing every project.
+    /// Top-to-bottom — a "Status" section of smart views, the all-projects
+    /// entry, and a single combined "Projects" section listing every project
+    /// (starred ones carry a filled-star glyph, the rest a folder glyph).
     private var sidebar: some View {
         List(selection: selectionBinding) {
             Section("Status") {
                 ForEach(SmartView.allCases, id: \.rawValue) { view in
                     smartViewRow(view)
                         .tag(SidebarSelection.smart(view))
-                }
-            }
-
-            if !favouriteProjects.isEmpty {
-                Section("Favourites") {
-                    ForEach(favouriteProjects, id: \.projectPath) { project in
-                        Label(project.projectName, systemImage: "star.fill")
-                            .lineLimit(1)
-                            .tag(SidebarSelection.project(project.projectPath))
-                    }
                 }
             }
 
@@ -259,9 +249,14 @@ struct BrowserWindow: View {
 
             Section("Projects") {
                 ForEach(sidebarProjects, id: \.projectPath) { project in
-                    Label(project.projectName, systemImage: "folder")
-                        .lineLimit(1)
-                        .tag(SidebarSelection.project(project.projectPath))
+                    Label(
+                        project.projectName,
+                        systemImage: BrowserViewModel.sidebarGlyph(
+                            starred: store.starredProjectPaths.contains(project.projectPath)
+                        )
+                    )
+                    .lineLimit(1)
+                    .tag(SidebarSelection.project(project.projectPath))
                 }
                 // Drag-reorder the Projects list. It writes the SAME manual order
                 // the "All projects" card stack uses, so a move here reorders the
@@ -278,11 +273,6 @@ struct BrowserWindow: View {
             }
         }
         .frame(minWidth: 220)
-    }
-
-    /// The starred projects, in the same display order as the full sidebar list.
-    private var favouriteProjects: [ProjectTasks] {
-        sidebarProjects.filter { store.starredProjectPaths.contains($0.projectPath) }
     }
 
     /// One smart-view row: its icon (tinted) + label + a trailing count of its
@@ -929,6 +919,13 @@ enum BrowserViewModel {
         var result = current
         result.move(fromOffsets: offsets, toOffset: destination)
         return result
+    }
+
+    /// The SF Symbol for a project row in the combined sidebar "Projects"
+    /// section (#097): a filled star when the project is starred, otherwise a
+    /// folder. Pure value work — no I/O, no SwiftUI.
+    static func sidebarGlyph(starred: Bool) -> String {
+        starred ? "star.fill" : "folder"
     }
 
     /// Parses a raw registry `lastSeen` string into a `Date`, tolerating both

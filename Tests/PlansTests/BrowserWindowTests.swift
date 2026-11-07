@@ -1068,6 +1068,15 @@ final class BrowserWindowTests: XCTestCase {
         )
     }
 
+    // MARK: - sidebarGlyph (combined Projects section icon, #097)
+
+    /// A starred project's row uses the filled-star glyph; an unstarred one uses
+    /// the folder glyph.
+    func testSidebarGlyphReflectsStarredState() {
+        XCTAssertEqual(BrowserViewModel.sidebarGlyph(starred: true), "star.fill")
+        XCTAssertEqual(BrowserViewModel.sidebarGlyph(starred: false), "folder")
+    }
+
     // MARK: - autoScrollTarget (card-stack edge auto-scroll, #096)
 
     /// Scrolling down steps from the top-visible card to the next one.
