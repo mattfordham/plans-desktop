@@ -13,8 +13,8 @@ registered projects.
 Two surfaces:
 - **Menu bar glance (Surface A):** per-project task counts by status, compact
   glyph/label vocabulary, no window needed.
-- **Browser window (Surface B):** cross-project browser plus a standalone detail
-  window per plan.
+- **Browser window (Surface B):** cross-project browser — a three-column
+  split view (sidebar / card grid or task list / plan detail).
 
 `desktop-app-spec.md` is the authoritative spec, including the two plans-cc data
 contracts (the registry file and the task-file markdown format). Consult it
@@ -57,8 +57,13 @@ swift test               # run the XCTest suite
   injected via `.environment(store)`. It is created in the delegate (not in
   `.onAppear`) so the initial `startPolling()` load completes before the menu
   panel first opens. Don't introduce a second store instance.
-- **Value-based detail windows.** Plan detail uses
-  `WindowGroup(for: TaskRow.ID.self)` opened via `openWindow(id:value:)`.
+- **Selection-driven detail column.** Plan detail lives in the browser's
+  `NavigationSplitView` detail column, driven by `BrowserWindow`'s single
+  (unpersisted) `selectedRowID`, shared by card rows and task-list rows via
+  `onOpenDetail`. It renders `PlanDetailView(rowID:)` keyed by
+  `.id(selectedRowID)` so per-plan state resets; the selection is cleared via
+  `BrowserViewModel.validSelection` when its row disappears. There is no
+  separate detail window.
 - **Glyph/label vocabulary** for statuses and types is centralized in
   `TaskStatus+Glance.swift` and `TaskType+Glyph.swift` — change it there, not
   inline in views.

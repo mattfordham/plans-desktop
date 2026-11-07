@@ -18,7 +18,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     /// The shared task-run coordinator, created once and injected into the menu
     /// bar + browser scenes. It tracks one `TaskRun` per active task, so multiple
-    /// tasks can run concurrently while card rows / the plan-detail overlay pane
+    /// tasks can run concurrently while card rows / the plan-detail column
     /// each observe the run for their own task. Created here on the main actor.
     let taskRunner = TaskRunner()
 
@@ -129,9 +129,10 @@ struct PlansApp: App {
                 .environment(taskRunner)
         }
         .defaultLaunchBehavior(.presented)
-        // #094: the two-column browser (sidebar + content) opens at a comfortable
-        // size for both columns; the split view's own `minWidth` (820) floors it.
-        .defaultSize(width: 1100, height: 720)
+        // #095: the three-column browser (sidebar / content / detail) opens at a
+        // size where all three columns are usable; the split view's own
+        // `minWidth` (1000) floors it.
+        .defaultSize(width: 1300, height: 800)
         // #034: map ⌘N app-wide to the "New Plan" form. `replacing: .newItem`
         // overrides AppKit's default ⌘N ("New Window") so the shortcut opens the
         // plan-capture modal instead. The button can't reach `BrowserWindow`'s
@@ -146,9 +147,8 @@ struct PlansApp: App {
                     .disabled(store.projects.isEmpty)
             }
         }
-        // #073: the standalone per-plan detail window (§011) was removed —
-        // plan detail now renders as an in-window modal overlay pane in
-        // `BrowserWindow` (see `detailOverlay`), so there is no separate
-        // detail scene here anymore.
+        // #073/#095: there is no separate per-plan detail scene (§011) — plan
+        // detail renders in `BrowserWindow`'s selection-driven split-view
+        // detail column (`detailColumn`).
     }
 }

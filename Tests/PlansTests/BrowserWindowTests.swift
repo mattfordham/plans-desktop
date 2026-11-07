@@ -685,6 +685,205 @@ final class BrowserWindowTests: XCTestCase {
         XCTAssertNil(BrowserViewModel.resolveRow(in: [], id: id))
     }
 
+    // MARK: - BrowserViewModel.validSelection (detail-column selection, #095)
+
+    /// A selection whose row still resolves (an active row) is kept as-is.
+    func testValidSelectionKeepsIDThatStillResolves() {
+        XCTAssertEqual(
+            BrowserViewModel.validSelection("/proj2/001", in: twoProjectFixture()),
+            "/proj2/001"
+        )
+    }
+
+    /// A backlogged row's id is a valid selection — backlog rows open the
+    /// detail column just like active rows.
+    func testValidSelectionKeepsBacklogRowID() {
+        let project = makeProject(
+            path: "/proj1",
+            name: "proj1",
+            backloggedTasks: [makeTask(id: "050", status: .pending)]
+        )
+        XCTAssertEqual(
+            BrowserViewModel.validSelection("/proj1/050", in: [project]),
+            "/proj1/050"
+        )
+    }
+
+    /// A plan that completed (dropped out of `activeTasks`, so no longer in any
+    /// row collection) clears the selection.
+    func testValidSelectionClearsCompletedPlan() {
+        let before = makeProject(
+            path: "/proj1",
+            name: "proj1",
+            activeTasks: [makeTask(id: "001", status: .inProgress)]
+        )
+        let after = makeProject(path: "/proj1", name: "proj1", activeTasks: [])
+        XCTAssertEqual(BrowserViewModel.validSelection("/proj1/001", in: [before]), "/proj1/001")
+        XCTAssertNil(BrowserViewModel.validSelection("/proj1/001", in: [after]))
+    }
+
+    /// A deleted plan (its id now matches nothing, while siblings remain)
+    /// clears the selection.
+    func testValidSelectionClearsDeletedPlan() {
+        XCTAssertNil(BrowserViewModel.validSelection("/proj1/999", in: twoProjectFixture()))
+    }
+
+    /// A deleted backlogged plan clears the selection too.
+    func testValidSelectionClearsDeletedBacklogPlan() {
+        let project = makeProject(
+            path: "/proj1",
+            name: "proj1",
+            backloggedTasks: [makeTask(id: "050", status: .pending)]
+        )
+        XCTAssertNil(BrowserViewModel.validSelection("/proj1/051", in: [project]))
+    }
+
+    /// When the selected row's project disappears (unlinked), the selection
+    /// clears — including the worst case where every project is gone.
+    func testValidSelectionClearsWhenProjectIsGone() {
+        let remaining = [twoProjectFixture()[1]]
+        XCTAssertNil(BrowserViewModel.validSelection("/proj1/001", in: remaining))
+        XCTAssertNil(BrowserViewModel.validSelection("/proj1/001", in: []))
+    }
+
+    /// No selection stays no selection.
+    func testValidSelectionOfNilIsNil() {
+        XCTAssertNil(BrowserViewModel.validSelection(nil, in: twoProjectFixture()))
+    }
+
+    // MARK: - BrowserViewModel.displayedRows / validSelection(visibleIn:) (#095)
+
+    /// One project with an in-progress, a review, and a backlogged plan — enough
+    /// to exercise which rows each sidebar selection displays.
+    private func mixedStatusFixture(reviewID: String = "002", reviewStatus: TaskStatus = .review) -> [ProjectTasks] {
+        [
+            makeProject(
+                path: "/proj1",
+                name: "proj1",
+                activeTasks: [
+                    makeTask(id: "001", status: .inProgress),
+                    makeTask(id: reviewID, status: reviewStatus),
+                ],
+                backloggedTasks: [makeTask(id: "050", status: .pending)]
+            ),
+        ]
+    }
+
+    private func displayedIDs(
+        _ selection: SidebarSelection,
+        _ projects: [ProjectTasks],
+        gridProjects: [ProjectTasks]? = nil,
+        showBacklog: Bool = false
+    ) -> [TaskRow.ID] {
+        BrowserViewModel.displayedRows(
+            for: selection,
+            in: projects,
+            gridProjects: gridProjects ?? projects,
+            showBacklog: showBacklog
+        ).map(\.id)
+    }
+
+    /// A smart view displays exactly that view's cross-project rows.
+    func testDisplayedRowsForSmartViewMatchesSmartViewRows() {
+        let projects = mixedStatusFixture()
+        XCTAssertEqual(displayedIDs(.smart(.inProgress), projects), ["/proj1/001"])
+        XCTAssertEqual(displayedIDs(.smart(.review), projects), ["/proj1/002"])
+        XCTAssertEqual(displayedIDs(.smart(.backlog), projects), ["/proj1/050"])
+    }
+
+    /// A project list displays its active rows, plus backlog only when shown.
+    func testDisplayedRowsForProjectHonorsShowBacklog() {
+        let projects = mixedStatusFixture()
+        XCTAssertEqual(displayedIDs(.project("/proj1"), projects), ["/proj1/001", "/proj1/002"])
+        XCTAssertEqual(
+            displayedIDs(.project("/proj1"), projects, showBacklog: true),
+            ["/proj1/001", "/proj1/002", "/proj1/050"]
+        )
+        XCTAssertEqual(displayedIDs(.project("/missing"), projects), [])
+    }
+
+    /// The all-projects card grid displays every GRID project's active rows
+    /// (plus backlog when shown) — the grid projects are the view-mode/focus
+    /// filtered set, not necessarily every project.
+    func testDisplayedRowsForAllProjectsUsesGridProjects() {
+        let projects = twoProjectFixture()
+        XCTAssertEqual(
+            displayedIDs(.allProjects, projects),
+            ["/proj1/001", "/proj1/002", "/proj2/001"]
+        )
+        XCTAssertEqual(
+            displayedIDs(.allProjects, projects, gridProjects: [projects[1]]),
+            ["/proj2/001"]
+        )
+        let withBacklog = mixedStatusFixture()
+        XCTAssertEqual(
+            displayedIDs(.allProjects, withBacklog, showBacklog: true),
+            ["/proj1/001", "/proj1/002", "/proj1/050"]
+        )
+    }
+
+    private func visibleSelection(
+        _ id: TaskRow.ID?,
+        _ selection: SidebarSelection,
+        _ projects: [ProjectTasks],
+        showBacklog: Bool = false
+    ) -> TaskRow.ID? {
+        BrowserViewModel.validSelection(
+            id,
+            visibleIn: BrowserViewModel.displayedRows(
+                for: selection, in: projects, gridProjects: projects, showBacklog: showBacklog
+            )
+        )
+    }
+
+    /// Switching to a smart view that doesn't list the selected plan unloads it.
+    func testSwitchingSmartViewThatHidesSelectionClearsIt() {
+        XCTAssertNil(visibleSelection("/proj1/001", .smart(.review), mixedStatusFixture()))
+    }
+
+    /// Switching to a view that still lists the selected plan keeps it.
+    func testSwitchingToViewThatStillContainsSelectionKeepsIt() {
+        let projects = mixedStatusFixture()
+        XCTAssertEqual(visibleSelection("/proj1/001", .smart(.inProgress), projects), "/proj1/001")
+        XCTAssertEqual(visibleSelection("/proj1/001", .project("/proj1"), projects), "/proj1/001")
+    }
+
+    /// A poll that moves the selected plan out of the current smart view
+    /// (In Progress -> Review) unloads it.
+    func testPollMovingSelectionOutOfSmartViewClearsIt() {
+        let before = mixedStatusFixture()
+        let after = [
+            makeProject(
+                path: "/proj1",
+                name: "proj1",
+                activeTasks: [
+                    makeTask(id: "001", status: .review),
+                    makeTask(id: "002", status: .review),
+                ]
+            ),
+        ]
+        XCTAssertEqual(visibleSelection("/proj1/001", .smart(.inProgress), before), "/proj1/001")
+        XCTAssertNil(visibleSelection("/proj1/001", .smart(.inProgress), after))
+    }
+
+    /// The card grid / a project list containing the selected plan keeps it;
+    /// a backlogged selection survives only while backlog rows are shown.
+    func testCardGridAndProjectViewContainingSelectionKeepIt() {
+        let projects = mixedStatusFixture()
+        XCTAssertEqual(visibleSelection("/proj1/002", .allProjects, projects), "/proj1/002")
+        XCTAssertEqual(visibleSelection("/proj1/002", .project("/proj1"), projects), "/proj1/002")
+        XCTAssertEqual(
+            visibleSelection("/proj1/050", .allProjects, projects, showBacklog: true),
+            "/proj1/050"
+        )
+        XCTAssertNil(visibleSelection("/proj1/050", .allProjects, projects))
+    }
+
+    /// No selection stays no selection under any view.
+    func testValidSelectionVisibleInOfNilIsNil() {
+        XCTAssertNil(visibleSelection(nil, .allProjects, mixedStatusFixture()))
+    }
+
     // MARK: - How checklist parsing (read-only render support)
 
     func testHowStepsParsesDoneAndNotDoneAndStripsPrefix() {

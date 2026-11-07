@@ -6,13 +6,17 @@ import SwiftUI
 /// first). Each card shows the project name, a per-status count summary, and its
 /// outstanding (non-completed) plan rows.
 ///
-/// Tapping a plan row opens that plan's detail as an IN-WINDOW MODAL OVERLAY
-/// PANE (#073, via `ProjectCard`'s `onOpenDetail` closure setting `detailRowID`)
-/// rather than an inline drawer or a separate window — the dashboard keeps no
-/// `HSplitView` and no selection state; `detailRowID` is the sole presentation
-/// state. The pane dismisses by clicking the scrim or pressing Esc. This
-/// replaces the former standalone per-plan detail window (§011), whose scene has
-/// been removed from `PlansApp`.
+/// The window is a three-column `NavigationSplitView` (#094/#095): sidebar,
+/// content (card grid or task list), and a persistent DETAIL COLUMN. Tapping a
+/// plan row — in a card or a task list, via the shared `onOpenDetail` closure —
+/// sets the single `selectedRowID` selection, and the detail column renders
+/// `PlanDetailView(rowID:)` keyed by `.id(selectedRowID)` (or a "No Plan
+/// Selected" placeholder). The selection is not persisted, Esc does not clear
+/// it, and it is cleared via `BrowserViewModel.validSelection(_:visibleIn:)`
+/// whenever the content column stops listing the row (a sidebar view switch,
+/// or a reload that removes it or moves it out of the current view). This
+/// replaces the #073 modal overlay pane and the earlier standalone per-plan
+/// detail window (§011).
 ///
 /// The view ONLY reads from the injected `PlansStore` — it never writes,
 /// creates, moves, or deletes any `.plans/` data (§2 read-only).
@@ -69,13 +73,12 @@ struct BrowserWindow: View {
     /// re-presents even for the same project path.
     @State private var newPlanRequest: NewPlanRequest? = nil
 
-    /// #073: the plan whose detail is shown as an in-window modal overlay pane,
-    /// keyed on the tapped row's composite `TaskRow.ID`, or `nil` when no pane is
-    /// open. Set by a card row tap (threaded in via `ProjectCard`'s `onOpenDetail`
-    /// closure) and cleared by a click on the dimming scrim behind the pane.
-    /// UI-only, transient presentation state — deliberately NOT persisted to
-    /// UserDefaults, mirroring `newPlanRequest`.
-    @State private var detailRowID: TaskRow.ID? = nil
+    /// #095: the plan shown in the split view's detail column, keyed on the
+    /// selected row's composite `TaskRow.ID`, or `nil` for the empty placeholder.
+    /// ONE selection shared by the card grid (`ProjectCard.onOpenDetail`) and the
+    /// task lists (`TaskListView.onOpenDetail`). UI-only, transient state —
+    /// deliberately NOT persisted to UserDefaults, mirroring `newPlanRequest`.
+    @State private var selectedRowID: TaskRow.ID? = nil
 
     /// Pure width → column-count function: fits as many `cardMinWidth` columns
     /// (plus a `gridSpacing` gutter each) into the padded content width as will
@@ -295,19 +298,26 @@ struct BrowserWindow: View {
         // and a content column on the right that dispatches on the persisted
         // `store.browserSelection`: the all-projects card dashboard, a
         // cross-project smart-view task list, or a single project's task list.
-        // The window-level chrome (New Plan sheet, detail overlay + ⌘N trigger,
+        // The window-level chrome (New Plan sheet, ⌘N trigger,
         // the main toolbar) lives on the OUTER split view so it covers the whole
         // window regardless of which column is focused. `cardGrid`'s own inner
         // toolbar / drill-down scroll stays with `cardGrid` (the all-projects
         // content).
+        // #095: three columns — sidebar / content (grid or task list) / detail
+        // (the selected plan, or a placeholder).
         NavigationSplitView {
             sidebar
-        } detail: {
+                .navigationSplitViewColumnWidth(min: 200, ideal: 230, max: 320)
+        } content: {
             contentColumn
+                .navigationSplitViewColumnWidth(min: 420, ideal: 560)
+        } detail: {
+            detailColumn
+                .navigationSplitViewColumnWidth(min: 380, ideal: 500)
         }
-            // A two-column layout needs more width than the single-pane grid did:
-            // ~240pt sidebar + a comfortable content column. (See Assumptions.)
-            .frame(minWidth: 820, minHeight: 520)
+            // Three columns need more width than the two-column layout did; the
+            // window's `defaultSize` (PlansApp) opens comfortably above this.
+            .frame(minWidth: 1000, minHeight: 520)
             // §004 drill-down handoff (#094): when the menu bar sets a target
             // project before opening this window, SELECT that project's task list
             // in the sidebar (the primary drill-down effect now). The grid's own
@@ -316,6 +326,20 @@ struct BrowserWindow: View {
             .onAppear { selectDrillDownProjectIfLive() }
             .onChange(of: store.selectedProjectPath) { _, _ in
                 selectDrillDownProjectIfLive()
+            }
+            // #095: the detail column only shows a plan the content column
+            // currently lists. Whenever the displayed rows change — a sidebar
+            // view switch, a poll (plan completed/deleted/moved out of the
+            // current smart view, project unlinked), or a backlog / view-mode /
+            // focus toggle — drop a selection that is no longer listed, falling
+            // back to the "No Plan Selected" placeholder. Only assign on an
+            // actual change so an unchanged selection doesn't invalidate the
+            // detail column every poll.
+            .onChange(of: displayedRows.map(\.id)) { _, _ in
+                let valid = BrowserViewModel.validSelection(selectedRowID, visibleIn: displayedRows)
+                if valid != selectedRowID {
+                    selectedRowID = valid
+                }
             }
             // #031: the shared "New Plan" modal, presented over the whole window.
             // Driven by `newPlanRequest` (set by the global toolbar button below
@@ -333,19 +357,6 @@ struct BrowserWindow: View {
                     newPlanRequest = nil
                 }
             }
-            // #073: the plan-detail modal overlay pane. Replaces the standalone
-            // per-plan detail WINDOW: tapping a card row sets `detailRowID`, which
-            // presents `PlanDetailView` here as a dimmed in-window overlay instead
-            // of opening a separate window. Rendered inside an `.overlay` so it
-            // floats over the whole card grid without affecting its layout.
-            .overlay {
-                if detailRowID != nil {
-                    detailOverlay
-                }
-            }
-            // Animate the pane in/out with the presentation-state change so both
-            // the scrim and the pane fade/scale together.
-            .animation(.easeInOut(duration: 0.18), value: detailRowID)
             // #034: the app-wide ⌘N command (in `PlansApp`) can't reach this
             // window's `@State`, so it bumps `store.newPlanTrigger` and we open
             // the modal here — opening it IDENTICALLY to the toolbar button.
@@ -607,35 +618,35 @@ struct BrowserWindow: View {
         switch selection {
         case .allProjects:
             cardGrid
-        case .smart(let view):
+        case .smart:
             TaskListView(
-                rows: BrowserViewModel.rows(in: store.projects, matching: view),
+                rows: displayedRows,
                 showsProjectLabel: true,
-                onOpenDetail: { detailRowID = $0 }
+                onOpenDetail: { selectedRowID = $0 },
+                selectedRowID: selectedRowID
             )
-        case .project(let path):
-            projectList(path: path)
+        case .project:
+            TaskListView(
+                rows: displayedRows,
+                showsProjectLabel: false,
+                onOpenDetail: { selectedRowID = $0 },
+                selectedRowID: selectedRowID
+            )
         }
     }
 
-    /// The single-project task list for `path`: its active rows plus its backlog
-    /// rows when `store.showBacklog` is on. Renders an empty list gracefully if
-    /// the project can't be found (the selection resolver normally prevents this).
-    @ViewBuilder
-    private func projectList(path: String) -> some View {
-        let project = store.projects.first { $0.projectPath == path }
-        let rows: [TaskRow] = {
-            guard let project else { return [] }
-            var result = BrowserViewModel.activeRows(project)
-            if store.showBacklog {
-                result += BrowserViewModel.backlogRows(project)
-            }
-            return result
-        }()
-        TaskListView(
-            rows: rows,
-            showsProjectLabel: false,
-            onOpenDetail: { detailRowID = $0 }
+    /// The rows the content column currently displays for the (defensively
+    /// resolved) sidebar selection — the single source of truth shared by the
+    /// task lists and the detail-selection invariant (see
+    /// `BrowserViewModel.displayedRows`). For `.project` that is its active rows
+    /// plus its backlog rows when `store.showBacklog` is on (an empty list if the
+    /// project can't be found); for `.allProjects` it is the grid cards' rows.
+    private var displayedRows: [TaskRow] {
+        BrowserViewModel.displayedRows(
+            for: BrowserViewModel.resolve(store.browserSelection, in: store.projects),
+            in: store.projects,
+            gridProjects: sortedProjects,
+            showBacklog: store.showBacklog
         )
     }
 
@@ -649,53 +660,20 @@ struct BrowserWindow: View {
         store.browserSelection = .project(path)
     }
 
-    // MARK: - Plan-detail modal overlay pane (#073)
+    // MARK: - Detail column (#095)
 
-    /// #073: the in-window plan-detail overlay — a dimming scrim behind a large
-    /// rounded card holding `PlanDetailView`. Replaces the standalone detail
-    /// window (§011). Presented over the whole card grid via `body`'s `.overlay`
-    /// whenever `detailRowID != nil`.
-    ///
-    /// "Blur closes it": the SCRIM alone carries the click-away `onTapGesture`
-    /// that clears `detailRowID`. The pane sits ABOVE the scrim with its own
-    /// opaque background + `.contentShape(Rectangle())` so taps inside it are
-    /// absorbed by the pane and never fall through to the scrim (a tap inside the
-    /// pane must NOT dismiss). The pane carries a `.scale + .opacity` transition so
-    /// it grows/fades in with the `body`-level `.animation(value: detailRowID)`.
-    private var detailOverlay: some View {
-        ZStack {
-            // The dimming scrim: click-away dismissal lives HERE only.
-            Color.black.opacity(0.35)
-                .ignoresSafeArea()
-                .contentShape(Rectangle())
-                .onTapGesture { detailRowID = nil }
-                .transition(.opacity)
-
-            // The detail pane: an opaque rounded card, clamped to the window with
-            // generous padding so it never fills the whole surface, sized toward
-            // the removed scene's 900×600 intent but bounded by the window.
-            PlanDetailView(rowID: detailRowID)
-                .frame(maxWidth: 900, maxHeight: 600)
-                .background(.background, in: RoundedRectangle(cornerRadius: 16))
-                .clipShape(RoundedRectangle(cornerRadius: 16))
-                .overlay(
-                    RoundedRectangle(cornerRadius: 16)
-                        .stroke(.separator, lineWidth: 1)
-                )
-                .shadow(radius: 30)
-                // Absorb taps so clicks inside the pane never reach the scrim
-                // behind it (only the scrim dismisses).
-                .contentShape(Rectangle())
-                .padding(40)
-                .transition(.scale(scale: 0.96).combined(with: .opacity))
+    /// The split view's detail column: the selected plan's `PlanDetailView`, or
+    /// a placeholder when nothing is selected. Keyed with `.id(selectedRowID)` so
+    /// switching plans rebuilds the view — its sheet flags don't carry over and
+    /// `shouldAutoOpenProgress` fires afresh for each plan.
+    @ViewBuilder
+    private var detailColumn: some View {
+        if let selectedRowID {
+            PlanDetailView(rowID: selectedRowID)
+                .id(selectedRowID)
+        } else {
+            ContentUnavailableView("No Plan Selected", systemImage: "doc.text")
         }
-        // #073: keyboard dismissal — Esc closes the pane, matching the
-        // scrim's click-away. Per the task's Assumptions the pane is scrim +
-        // Esc only (no always-visible Close button). Attached on the whole
-        // overlay (scrim + pane) so it is active for the full time the pane is
-        // shown. A bare `detailRowID = nil` suffices: `body`'s
-        // `.animation(value: detailRowID)` already animates the dismissal.
-        .onExitCommand { detailRowID = nil }
     }
 
     // MARK: - Content: the recency-sorted card grid (dashboard)
@@ -1081,16 +1059,17 @@ struct BrowserWindow: View {
         // #031: the card's "+" glyph opens the shared modal pre-selected to THIS
         // card's project via `onNewPlan` (a fresh `NewPlanRequest` id so
         // `.sheet(item:)` fires).
-        // #073: a plan-row tap opens the in-window detail overlay by setting
-        // `detailRowID` via `onOpenDetail` (mirrors the `onNewPlan` plumbing).
+        // #095: a plan-row tap selects it into the detail column by setting
+        // `selectedRowID` via `onOpenDetail` (mirrors the `onNewPlan` plumbing).
         ProjectCard(
             project: project,
             constrainedHeight: constrainedHeight,
+            selectedRowID: selectedRowID,
             onNewPlan: { path in
                 newPlanRequest = NewPlanRequest(projectPath: path)
             },
             onOpenDetail: { id in
-                detailRowID = id
+                selectedRowID = id
             }
         )
         // #004 drill-down target: the ScrollViewReader scrolls to this id.
@@ -1376,7 +1355,7 @@ enum BrowserViewModel {
     /// SwiftUI work.
     /// Resolves a composite row id to its `TaskRow` by scanning EVERY project's
     /// active rows AND backlog rows (the same cross-project lookup the card grid
-    /// and the plan-detail overlay pane both need). Returns the first row whose
+    /// and the plan-detail column both need). Returns the first row whose
     /// `id` matches; `nil` when nothing across any project matches (e.g. a
     /// completed/closed task or a project that disappeared). Pure value work —
     /// no I/O, no SwiftUI.
@@ -1401,6 +1380,54 @@ enum BrowserViewModel {
         return projects
             .flatMap { backlogRows($0) }
             .first { $0.id == id }
+    }
+
+    /// The detail-column selection after a store refresh: `id` unchanged while
+    /// `resolveRow` still finds it (active OR backlog), else `nil` — the plan
+    /// completed, was deleted, or its project disappeared. A `nil` selection
+    /// stays `nil`. Pure value work — no I/O, no SwiftUI.
+    static func validSelection(_ id: TaskRow.ID?, in projects: [ProjectTasks]) -> TaskRow.ID? {
+        guard let id, resolveRow(in: projects, id: id) != nil else { return nil }
+        return id
+    }
+
+    /// The detail-column selection given the rows the content column currently
+    /// DISPLAYS: `id` unchanged while one of `rows` carries it, else `nil`. This
+    /// keeps the invariant that the detail column only shows a plan the content
+    /// column lists (and therefore highlights) — switching the sidebar view, or a
+    /// poll moving the plan out of the current smart view, unloads it. Subsumes
+    /// `validSelection(_:in:)`: a row gone from the store is gone from `rows`
+    /// too. Pure value work — no I/O, no SwiftUI.
+    static func validSelection(_ id: TaskRow.ID?, visibleIn rows: [TaskRow]) -> TaskRow.ID? {
+        guard let id, rows.contains(where: { $0.id == id }) else { return nil }
+        return id
+    }
+
+    /// The rows the content column displays for a (resolved) sidebar
+    /// `selection` — single source of truth for both rendering and the
+    /// detail-selection invariant. `.smart` → `rows(in:matching:)` over every
+    /// project; `.project` → that project's active rows (+ backlog when
+    /// `showBacklog`); `.allProjects` → every `gridProjects` card's active rows
+    /// (+ backlog when `showBacklog`), where `gridProjects` is the grid's
+    /// view-mode/focus-filtered project set. Per-card type filters are card-local
+    /// view state and are not reflected here. Pure value work.
+    static func displayedRows(
+        for selection: SidebarSelection,
+        in projects: [ProjectTasks],
+        gridProjects: [ProjectTasks],
+        showBacklog: Bool
+    ) -> [TaskRow] {
+        func projectRows(_ project: ProjectTasks) -> [TaskRow] {
+            showBacklog ? activeRows(project) + backlogRows(project) : activeRows(project)
+        }
+        switch selection {
+        case .smart(let view):
+            return rows(in: projects, matching: view)
+        case .project(let path):
+            return projects.first { $0.projectPath == path }.map(projectRows) ?? []
+        case .allProjects:
+            return gridProjects.flatMap(projectRows)
+        }
     }
 
     static func activeRows(_ project: ProjectTasks) -> [TaskRow] {

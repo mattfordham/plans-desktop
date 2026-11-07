@@ -19,9 +19,9 @@ private let cardLog = Logger(subsystem: "com.plans.desktop", category: "ProjectC
 ///   `TaskParser`). Each row shows the task's status icon via the symbol-based
 ///   `TaskStatusIndicator` (blocked takes precedence), the short 3-char task id,
 ///   an optional `[type.label]` tag (`TaskType.label`), and the title. Tapping a
-///   row opens that plan's detail in the browser window's in-window modal overlay
-///   pane (#073, via the injected `onOpenDetail` closure) — it no longer sets a
-///   selection or opens a separate window. Tapping the header project name
+///   row shows that plan in the browser window's detail column (#073/#095, via
+///   the injected `onOpenDetail` closure, which sets the browser's
+///   `selectedRowID`) — it never opens a separate window. Tapping the header project name
 ///   reveals the project's nested `.plans` directory in Finder (#047). When
 ///   there are no active plans the body shows a muted empty state.
 ///
@@ -46,16 +46,20 @@ struct ProjectCard: View {
     /// call site keeps working.
     var constrainedHeight: CGFloat? = nil
 
+    /// #095: the browser's detail-column selection, so the matching plan row
+    /// renders the selected highlight. `nil` (the default) highlights nothing.
+    var selectedRowID: TaskRow.ID? = nil
+
     /// Opens the shared "New Plan" modal pre-selected to this card's project
     /// (#031). Invoked by the header "+" glyph with `project.projectPath`; the
     /// presenting `BrowserWindow` owns the sheet state. Replaces the former
     /// inline capture popover this card used to host itself.
     let onNewPlan: (String) -> Void
 
-    /// #073: opens the plan-detail modal overlay pane in the browser window for a
-    /// tapped row, keyed on the row's composite `TaskRow.ID`. The presenting
-    /// `BrowserWindow` owns the pane state (`detailRowID`); this closure just sets
-    /// it. Replaces the former `openWindow(id:value:)` that opened a standalone
+    /// #073/#095: shows a tapped row in the browser window's detail column,
+    /// keyed on the row's composite `TaskRow.ID`. The presenting
+    /// `BrowserWindow` owns the selection (`selectedRowID`); this closure just
+    /// sets it. Replaces the former `openWindow(id:value:)` that opened a standalone
     /// detail WINDOW. Declared as a stored `let` alongside `onNewPlan` so the
     /// synthesized memberwise init threads it through.
     let onOpenDetail: (TaskRow.ID) -> Void
@@ -233,6 +237,18 @@ struct ProjectCard: View {
         func backgroundOpacity(isEven: Bool, isHovered: Bool) -> Double {
             if isHovered { return hoverOpacity }
             return isEven ? 0 : stripeOpacity
+        }
+
+        /// #095: `Color.accentColor` alpha for the row currently shown in the
+        /// browser's detail column. Overrides the zebra/hover tint so the
+        /// selection reads clearly in both card rows and task-list rows.
+        var selectedOpacity: Double = 0.18
+
+        /// The full row background: the accent selection tint when `isSelected`,
+        /// else the subtle `Color.primary` zebra/hover tint.
+        func background(isEven: Bool, isHovered: Bool, isSelected: Bool) -> Color {
+            if isSelected { return Color.accentColor.opacity(selectedOpacity) }
+            return Color.primary.opacity(backgroundOpacity(isEven: isEven, isHovered: isHovered))
         }
     }
 
@@ -902,7 +918,7 @@ struct ProjectCard: View {
     /// A single tappable plan row as a `GridRow`: the status icon (blocked takes
     /// precedence), the short 3-char task id, an always-present `[type]` cell,
     /// and the title. The whole row is the tap target — tapping opens the plan's
-    /// detail in the browser window's in-window modal overlay pane (#073, via the
+    /// detail in the browser window's detail column (#073/#095, via the
     /// injected `onOpenDetail` closure).
     ///
     /// Implementation notes (#068 review: the row is an `HStack` with pinned
@@ -1034,9 +1050,15 @@ struct ProjectCard: View {
         // `.animation` eases the stripe/hover crossfade (mirrors
         // `RowActionGlyph`'s hover timing).
         .background(
-            Color.primary.opacity(
-                ProjectCard.rowStyling.backgroundOpacity(isEven: isEven, isHovered: isHovered)
+            ProjectCard.rowStyling.background(
+                isEven: isEven,
+                isHovered: isHovered,
+                isSelected: selectedRowID == row.id
             )
+            // #095: the painted band is also the row's fallback tap target, so a
+            // click in the vertical padding, the column gaps, or a cell's blank
+            // space selects the plan instead of landing on nothing.
+            .modifier(OpenDetailOnTap(row: row, onOpenDetail: onOpenDetail))
         )
         .onHover { hovering in
             hoveredRowID = hovering ? row.task.id : nil
@@ -1192,12 +1214,19 @@ private struct CaptureGlyph: View {
 /// target instead of competing with a row-wide tap gesture.
 ///
 /// #073: taps invoke the injected `onOpenDetail(row.id)` closure, which sets the
-/// browser window's `detailRowID` to present the in-window modal overlay pane.
+/// browser window's `selectedRowID` so its detail column shows the plan (#095).
 /// This replaced the earlier design, in which the tap called `openWindow(id:value:)`
 /// to open a standalone detail window; that window's scene no longer exists.
 ///
 /// #094: no longer `private` so the cross-project `TaskListRow` reuses the same
 /// tap-to-open-detail seam the card rows use.
+///
+/// #095: it is ALSO applied to each row's background band. Without that, only
+/// the cells' own frames were tappable, so a click in the row's vertical
+/// padding, the gaps between columns, or the horizontal inset did nothing even
+/// though that area is drawn as part of the hovered row. Because the band sits
+/// BEHIND the row content, it only receives clicks that hit nothing in front of
+/// it, so it never takes a click meant for the trailing action control.
 struct OpenDetailOnTap: ViewModifier {
     let row: TaskRow
     let onOpenDetail: (TaskRow.ID) -> Void

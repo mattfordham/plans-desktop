@@ -20,17 +20,19 @@ private enum PlanType {
 }
 
 /// A self-contained renderer for a single plan's detail body (§011). This is the
-/// content surface hosted by the browser window's plan-detail modal overlay pane
-/// (#073, `BrowserWindow.detailOverlay`): the title, the owning project + status
+/// content surface hosted by the browser window's split-view detail column
+/// (#095, `BrowserWindow.detailColumn`, keyed by `.id(selectedRowID)` so sheet
+/// state and progress auto-open reset per plan): the title, the owning project + status
 /// line, and each `## ` section rendered as markdown (the `## How` section as a
 /// read-only checklist, §2 — never interactive). It is host-agnostic — it renders
 /// only its own body, no window/pane chrome — so it needed no changes when the
-/// former standalone detail window was replaced by the in-window pane.
+/// former standalone detail window was replaced by the overlay pane (#073)
+/// and then by the detail column (#095).
 ///
 /// It resolves its row from the injected `PlansStore` by composite id via the
 /// shared `BrowserViewModel.resolveRow(in:id:)`, so it stays live as the store
-/// re-reads. It carries NO Close button — the hosting overlay pane owns
-/// dismissal (click the scrim or press Esc, #073). When the id can't be
+/// re-reads. It carries NO Close button — the detail column is persistent and
+/// shows a placeholder once the selection clears. When the id can't be
 /// resolved (the plan completed, the project disappeared, or `rowID` is nil) it shows a muted
 /// "Plan not found" placeholder. The view itself ONLY reads from the store — it
 /// never opens a `.plans/` file for writing. Its Elaborate / Refine / Execute /

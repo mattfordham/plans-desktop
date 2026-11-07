@@ -61,9 +61,12 @@ struct TaskListRow: View {
     /// repeat the same name.
     let showsProjectLabel: Bool
 
-    /// #073/#094: opens the plan-detail overlay pane for a tapped row, keyed on
+    /// #094/#095: shows a tapped row in the browser's detail column, keyed on
     /// the row's composite `TaskRow.ID`. Threaded in by the presenting window.
     let onOpenDetail: (TaskRow.ID) -> Void
+
+    /// #095: whether this row is the one shown in the browser's detail column.
+    var isSelected: Bool = false
 
     /// #068: which row the pointer is over, tracked so hover strengthens the
     /// resting zebra stripe. Row-local (one per row view).
@@ -134,15 +137,25 @@ struct TaskListRow: View {
             PlanRowActions(row: row)
         }
         .padding(.vertical, 5)
-        .padding(.horizontal, ProjectCard.rowColumns.rowHorizontalPadding)
+        // #095: unlike a card row, the list row's band runs flush to the content
+        // column's edges (no `rowBandLeadingMargin` outside the band), so the
+        // whole leading gutter moves INSIDE the band. The full card gutter keeps
+        // the row text aligned with the section header and control bar.
+        .padding(.leading, ProjectCard.rowColumns.cardHorizontalPadding)
+        .padding(.trailing, ProjectCard.rowColumns.rowHorizontalPadding)
         .background(
-            Color.primary.opacity(
-                ProjectCard.rowStyling.backgroundOpacity(isEven: isEven, isHovered: hovering)
+            ProjectCard.rowStyling.background(
+                isEven: isEven,
+                isHovered: hovering,
+                isSelected: isSelected
             )
+            // #095: the painted band is also the row's fallback tap target, so a
+            // click in the vertical padding, the column gaps, or a cell's blank
+            // space selects the plan (see `OpenDetailOnTap`).
+            .modifier(OpenDetailOnTap(row: row, onOpenDetail: onOpenDetail))
         )
         .onHover { hovering = $0 }
         .animation(.easeOut(duration: 0.12), value: hovering)
-        .padding(.leading, ProjectCard.rowColumns.rowBandLeadingMargin)
     }
 }
 
@@ -169,8 +182,12 @@ struct TaskListView: View {
     /// lists; false for a single-project list).
     let showsProjectLabel: Bool
 
-    /// #073/#094: opens the plan-detail overlay pane for a tapped row.
+    /// #094/#095: shows a tapped row in the browser's detail column.
     let onOpenDetail: (TaskRow.ID) -> Void
+
+    /// #095: the browser's detail-column selection; the matching row renders
+    /// highlighted. `nil` highlights nothing.
+    var selectedRowID: TaskRow.ID? = nil
 
     /// The shared store, read for the persisted sort/group selection.
     @Environment(PlansStore.self) private var store
@@ -265,7 +282,8 @@ struct TaskListView: View {
                         row: row,
                         index: index,
                         showsProjectLabel: showsProjectLabel,
-                        onOpenDetail: onOpenDetail
+                        onOpenDetail: onOpenDetail,
+                        isSelected: selectedRowID == row.id
                     )
                 }
             }
