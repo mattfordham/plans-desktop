@@ -516,6 +516,64 @@ final class PlanDetailViewTests: XCTestCase {
         XCTAssertFalse(PlanDetailView.shouldAutoOpenProgress(onAppearRunning: false))
     }
 
+    // MARK: - PlanDetailView.canDiscuss (#099 — Discuss footer gating)
+
+    /// Discuss is available for a real plan at ANY lifecycle status, including an
+    /// undecodable `nil` status: the footer shows whenever there is a plan to ask
+    /// about, independent of status. Only blocked / backlogged hide it (below).
+    func testCanDiscussTrueForEveryStatusWhenNotBlockedOrBacklogged() {
+        let statuses: [TaskStatus?] = TaskStatus.allCases.map { $0 } + [nil]
+        for status in statuses {
+            XCTAssertTrue(
+                PlanDetailView.canDiscuss(status: status, isBlocked: false),
+                "Discuss must be offered at status \(status?.rawValue ?? "nil")"
+            )
+        }
+    }
+
+    /// A blocked plan offers no Discuss footer, at any status.
+    func testCanDiscussFalseWhenBlocked() {
+        let statuses: [TaskStatus?] = TaskStatus.allCases.map { $0 } + [nil]
+        for status in statuses {
+            XCTAssertFalse(
+                PlanDetailView.canDiscuss(status: status, isBlocked: true),
+                "Discuss must stay hidden on a blocked plan — status \(status?.rawValue ?? "nil")"
+            )
+        }
+    }
+
+    /// A backlogged plan offers no Discuss footer, at any status — consistent
+    /// with the other action gates, which withhold work on parked plans.
+    func testCanDiscussFalseWhenBacklogged() {
+        let statuses: [TaskStatus?] = TaskStatus.allCases.map { $0 } + [nil]
+        for status in statuses {
+            XCTAssertFalse(
+                PlanDetailView.canDiscuss(status: status, isBlocked: false, isBacklogged: true),
+                "Discuss must stay hidden on a backlogged plan — status \(status?.rawValue ?? "nil")"
+            )
+        }
+    }
+
+    // MARK: - PlanDetailView.discussSubmission (#099 — submit-enable/trim)
+
+    /// An empty question yields `nil`, so the send button stays disabled.
+    func testDiscussSubmissionEmptyIsNil() {
+        XCTAssertNil(PlanDetailView.discussSubmission(""))
+    }
+
+    /// A whitespace/newline-only question trims to nothing and yields `nil`.
+    func testDiscussSubmissionWhitespaceOnlyIsNil() {
+        XCTAssertNil(PlanDetailView.discussSubmission("   \n\t  "))
+    }
+
+    /// A real question is returned trimmed of surrounding whitespace/newlines.
+    func testDiscussSubmissionTrimsNormalQuestion() {
+        XCTAssertEqual(
+            PlanDetailView.discussSubmission("  Why is this blocked?\n"),
+            "Why is this blocked?"
+        )
+    }
+
     // MARK: - PlanDetailView.canRetry (#079 — failure section + Retry gating)
 
     /// A healthy task (no failure overlay) never shows the failure section /

@@ -168,6 +168,13 @@ enum RunMode: String {
     /// Brings a deferred task back by driving `plan-restore` to move its file
     /// from `.plans/backlog/` into `.plans/pending/`, PRESERVING its status.
     case restore
+    /// Asks a one-shot question ABOUT an existing task by driving `plan-discuss`
+    /// (#099): it names an EXISTING task (so `spawn` emits `--task-id`) AND
+    /// carries the user's free-text question (so `spawn` also emits
+    /// `--description`), mirroring `.reElaborate`'s both-flags-true shape. Unlike
+    /// the elaborate/execute modes it changes nothing on disk — it reads the plan
+    /// and replies — so there is no deep/keep companion and no reconciliation.
+    case discuss
 
     /// Whether this mode operates on an EXISTING task, so `TaskRun.spawn` passes
     /// `--task-id <id>`. True for the existing-task modes `.execute` /
@@ -183,7 +190,7 @@ enum RunMode: String {
     /// can emit `--task-id` AND `--description` for them.
     var usesTaskID: Bool {
         switch self {
-        case .execute, .elaborate, .reElaborate, .reElaborateReview, .delete, .backlog, .restore:
+        case .execute, .elaborate, .reElaborate, .reElaborateReview, .delete, .backlog, .restore, .discuss:
             return true
         case .capture, .captureElaborate, .executeYolo:
             return false
@@ -216,7 +223,7 @@ enum RunMode: String {
     /// `spawn` consults each flag on its own.
     var usesDescription: Bool {
         switch self {
-        case .capture, .captureElaborate, .executeYolo, .reElaborate, .reElaborateReview, .elaborate, .execute:
+        case .capture, .captureElaborate, .executeYolo, .reElaborate, .reElaborateReview, .elaborate, .execute, .discuss:
             return true
         case .delete, .backlog, .restore:
             return false
@@ -239,6 +246,7 @@ extension RunMode {
         case .delete: return "Deleting"
         case .backlog: return "Backlogging"
         case .restore: return "Restoring"
+        case .discuss: return "Discussing"
         }
     }
 }

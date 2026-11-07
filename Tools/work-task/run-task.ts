@@ -88,7 +88,8 @@ type Mode =
   | "executeYolo"
   | "delete"
   | "backlog"
-  | "restore";
+  | "restore"
+  | "discuss";
 
 interface Args {
   projectRoot: string;
@@ -167,7 +168,8 @@ function parseArgs(argv: string[]): Args | null {
         value !== "executeYolo" &&
         value !== "delete" &&
         value !== "backlog" &&
-        value !== "restore"
+        value !== "restore" &&
+        value !== "discuss"
       ) {
         return null;
       }
@@ -192,9 +194,10 @@ function parseArgs(argv: string[]): Args | null {
     return { projectRoot, mode, description, deep, keep };
   }
 
-  if (mode === "reElaborate") {
-    // reElaborate operates on an EXISTING task AND carries free-text guidance:
-    // it is the only mode that requires both a task id and a description.
+  if (mode === "reElaborate" || mode === "discuss") {
+    // reElaborate and discuss operate on an EXISTING task AND carry free-text:
+    // reElaborate's refinement guidance, discuss's question. Both REQUIRE a task
+    // id and a description (#099: a discuss with no question is meaningless).
     if (!taskId || !description) {
       return null;
     }
@@ -723,6 +726,42 @@ function buildRestorePrompt(taskId: string): string {
   ].join("\n");
 }
 
+/**
+ * Build the prompt for a `discuss` run (#099). This drives the `plan-discuss`
+ * skill to ANSWER a free-text question about an existing task's plan. Unlike the
+ * lifecycle modes, discuss is strictly READ-ONLY here: `plan-discuss` can apply
+ * changes to the plan on request, but this hand-off MUST NOT — it answers the
+ * question and nothing more, leaving the plan file untouched. The user's question
+ * is folded in as a `"""`-delimited block (mirroring the other guidance-bearing
+ * builders). Like the other hand-offs it is unattended, so the agent must work
+ * fully autonomously and never ask the user anything.
+ */
+function buildDiscussPrompt(taskId: string, description: string): string {
+  return [
+    `Use the \`plan-discuss\` skill to answer a question about the plans-cc task`,
+    `with id ${taskId}:`,
+    "",
+    `/plan-discuss ${taskId}`,
+    "",
+    `The user has asked the following question about this plan — answer it:`,
+    "",
+    `"""`,
+    description,
+    `"""`,
+    "",
+    "Requirements:",
+    "1. Answer the question about the plan READ-ONLY. Do NOT apply any changes to",
+    "   the plan file. `plan-discuss` can apply changes to a plan on request, but",
+    "   it must NOT here — this is a question-answering pass only. Leave the task",
+    "   file exactly as it is.",
+    "2. Work fully autonomously. Do NOT ask the user any questions — there is no",
+    "   interactive UI to answer them. Research the codebase and the plan as",
+    "   needed to answer accurately.",
+    "",
+    "Work autonomously to completion. Do not ask for confirmation.",
+  ].join("\n");
+}
+
 function buildPrompt(args: Args): string {
   if (args.mode === "capture") {
     return buildCapturePrompt(args.description ?? "");
@@ -762,6 +801,9 @@ function buildPrompt(args: Args): string {
   }
   if (args.mode === "restore") {
     return buildRestorePrompt(args.taskId ?? "");
+  }
+  if (args.mode === "discuss") {
+    return buildDiscussPrompt(args.taskId ?? "", args.description ?? "");
   }
   return buildExecutePrompt(
     args.taskId ?? "",
@@ -925,7 +967,7 @@ async function main(): Promise<void> {
   const args = parseArgs(process.argv.slice(2));
   if (!args) {
     emitError(
-      "Missing or invalid arguments. Usage: run-task.js --project-root <abs path> [--mode execute|elaborate|reElaborate|capture|captureElaborate|executeYolo|delete] (--task-id <NNN> for execute/elaborate/delete; --description <text> for capture/captureElaborate/executeYolo; BOTH --task-id <NNN> and --description <text> for reElaborate)",
+      "Missing or invalid arguments. Usage: run-task.js --project-root <abs path> [--mode execute|elaborate|reElaborate|capture|captureElaborate|executeYolo|delete|backlog|restore|discuss] (--task-id <NNN> for execute/elaborate/delete/backlog/restore; --description <text> for capture/captureElaborate/executeYolo; BOTH --task-id <NNN> and --description <text> for reElaborate/discuss)",
     );
     process.exit(1);
     return;

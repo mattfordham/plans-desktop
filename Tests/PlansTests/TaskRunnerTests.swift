@@ -1311,6 +1311,21 @@ final class TaskRunnerTests: XCTestCase {
         XCTAssertFalse(RunMode.delete.usesDescription)
     }
 
+    /// `.discuss` (#099) is a both-flags-true mode, modeled exactly on
+    /// `.reElaborate`: it works an EXISTING task (so `spawn` emits `--task-id`)
+    /// AND carries the user's free-text question (so `spawn` also emits
+    /// `--description`), driving the `plan-discuss` skill. Its raw value is the
+    /// literal the runner switches on for its `--mode` flag, so the round-trip
+    /// pins the Swift↔TypeScript contract against `run-task.ts`'s `"discuss"`
+    /// branch — a rename on either side would otherwise fail only at runtime.
+    func testDiscussModeUsesBothTaskIDAndDescription() {
+        XCTAssertEqual(RunMode.discuss.rawValue, "discuss")
+        XCTAssertEqual(RunMode(rawValue: "discuss"), .discuss)
+
+        XCTAssertTrue(RunMode.discuss.usesTaskID)
+        XCTAssertTrue(RunMode.discuss.usesDescription)
+    }
+
     /// A `.reElaborate` run carries BOTH an existing task id and the free-text
     /// refinement `description` (threaded to the runner's `--description` flag),
     /// so `TaskRun.spawn` can emit `--task-id <id>` and `--description <text>`

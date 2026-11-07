@@ -101,6 +101,13 @@ struct PlanDetailView: View {
     /// that gates to the elaborated state while this gates to review.
     @State private var showReviewReElaborate = false
 
+    /// The live text of the Discuss footer's question box (#099). Bound to the
+    /// footer `TextField`; normalized by `Self.discussSubmission(_:)` on send
+    /// (empty / whitespace-only never fires a run) and cleared once a question
+    /// is handed off to the runner. NOT persisted — a fresh plan opens empty
+    /// since the detail column re-keys per `selectedRowID`.
+    @State private var discussText = ""
+
     /// The resolved row for `rowID` across all projects' active rows, or `nil`
     /// when absent. Re-derived from the live store on each render.
     private var row: TaskRow? {
@@ -140,6 +147,23 @@ struct PlanDetailView: View {
                     .padding(28)
                 }
                 .textSelection(.enabled)
+                // #099: the Discuss footer. A natural-height bar pinned to the
+                // bottom of the scrolling plan body via `.safeAreaInset` — it
+                // offers a one-shot, read-only question ABOUT this plan, handed
+                // to the bundled runner in `.discuss` mode (the reply streams
+                // into the existing progress sheet). Shown only when
+                // `canDiscuss` is true (hidden for blocked/backlogged plans) and
+                // only while no run for this task is in flight. CRITICAL (#096):
+                // this is a fixed/natural-height view — it never measures its
+                // own size, so it can't drive a layout loop.
+                .safeAreaInset(edge: .bottom) {
+                    if Self.canDiscuss(status: row.task.status,
+                                       isBlocked: row.task.isBlocked,
+                                       isBacklogged: row.task.isBacklogged),
+                       !runner.isRunning(taskID: row.task.id, in: row.projectPath) {
+                        discussFooter(row)
+                    }
+                }
             } else {
                 VStack {
                     Text("Plan not found")
@@ -478,6 +502,67 @@ struct PlanDetailView: View {
         }
     }
 
+    /// The Discuss footer (#099): a full-width bar pinned to the bottom of the
+    /// plan body for asking a one-shot, read-only question ABOUT this plan. A top
+    /// `Divider`, then an inset `.textBackgroundColor` question field and a
+    /// trailing Send button that hands the question to the bundled runner in
+    /// `.discuss` mode (the reply streams into the existing progress sheet). Send
+    /// is disabled while the box is empty/whitespace-only (gated on
+    /// `discussSubmission`), and `⌘↩` fires it too. Visual tokens — the inset
+    /// rounded `.textBackgroundColor` fill with a faint secondary border — match
+    /// `RunProgressSheet.logList` / `ElaborateModal`. Fixed/natural height only:
+    /// nothing here measures its own size (#096).
+    private func discussFooter(_ row: TaskRow) -> some View {
+        VStack(spacing: 0) {
+            Divider()
+            HStack(spacing: 8) {
+                TextField("Ask about this plan…", text: $discussText)
+                    .textFieldStyle(.plain)
+                    .frame(maxWidth: .infinity)
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 6)
+                    .background(
+                        RoundedRectangle(cornerRadius: 6)
+                            .fill(Color(nsColor: .textBackgroundColor))
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 6)
+                                    .strokeBorder(Color.secondary.opacity(0.4), lineWidth: 1)
+                            )
+                    )
+                    .onSubmit { submitDiscussion(row) }
+
+                Button {
+                    submitDiscussion(row)
+                } label: {
+                    Label("Send", systemImage: "paperplane.fill")
+                }
+                .keyboardShortcut(.return, modifiers: .command)
+                .disabled(Self.discussSubmission(discussText) == nil)
+            }
+            .padding(12)
+        }
+        .background(.bar)
+    }
+
+    /// Hands this view's Discuss question off to the bundled runner in `.discuss`
+    /// mode (#099). Guards the same `canDiscuss` gate the footer renders behind
+    /// (so a stale ⌘↩ can't fire for a now-blocked/backlogged plan) and the
+    /// `discussSubmission` trim (empty / whitespace-only never fires). Clears the
+    /// box and raises the progress sheet so the read-only reply streams into the
+    /// existing `RunProgressSheet`. The runner is the sole writer of `.plans/`;
+    /// discuss itself is read-only — it answers the question without touching the
+    /// plan file (enforced in the runner's prompt).
+    private func submitDiscussion(_ row: TaskRow) {
+        guard Self.canDiscuss(status: row.task.status,
+                              isBlocked: row.task.isBlocked,
+                              isBacklogged: row.task.isBacklogged) else { return }
+        guard let text = Self.discussSubmission(discussText) else { return }
+        runner.run(projectPath: row.projectPath, taskID: row.task.id,
+                   mode: .discuss, description: text)
+        discussText = ""
+        showProgress = true
+    }
+
     /// The PERSISTENT run-failure section (#079), shown only when `row.task`
     /// carries a `TaskFailure` overlay. Unlike the transient `errorBanner` in the
     /// progress sheet (which lives only for the duration of a run), this stays in
@@ -685,6 +770,33 @@ struct PlanDetailView: View {
         guard !isBacklogged else { return false }
         guard !isBlocked else { return false }
         return status == .review || status == .inReview
+    }
+
+    /// Pure predicate for the "Discuss" footer's availability (#099). Unlike the
+    /// lifecycle actions (Elaborate / Execute / Refine), discussion is a
+    /// read-only, one-shot question ABOUT a plan — so it is offered at EVERY
+    /// status, including an undecodable `nil` status: the footer shows whenever
+    /// there is a real plan to ask about, independent of lifecycle state.
+    /// Only the two cross-cutting guards hide it — a BLOCKED plan (nothing to ask
+    /// an agent to do while it waits on its blocker) and a BACKLOGGED plan
+    /// (discussing work the user has parked is incoherent, mirroring the other
+    /// gates' `isBacklogged` withholding). The guard ordering mirrors `canWork`.
+    static func canDiscuss(status: TaskStatus?, isBlocked: Bool,
+                           isBacklogged: Bool = false) -> Bool {
+        guard !isBacklogged else { return false }
+        guard !isBlocked else { return false }
+        return true
+    }
+
+    /// Normalizes a raw Discuss question into the value to send, or `nil` when
+    /// there is nothing to ask (#099). Returns the question trimmed of leading /
+    /// trailing whitespace and newlines when something remains, else `nil` — so
+    /// callers gate the send button on a non-nil result (an empty or
+    /// whitespace-only box can never fire a run). Pure so the enable/trim rule is
+    /// unit-testable without the view.
+    static func discussSubmission(_ raw: String) -> String? {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
     }
 
     /// Pure predicate for the "Backlog" action's availability (#077 follow-up),
