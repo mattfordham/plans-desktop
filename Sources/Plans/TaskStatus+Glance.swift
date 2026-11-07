@@ -98,6 +98,12 @@ extension TaskStatus {
         .review,
         .inReview,
     ]
+
+    /// The sidebar "Backlog" smart-view tint color (#094). Backlog is a deferred
+    /// state, so it reuses the muted neutral gray of `.pending` (`0x928374`) so it
+    /// recedes next to the active-work colors. Kept here alongside the rest of the
+    /// glance palette (the label/symbol live in `TaskType+Glyph.swift`).
+    static let backlogGlanceColor = Color(hex: 0x928374)
 }
 
 /// The (symbol, glyph, color) indicator for a task, mirroring the plans-cc TUI

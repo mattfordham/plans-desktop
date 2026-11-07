@@ -16,14 +16,17 @@ final class BrowserWindowTests: XCTestCase {
         type: TaskType? = nil,
         status: TaskStatus? = nil,
         isBlocked: Bool = false,
-        isKeptWorktree: Bool = false
+        isKeptWorktree: Bool = false,
+        failure: TaskFailure? = nil,
+        modified: TimeInterval? = nil,
+        created: String? = nil
     ) -> Task {
         Task(
             id: id,
             title: title,
             type: type,
             status: status,
-            created: nil,
+            created: created,
             branch: nil,
             isKeptWorktree: isKeptWorktree,
             blockedBy: [],
@@ -31,7 +34,9 @@ final class BrowserWindowTests: XCTestCase {
             howProgress: (done: 0, total: 0),
             isBlocked: isBlocked,
             isCompletedDir: false,
-            isBacklogged: false
+            isBacklogged: false,
+            failure: failure,
+            modified: modified
         )
     }
 
@@ -1293,5 +1298,279 @@ final class BrowserWindowTests: XCTestCase {
             activeTasks: []
         )
         XCTAssertFalse(project.hasOutstandingWork)
+    }
+
+    // MARK: - (#094 Step 1) Smart-view rows + summary counts
+
+    private func makeFailure() -> TaskFailure {
+        TaskFailure(
+            classification: .error,
+            errorMessage: "boom",
+            stopReason: nil,
+            timestamp: "2026-11-07T10:00:00Z"
+        )
+    }
+
+    func testSmartViewInProgressRowsAcrossProjects() {
+        let a = makeProject(
+            path: "/a", name: "A",
+            activeTasks: [makeTask(id: "001", status: .inProgress),
+                          makeTask(id: "002", status: .review)]
+        )
+        let b = makeProject(
+            path: "/b", name: "B",
+            activeTasks: [makeTask(id: "003", status: .inProgress)]
+        )
+        let rows = BrowserViewModel.rows(in: [a, b], matching: .inProgress)
+        XCTAssertEqual(rows.map(\.id), ["/a/001", "/b/003"])
+    }
+
+    func testSmartViewReviewCombinesReviewAndInReview() {
+        let a = makeProject(
+            path: "/a", name: "A",
+            activeTasks: [makeTask(id: "001", status: .review),
+                          makeTask(id: "002", status: .inReview),
+                          makeTask(id: "003", status: .inProgress)]
+        )
+        let rows = BrowserViewModel.rows(in: [a], matching: .review)
+        XCTAssertEqual(Set(rows.map(\.id)), ["/a/001", "/a/002"])
+    }
+
+    func testSmartViewBlockedActiveRowsOnly() {
+        let a = makeProject(
+            path: "/a", name: "A",
+            activeTasks: [makeTask(id: "001", status: .inProgress, isBlocked: true),
+                          makeTask(id: "002", status: .inProgress)]
+        )
+        let rows = BrowserViewModel.rows(in: [a], matching: .blocked)
+        XCTAssertEqual(rows.map(\.id), ["/a/001"])
+    }
+
+    func testSmartViewFailedActiveRowsOnly() {
+        let a = makeProject(
+            path: "/a", name: "A",
+            activeTasks: [makeTask(id: "001", status: .inProgress, failure: makeFailure()),
+                          makeTask(id: "002", status: .inProgress)]
+        )
+        let rows = BrowserViewModel.rows(in: [a], matching: .failed)
+        XCTAssertEqual(rows.map(\.id), ["/a/001"])
+    }
+
+    func testSmartViewBacklogRowsAcrossProjects() {
+        let a = makeProject(
+            path: "/a", name: "A",
+            backloggedTasks: [makeTask(id: "009", status: .pending)]
+        )
+        let b = makeProject(
+            path: "/b", name: "B",
+            backloggedTasks: [makeTask(id: "010", status: .elaborated)]
+        )
+        let rows = BrowserViewModel.rows(in: [a, b], matching: .backlog)
+        XCTAssertEqual(rows.map(\.id), ["/a/009", "/b/010"])
+    }
+
+    func testSmartViewLabelsAndVocabulary() {
+        XCTAssertEqual(SmartView.inProgress.label, TaskStatus.inProgress.filterLabel)
+        XCTAssertEqual(SmartView.review.label, "Review")
+        XCTAssertEqual(SmartView.inProgress.symbolName, TaskStatus.inProgress.symbolName)
+        XCTAssertEqual(SmartView.review.symbolName, TaskStatus.review.symbolName)
+        XCTAssertEqual(SmartView.blocked.symbolName, TaskStatusIndicator.blockedSymbol)
+        XCTAssertEqual(SmartView.failed.symbolName, TaskStatusIndicator.failureSymbol)
+        // Non-empty labels/icons across every case (totality guard).
+        for view in SmartView.allCases {
+            XCTAssertFalse(view.label.isEmpty, "empty label for \(view)")
+            XCTAssertFalse(view.symbolName.isEmpty, "empty symbol for \(view)")
+        }
+    }
+
+    /// `summaryCounts` MUST agree with `PlansStore.iconSpaceCounts` semantics
+    /// (review = review + in-review) and `PlansStore.failedCount`.
+    func testSummaryCountsAgreeWithStoreSemantics() {
+        let a = makeProject(
+            path: "/a", name: "A",
+            tasks: [makeTask(id: "001", status: .inProgress, failure: makeFailure()),
+                    makeTask(id: "002", status: .review),
+                    makeTask(id: "003", status: .inReview)],
+            activeTasks: [makeTask(id: "001", status: .inProgress, failure: makeFailure()),
+                          makeTask(id: "002", status: .review),
+                          makeTask(id: "003", status: .inReview)]
+        )
+        let b = makeProject(
+            path: "/b", name: "B",
+            tasks: [makeTask(id: "004", status: .inProgress),
+                    makeTask(id: "005", status: .inReview, failure: makeFailure())],
+            activeTasks: [makeTask(id: "004", status: .inProgress),
+                          makeTask(id: "005", status: .inReview, failure: makeFailure())]
+        )
+        let counts = BrowserViewModel.summaryCounts(in: [a, b])
+        // in-progress: /a 001 + /b 004 = 2
+        XCTAssertEqual(counts.inProgress, 2)
+        // review (review + in-review): /a 002 + /a 003 + /b 005 = 3
+        XCTAssertEqual(counts.review, 3)
+        // failed: /a 001 + /b 005 = 2
+        XCTAssertEqual(counts.failed, 2)
+    }
+
+    // MARK: - (#094 Step 2) Task staleness / sorting / grouping
+
+    func testTaskStalenessUsesModifiedWhenPresent() {
+        let t = makeTask(id: "001", modified: 1000)
+        XCTAssertEqual(
+            BrowserViewModel.taskStalenessDate(t),
+            Date(timeIntervalSinceReferenceDate: 1000)
+        )
+    }
+
+    func testTaskStalenessFallsBackToCreatedISOMinute() {
+        let t = makeTask(id: "001", modified: nil, created: "2026-11-07T11:48")
+        let fmt = DateFormatter()
+        fmt.locale = Locale(identifier: "en_US_POSIX")
+        fmt.dateFormat = "yyyy-MM-dd'T'HH:mm"
+        fmt.timeZone = TimeZone(identifier: "UTC")
+        // Only assert it is non-nil and parses — exact TZ handling is internal.
+        XCTAssertNotNil(BrowserViewModel.taskStalenessDate(t))
+    }
+
+    func testTaskStalenessFallsBackToCreatedDateOnly() {
+        let t = makeTask(id: "001", modified: nil, created: "2026-11-07")
+        XCTAssertNotNil(BrowserViewModel.taskStalenessDate(t))
+    }
+
+    func testTaskStalenessNilWhenNoDate() {
+        let t = makeTask(id: "001", modified: nil, created: nil)
+        XCTAssertNil(BrowserViewModel.taskStalenessDate(t))
+        let garbage = makeTask(id: "002", modified: nil, created: "not-a-date")
+        XCTAssertNil(BrowserViewModel.taskStalenessDate(garbage))
+    }
+
+    private func rows(_ project: ProjectTasks) -> [TaskRow] {
+        BrowserViewModel.activeRows(project)
+    }
+
+    func testSortRowsByStatusPriority() {
+        let a = makeProject(
+            path: "/a", name: "A",
+            activeTasks: [makeTask(id: "001", status: .pending),
+                          makeTask(id: "002", status: .inReview),
+                          makeTask(id: "003", status: .inProgress)]
+        )
+        let sorted = BrowserViewModel.sortRows(rows(a), by: .status)
+        // Higher activePriority first: in-review(5) > in-progress(3) > pending(1)
+        XCTAssertEqual(sorted.map(\.id), ["/a/002", "/a/003", "/a/001"])
+    }
+
+    func testSortRowsByProjectName() {
+        let a = makeProject(path: "/a", name: "Zed",
+                            activeTasks: [makeTask(id: "001", status: .inProgress)])
+        let b = makeProject(path: "/b", name: "Alpha",
+                            activeTasks: [makeTask(id: "002", status: .inProgress)])
+        let all = rows(a) + rows(b)
+        let sorted = BrowserViewModel.sortRows(all, by: .project)
+        XCTAssertEqual(sorted.map(\.projectName), ["Alpha", "Zed"])
+    }
+
+    func testSortRowsByStalenessNewestFirstNilLast() {
+        let a = makeProject(
+            path: "/a", name: "A",
+            activeTasks: [makeTask(id: "001", status: .inProgress, modified: 100),
+                          makeTask(id: "002", status: .inProgress, modified: 900),
+                          makeTask(id: "003", status: .inProgress, modified: nil, created: nil)]
+        )
+        let sorted = BrowserViewModel.sortRows(rows(a), by: .staleness)
+        // Newest first (900 > 100), the dateless row last.
+        XCTAssertEqual(sorted.map(\.id), ["/a/002", "/a/001", "/a/003"])
+    }
+
+    func testSortRowsByStalenessStableForTies() {
+        let a = makeProject(
+            path: "/a", name: "A",
+            activeTasks: [makeTask(id: "001", status: .inProgress, modified: 500),
+                          makeTask(id: "002", status: .inProgress, modified: 500)]
+        )
+        let sorted = BrowserViewModel.sortRows(rows(a), by: .staleness)
+        XCTAssertEqual(sorted.map(\.id), ["/a/001", "/a/002"])
+    }
+
+    func testSortRowsByStalenessUsesCreatedFallback() {
+        let a = makeProject(
+            path: "/a", name: "A",
+            activeTasks: [makeTask(id: "001", status: .inProgress, modified: nil, created: "2026-11-01T09:00"),
+                          makeTask(id: "002", status: .inProgress, modified: nil, created: "2026-11-07T11:48")]
+        )
+        let sorted = BrowserViewModel.sortRows(rows(a), by: .staleness)
+        XCTAssertEqual(sorted.map(\.id), ["/a/002", "/a/001"])
+    }
+
+    func testGroupRowsByStatusCombinesReview() {
+        let a = makeProject(
+            path: "/a", name: "A",
+            activeTasks: [makeTask(id: "001", status: .review),
+                          makeTask(id: "002", status: .inReview),
+                          makeTask(id: "003", status: .inProgress)]
+        )
+        let groups = BrowserViewModel.groupRows(rows(a), by: .status)
+        // Review + in-review collapse into one "Review" section.
+        let reviewSection = groups.first { $0.title == "Review" }
+        XCTAssertNotNil(reviewSection)
+        XCTAssertEqual(Set(reviewSection?.rows.map(\.id) ?? []), ["/a/001", "/a/002"])
+        XCTAssertTrue(groups.contains { $0.title == TaskStatus.inProgress.filterLabel })
+    }
+
+    func testGroupRowsByProject() {
+        let a = makeProject(path: "/a", name: "Alpha",
+                            activeTasks: [makeTask(id: "001", status: .inProgress)])
+        let b = makeProject(path: "/b", name: "Beta",
+                            activeTasks: [makeTask(id: "002", status: .inProgress)])
+        let groups = BrowserViewModel.groupRows(rows(a) + rows(b), by: .project)
+        XCTAssertEqual(groups.map(\.title), ["Alpha", "Beta"])
+        XCTAssertEqual(groups.first?.rows.map(\.id), ["/a/001"])
+    }
+
+    // MARK: - (#094 Step 3) SidebarSelection encoding + fallback
+
+    func testSidebarSelectionAllRoundTrip() {
+        let sel = SidebarSelection.allProjects
+        XCTAssertEqual(sel.encoded, "all")
+        XCTAssertEqual(SidebarSelection(encoded: "all"), .allProjects)
+    }
+
+    func testSidebarSelectionSmartRoundTrip() {
+        for view in SmartView.allCases {
+            let sel = SidebarSelection.smart(view)
+            XCTAssertEqual(SidebarSelection(encoded: sel.encoded), sel)
+        }
+    }
+
+    func testSidebarSelectionProjectRoundTripWithColonAndSlash() {
+        let path = "/Users/x/My:Weird/Path"
+        let sel = SidebarSelection.project(path)
+        XCTAssertEqual(sel.encoded, "project:\(path)")
+        XCTAssertEqual(SidebarSelection(encoded: sel.encoded), .project(path))
+    }
+
+    func testSidebarSelectionDecodeRejectsGarbage() {
+        XCTAssertNil(SidebarSelection(encoded: "bogus"))
+        XCTAssertNil(SidebarSelection(encoded: "smart:nope"))
+    }
+
+    func testResolveFallsBackToAllWhenProjectMissing() {
+        let a = makeProject(path: "/a", name: "A")
+        let resolved = BrowserViewModel.resolve(.project("/gone"), in: [a])
+        XCTAssertEqual(resolved, .allProjects)
+    }
+
+    func testResolveKeepsLiveProject() {
+        let a = makeProject(path: "/a", name: "A")
+        let resolved = BrowserViewModel.resolve(.project("/a"), in: [a])
+        XCTAssertEqual(resolved, .project("/a"))
+    }
+
+    func testResolveKeepsSmartAndAll() {
+        let a = makeProject(path: "/a", name: "A")
+        XCTAssertEqual(BrowserViewModel.resolve(.allProjects, in: [a]), .allProjects)
+        XCTAssertEqual(
+            BrowserViewModel.resolve(.smart(.inProgress), in: [a]),
+            .smart(.inProgress)
+        )
     }
 }

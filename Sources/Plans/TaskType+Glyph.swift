@@ -75,4 +75,14 @@ extension TaskStatus {
         case .completed: return "Completed"
         }
     }
+
+    /// The sidebar "Backlog" smart-view label (#094). Backlog is a SOURCE
+    /// directory, not a `TaskStatus`, so its label/icon/color live here as static
+    /// vocabulary rather than being expressed inline in the view. The glyph +
+    /// color mirror the `archivebox` affordance the browser toolbar already uses
+    /// for the backlog toggle (#077).
+    static let backlogFilterLabel = "Backlog"
+    /// The sidebar "Backlog" smart-view SF Symbol (#094): the same `archivebox`
+    /// the browser's show-backlog toolbar toggle uses, kept here as vocabulary.
+    static let backlogSymbolName = "archivebox"
 }

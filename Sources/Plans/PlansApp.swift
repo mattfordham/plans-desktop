@@ -129,6 +129,9 @@ struct PlansApp: App {
                 .environment(taskRunner)
         }
         .defaultLaunchBehavior(.presented)
+        // #094: the two-column browser (sidebar + content) opens at a comfortable
+        // size for both columns; the split view's own `minWidth` (820) floors it.
+        .defaultSize(width: 1100, height: 720)
         // #034: map ⌘N app-wide to the "New Plan" form. `replacing: .newItem`
         // overrides AppKit's default ⌘N ("New Window") so the shortcut opens the
         // plan-capture modal instead. The button can't reach `BrowserWindow`'s

@@ -254,6 +254,32 @@ final class PlansStore {
         didSet { defaults.set(autoSyncEnabled, forKey: Self.autoSyncKey) }
     }
 
+    /// The browser sidebar's current selection (#094): the all-projects
+    /// dashboard, a cross-project smart view, or a single project by path.
+    /// Defaults to `.allProjects`. Persisted on every set via its string
+    /// encoding (`SidebarSelection.encoded`, which survives paths containing
+    /// `:`/`/`). NEVER written to `.plans/` (§2 read-only) — UserDefaults is the
+    /// only persistence sink.
+    var browserSelection: SidebarSelection = .allProjects {
+        didSet { defaults.set(browserSelection.encoded, forKey: Self.browserSelectionKey) }
+    }
+
+    /// The ONE shared sort order for every cross-project task list (#094).
+    /// Defaults to `.staleness` (newest-touched first). Persisted on every set
+    /// (its `rawValue` is the wire form). NEVER written to `.plans/` (§2
+    /// read-only) — UserDefaults is the only persistence sink.
+    var taskSort: TaskSort = .staleness {
+        didSet { defaults.set(taskSort.rawValue, forKey: Self.taskSortKey) }
+    }
+
+    /// The ONE shared grouping dimension for every cross-project task list
+    /// (#094). Defaults to `.project`. Persisted on every set (its `rawValue` is
+    /// the wire form). NEVER written to `.plans/` (§2 read-only) — UserDefaults
+    /// is the only persistence sink.
+    var taskGroup: TaskGroup = .project {
+        didSet { defaults.set(taskGroup.rawValue, forKey: Self.taskGroupKey) }
+    }
+
     /// UserDefaults key for the persisted manual card order (array of paths).
     private static let orderKey = "cardOrderOverride"
 
@@ -271,6 +297,16 @@ final class PlansStore {
 
     /// UserDefaults key for the persisted auto-sync flag.
     private static let autoSyncKey = "autoSyncPlans"
+
+    /// UserDefaults key for the persisted browser sidebar selection (#094). The
+    /// stored value is the `SidebarSelection.encoded` string.
+    private static let browserSelectionKey = "browserSelection"
+
+    /// UserDefaults key for the persisted task-list sort order (#094).
+    private static let taskSortKey = "taskSort"
+
+    /// UserDefaults key for the persisted task-list grouping dimension (#094).
+    private static let taskGroupKey = "taskGroup"
 
     /// UserDefaults key for the persisted starred project paths (#035). The
     /// stored value is `Array(starredProjectPaths)` (UserDefaults stores arrays).
@@ -501,6 +537,15 @@ final class PlansStore {
         _showBacklog = defaults.bool(forKey: Self.showBacklogKey)
         // Auto-sync defaults ON, so a missing key must not read as `false`.
         _autoSyncEnabled = defaults.object(forKey: Self.autoSyncKey) as? Bool ?? true
+        // Load persisted browser selection (#094): decode the stored string,
+        // defaulting to `.allProjects` on a missing/garbage value. Assigning the
+        // backing field avoids the `didSet` re-persisting the just-read value.
+        _browserSelection = (defaults.string(forKey: Self.browserSelectionKey))
+            .flatMap(SidebarSelection.init(encoded:)) ?? .allProjects
+        // Load persisted task-list sort/group (#094), defaulting to
+        // `.staleness`/`.project` on missing/garbage values.
+        _taskSort = TaskSort(rawValue: defaults.string(forKey: Self.taskSortKey) ?? "") ?? .staleness
+        _taskGroup = TaskGroup(rawValue: defaults.string(forKey: Self.taskGroupKey) ?? "") ?? .project
         // Load persisted starred project paths (#035): the stored array round-trips
         // back into the `Set`. Assigning the backing field avoids the `didSet`
         // re-persisting the just-read value.

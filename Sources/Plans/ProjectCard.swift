@@ -81,49 +81,9 @@ struct ProjectCard: View {
     /// stripe (mirrors the single-selection `progressPopoverTaskID` pattern).
     @State private var hoveredRowID: String? = nil
 
-    /// The pending "Refine Plan" request (#056), or `nil` when no Refine sheet is
-    /// open. Set by a row's Refine glyph (elaborated, non-blocked tasks only) to
-    /// that row's task id + project path; an `.sheet(item:)` keyed on it presents
-    /// the `ReElaborateModal` for exactly that task. An `Identifiable` struct
-    /// (rather than a bare bool + separate id) so the sheet always targets the
-    /// right row even if several elaborated rows are present.
-    @State private var reElaborateRequest: ReElaborateRequest? = nil
-
-    /// The pending "Elaborate" request (#074), or `nil` when no Elaborate sheet
-    /// is open. Set by a row's Elaborate glyph (pending, non-blocked tasks only)
-    /// to that row's task id + project path; an `.sheet(item:)` keyed on it
-    /// presents the `ElaborateModal` for exactly that task. Mirrors
-    /// `reElaborateRequest` — an `Identifiable` struct rather than a bare bool +
-    /// separate id, so the sheet always targets the right row even if several
-    /// pending rows are present.
-    @State private var elaborateRequest: ElaborateRequest? = nil
-
-    /// The pending "Execute" request (#078), or `nil` when no Execute sheet is
-    /// open. Set by a row's Execute glyph (elaborated/in-progress, non-blocked
-    /// tasks only) to that row's task id + project path; an `.sheet(item:)` keyed
-    /// on it presents the `ExecuteModal` for exactly that task. Mirrors
-    /// `elaborateRequest` — an `Identifiable` struct rather than a bare bool +
-    /// separate id, so the sheet always targets the right row even if several
-    /// executable rows are present.
-    @State private var executeRequest: ExecuteRequest? = nil
-
-    /// The pending direct-"Execute" request (#088), or `nil` when no direct-Execute
-    /// sheet is open. Set by a pending (un-elaborated) row's `play.fill` glyph to
-    /// that row's task id + project path; an `.sheet(item:)` keyed on it presents
-    /// the `ExecutePendingModal` for exactly that task. Mirrors `executeRequest` —
-    /// a distinct `Identifiable` struct so this sheet stays independently keyed
-    /// from the elaborated-plan Execute sheet and can never present against it.
-    @State private var executePendingRequest: ExecutePendingRequest? = nil
-
-    /// The pending "Re-elaborate for review" request (#091), or `nil` when no
-    /// review-Refine sheet is open. Set by a review-state (review/in-review),
-    /// non-blocked row's `sparkles` glyph to that row's task id + project path; an
-    /// `.sheet(item:)` keyed on it presents the `ReviewReElaborateModal` for exactly
-    /// that task, which resets the plan to pending and re-elaborates it. Mirrors
-    /// `reElaborateRequest` — a distinct `Identifiable` struct so this sheet stays
-    /// independently keyed from the elaborated-plan Refine sheet and can never
-    /// present against it.
-    @State private var reviewReElaborateRequest: ReviewReElaborateRequest? = nil
+    // #094: the five per-row action request vars and their `.sheet(item:)` modals
+    // moved into the shared `PlanRowActions` view, which now owns that state so
+    // the same action control can be rendered by the cross-project `TaskListRow`.
 
     /// #076: the active per-card task-type filter, or `nil` for "All" (no
     /// filtering). Purely view-local transient state (like `hoveredRowID` and the
@@ -498,44 +458,8 @@ struct ProjectCard: View {
             RoundedRectangle(cornerRadius: 12)
                 .stroke(.separator, lineWidth: 1)
         )
-        // The "Refine Plan" sheet (#056), keyed on the requesting row's task so
-        // the modal targets exactly the row whose Refine glyph was tapped. The
-        // `ReElaborateModal` hands the user's guidance to the runner in
-        // `.reElaborate` mode (the sole `.plans/` writer, §2).
-        .sheet(item: $reElaborateRequest) { request in
-            ReElaborateModal(taskID: request.taskID, projectPath: request.projectPath)
-        }
-        // The "Elaborate" sheet (#074), keyed on the requesting row's task the
-        // same way the Refine sheet above is. The `ElaborateModal` hands the
-        // user's OPTIONAL guidance plus the Deep flag to the runner in
-        // `.elaborate` mode (the sole `.plans/` writer, §2).
-        .sheet(item: $elaborateRequest) { request in
-            ElaborateModal(taskID: request.taskID, projectPath: request.projectPath)
-        }
-        // The "Execute" sheet (#078), keyed on the requesting row's task the same
-        // way the two sheets above are. The `ExecuteModal` hands the Keep flag to
-        // the runner in `.execute` mode (the sole `.plans/` writer, §2); with Keep
-        // off it spawns exactly the run the bare glyph used to fire.
-        .sheet(item: $executeRequest) { request in
-            ExecuteModal(taskID: request.taskID, projectPath: request.projectPath)
-        }
-        // The pending direct-"Execute" sheet (#088), keyed on the requesting
-        // pending row's task the same way the three sheets above are. The
-        // `ExecutePendingModal` hands the OPTIONAL guidance plus the Deep and Keep
-        // flags to the runner in `.execute` mode (the sole `.plans/` writer, §2),
-        // which auto-elaborates the plan inline and then executes it.
-        .sheet(item: $executePendingRequest) { request in
-            ExecutePendingModal(taskID: request.taskID, projectPath: request.projectPath,
-                                forReview: request.forReview)
-        }
-        // The "Re-elaborate for review" sheet (#091), keyed on the requesting
-        // review-state row's task the same way the four sheets above are. The
-        // `ReviewReElaborateModal` hands the OPTIONAL guidance plus the Deep flag
-        // to the runner in `.reElaborateReview` mode (the sole `.plans/` writer,
-        // §2), which resets the plan to pending and re-elaborates it.
-        .sheet(item: $reviewReElaborateRequest) { request in
-            ReviewReElaborateModal(taskID: request.taskID, projectPath: request.projectPath)
-        }
+        // #094: the five per-row action `.sheet(item:)` modals moved into the
+        // shared `PlanRowActions` view, which owns their request state now.
     }
 
     /// The growable middle content of the card: the in-flight capture rows and
@@ -1084,8 +1008,10 @@ struct ProjectCard: View {
             // Execute icon button (or an inline spinner while THIS row is being
             // worked). It deliberately does NOT carry the open-detail tap gesture
             // (which lives on the content cells above) so the control's own tap is
-            // never swallowed by a row-level gesture.
-            rowActions(row)
+            // never swallowed by a row-level gesture. #094: extracted into the
+            // shared `PlanRowActions` view (which owns its own action-sheet state)
+            // so the identical control also serves the cross-project `TaskListRow`.
+            PlanRowActions(row: row)
         }
         // `.padding(.vertical, 5)` sets the row's height/tap area. The open-detail
         // tap gesture is applied per column (see `OpenDetailOnTap`) rather than
@@ -1119,174 +1045,6 @@ struct ProjectCard: View {
         // #087 review: applied AFTER the background so the band stops short of
         // the card's leading edge while still bleeding to the trailing edge.
         .padding(.leading, ProjectCard.rowColumns.rowBandLeadingMargin)
-    }
-
-    /// The trailing action cell for a plan row. While this row's task is being
-    /// worked, shows an inline spinner. Otherwise shows the SINGLE relevant
-    /// action for the row's status: Elaborate for a `pending` task, Execute for
-    /// an `elaborated`/`in-progress` task, and an empty spacer for any other
-    /// status. Every state is pinned to the same fixed height so the row's line
-    /// height never shifts when the spinner/glyph appears or disappears. The full
-    /// live log is available by opening the row's detail overlay pane (#073).
-    @ViewBuilder
-    private func rowActions(_ row: TaskRow) -> some View {
-        Group {
-            if runner.isRunning(taskID: row.task.id, in: row.projectPath) {
-                // Tapping the live spinner toggles the run's progress dialog in
-                // place, anchored to the spinner, with the run's live log. The
-                // `.popover` attaches to the bare spinner glyph's BOUNDS (not the
-                // padded hit area, and not a single center point): anchoring to the
-                // bounds lets macOS land the arrow against whichever glyph edge it
-                // flips to (above when space is tight, below otherwise) with the
-                // arrow tip just off the spinner rather than piercing its center.
-                // The leading padding / content shape / tap gesture wrap that
-                // anchored glyph.
-                ProgressView()
-                    .controlSize(.small)
-                    .popover(isPresented: progressPopover(for: row.task.id),
-                             attachmentAnchor: .rect(.bounds)) {
-                        // Same dialog the detail view presents as a sheet; here it
-                        // pops over the spinner. The explicit 480pt width (matching
-                        // the sheet's own `minWidth`) gives the popover a stable
-                        // width from first paint so the inset log field fills it
-                        // immediately instead of resizing after the first layout
-                        // pass. On close, drop the finished run and reload so the
-                        // task's new status surfaces — mirrors the detail view's
-                        // sheet teardown.
-                        RunProgressSheet(run: runner.run(for: row.task.id, in: row.projectPath),
-                                         taskID: row.task.id)
-                            .frame(width: 480)
-                            .onDisappear {
-                                runner.dismiss(taskID: row.task.id, in: row.projectPath)
-                                store.reload()
-                            }
-                    }
-                    .padding(.leading, 8)
-                    .contentShape(Rectangle())
-                    .onTapGesture {
-                        // Toggle: clicking the spinner again while open closes it.
-                        progressPopoverTaskID = (progressPopoverTaskID == row.task.id) ? nil : row.task.id
-                    }
-                    .help("Show progress")
-            } else if PlanDetailView.canRetry(failure: row.task.failure) {
-                // #079: the latest run for this plan failed. Offer a Retry glyph
-                // that re-runs `plan-execute` via the SAME Execute consent gate as
-                // the Execute glyph below (the `ExecuteModal` sheet keyed on
-                // `executeRequest`) — never a silent reload. Takes precedence over
-                // the status-gated Elaborate/Execute branches because a failed run
-                // usually left the task at in-progress (which those branches don't
-                // surface any action for), and re-running is the actionable step.
-                RowActionGlyph(systemImage: "arrow.clockwise", help: "Retry this plan") {
-                    cardLog.notice("card Retry clicked: task=\(row.task.id, privacy: .public)")
-                    executeRequest = ExecuteRequest(
-                        taskID: row.task.id,
-                        projectPath: row.projectPath
-                    )
-                }
-            } else if PlanDetailView.canElaborate(status: row.task.status,
-                                                  isBlocked: row.task.isBlocked,
-                                                  isBacklogged: row.task.isBacklogged) {
-                // A pending, non-blocked task surfaces BOTH Elaborate and a
-                // direct-Execute glyph (#088), mirroring the elaborated-row
-                // Refine+Execute pair below: a tight `HStack(spacing: -4)` of two
-                // `RowActionGlyph`s (each a 22pt cell with built-in 8pt leading
-                // padding) so they read as a tight pair within the row's pinned
-                // height. Elaborate (unchanged, #074) opens the `ElaborateModal`
-                // for an optional-guidance + Deep elaboration; direct-Execute
-                // opens the `ExecutePendingModal` (#088), which hands the plan to
-                // `plan-execute` to auto-elaborate inline and then execute.
-                HStack(spacing: -4) {
-                    RowActionGlyph(systemImage: "sparkles", help: "Elaborate this plan") {
-                        cardLog.notice("card Elaborate clicked: task=\(row.task.id, privacy: .public)")
-                        elaborateRequest = ElaborateRequest(
-                            taskID: row.task.id,
-                            projectPath: row.projectPath
-                        )
-                    }
-                    RowActionGlyph(systemImage: "play.fill", help: "Execute this plan directly") {
-                        cardLog.notice("card direct-Execute clicked: task=\(row.task.id, privacy: .public)")
-                        executePendingRequest = ExecutePendingRequest(
-                            taskID: row.task.id,
-                            projectPath: row.projectPath
-                        )
-                    }
-                }
-            } else if PlanDetailView.canWork(status: row.task.status,
-                                             isBlocked: row.task.isBlocked,
-                                             isBacklogged: row.task.isBacklogged) {
-                // An elaborated, non-blocked task surfaces BOTH Refine and Execute
-                // (#056). The two glyphs sit in a tight HStack — each
-                // `RowActionGlyph` is its own 22pt-tall cell with built-in 8pt
-                // leading padding, so the pair stays within the row's pinned 22pt
-                // height and the row's vertical metrics match its single-glyph
-                // neighbours. A negative `spacing` trims the gap between the two
-                // adjacent glyphs (each already carries 8pt leading padding) so
-                // they read as a tight pair. Refine opens the `ReElaborateModal`
-                // via the card's `.sheet(item:)`; Execute likewise opens the
-                // `ExecuteModal` (#078) rather than firing the run straight off
-                // the glyph. `canWork` and `canReElaborate` share the same
-                // elaborated+non-blocked gate, so Refine appears exactly when
-                // Execute does.
-                HStack(spacing: -4) {
-                    RowActionGlyph(systemImage: "sparkles", help: "Refine this plan") {
-                        cardLog.notice("card Refine clicked: task=\(row.task.id, privacy: .public)")
-                        reElaborateRequest = ReElaborateRequest(
-                            taskID: row.task.id,
-                            projectPath: row.projectPath
-                        )
-                    }
-                    RowActionGlyph(systemImage: "play.fill", help: "Execute this plan") {
-                        cardLog.notice("card Execute clicked: task=\(row.task.id, privacy: .public)")
-                        executeRequest = ExecuteRequest(
-                            taskID: row.task.id,
-                            projectPath: row.projectPath
-                        )
-                    }
-                }
-            } else if PlanDetailView.canExecuteReview(status: row.task.status,
-                                                      isBlocked: row.task.isBlocked,
-                                                      isBacklogged: row.task.isBacklogged)
-                        || PlanDetailView.canReElaborateReview(status: row.task.status,
-                                                               isBlocked: row.task.isBlocked,
-                                                               isBacklogged: row.task.isBacklogged) {
-                // A review-state (review/in-review), non-blocked task surfaces BOTH
-                // Refine and Execute (#091) — mirroring the elaborated-row pair
-                // above — so the user can push the plan back to pending for a fresh
-                // re-elaboration OR run another execution pass. Same tight
-                // `HStack(spacing: -4)` of two `RowActionGlyph`s within the row's
-                // pinned height. Refine opens the `ReviewReElaborateModal` (which
-                // resets the plan to pending and re-elaborates); Execute opens the
-                // `ExecutePendingModal` in review mode via `executePendingRequest`,
-                // so the user can add context for the extra pass.
-                // `canExecuteReview` and `canReElaborateReview` share the same
-                // review+non-blocked gate, so Refine appears exactly when Execute
-                // does.
-                HStack(spacing: -4) {
-                    RowActionGlyph(systemImage: "sparkles", help: "Re-elaborate this plan for review") {
-                        cardLog.notice("card review-Refine clicked: task=\(row.task.id, privacy: .public)")
-                        reviewReElaborateRequest = ReviewReElaborateRequest(
-                            taskID: row.task.id,
-                            projectPath: row.projectPath
-                        )
-                    }
-                    RowActionGlyph(systemImage: "play.fill", help: "Execute this plan again") {
-                        cardLog.notice("card review-Execute clicked: task=\(row.task.id, privacy: .public)")
-                        executePendingRequest = ExecutePendingRequest(
-                            taskID: row.task.id,
-                            projectPath: row.projectPath,
-                            forReview: true
-                        )
-                    }
-                }
-            } else {
-                // No action for this status: an empty spacer of the same height
-                // so the row's vertical metrics match action-bearing rows.
-                Color.clear.frame(width: 0)
-            }
-        }
-        // Pin the cell to the glyph's height in every state so swapping between
-        // spinner / glyph / empty never changes the row's line height.
-        .frame(height: 22)
     }
 
     /// The project star/unstar toggle (#035). A filled yellow `star.fill` when
@@ -1326,61 +1084,6 @@ struct ProjectCard: View {
         }
     }
 
-}
-
-/// A pending "Refine Plan" request (#056): the task + project a tapped Refine
-/// glyph targets, driving the card's `.sheet(item:)`. `Identifiable` on the task
-/// id so SwiftUI presents (and re-targets) the sheet for the right row.
-private struct ReElaborateRequest: Identifiable {
-    let taskID: String
-    let projectPath: String
-    var id: String { taskID }
-}
-
-/// A pending "Elaborate" request (#074): the task + project a tapped Elaborate
-/// glyph targets, driving the card's second `.sheet(item:)`. A distinct type
-/// from `ReElaborateRequest` (rather than a shared one) so the two sheets stay
-/// independently keyed and can never be presented against each other's state.
-private struct ElaborateRequest: Identifiable {
-    let taskID: String
-    let projectPath: String
-    var id: String { taskID }
-}
-
-/// A pending "Execute" request (#078): the task + project a tapped Execute glyph
-/// targets, driving the card's third `.sheet(item:)`. A distinct type from
-/// `ElaborateRequest`/`ReElaborateRequest` (rather than a shared one) so the
-/// three sheets stay independently keyed and can never be presented against each
-/// other's state.
-private struct ExecuteRequest: Identifiable {
-    let taskID: String
-    let projectPath: String
-    var id: String { taskID }
-}
-
-/// A pending direct-"Execute" request (#088): the task + project a tapped pending
-/// `play.fill` glyph targets, driving the card's fourth `.sheet(item:)`. A distinct
-/// type from `ExecuteRequest`/`ElaborateRequest`/`ReElaborateRequest` (rather than a
-/// shared one) so the four sheets stay independently keyed and can never be
-/// presented against each other's state.
-private struct ExecutePendingRequest: Identifiable {
-    let taskID: String
-    let projectPath: String
-    /// Whether the target is a review-state plan (#091), so the sheet asks for
-    /// context for another pass and hides Deep.
-    var forReview = false
-    var id: String { taskID }
-}
-
-/// A pending "Re-elaborate for review" request (#091): the task + project a tapped
-/// review-state `sparkles` glyph targets, driving the card's fifth `.sheet(item:)`.
-/// A distinct type from the other request structs (rather than a shared one) so the
-/// five sheets stay independently keyed and can never be presented against each
-/// other's state.
-private struct ReviewReElaborateRequest: Identifiable {
-    let taskID: String
-    let projectPath: String
-    var id: String { taskID }
 }
 
 /// The project star/unstar glyph (#035). A `Button` with `.buttonStyle(.plain)`
@@ -1445,57 +1148,6 @@ private struct FocusToggleGlyph: View {
     }
 }
 
-/// A single small tappable glyph for a row action, with hover and press
-/// feedback. Implemented as an Image with its own `.onTapGesture` +
-/// `.contentShape` (NOT a `Button`): a borderless `Button` nested in a `Grid`
-/// row alongside other tap gestures proved unreliable to hit-test on macOS,
-/// whereas the tap-gesture primitive is the same one the content cells use to
-/// open detail and works reliably.
-///
-/// Feedback: on hover the glyph brightens to the primary color over a subtly
-/// tinted rounded background and the cursor switches to a pointing hand; while
-/// pressed it scales down and dims, then runs `action` on release.
-private struct RowActionGlyph: View {
-    let systemImage: String
-    let help: String
-    let action: () -> Void
-
-    @State private var hovering = false
-    @State private var pressed = false
-
-    var body: some View {
-        Image(systemName: systemImage)
-            .imageScale(.medium)
-            .foregroundStyle(hovering ? Color.primary : Color.secondary)
-            .frame(width: 22, height: 22)
-            .background(
-                RoundedRectangle(cornerRadius: 5)
-                    .fill(Color.primary.opacity(pressed ? 0.18 : (hovering ? 0.10 : 0)))
-            )
-            .scaleEffect(pressed ? 0.88 : 1.0)
-            .animation(.easeOut(duration: 0.12), value: hovering)
-            .animation(.easeOut(duration: 0.08), value: pressed)
-            .contentShape(Rectangle())
-            // A min-distance-0 drag gesture gives us press-down / release-up
-            // feedback that `.onTapGesture` alone can't: press dims+shrinks the
-            // glyph, and releasing within the 22×22 glyph bounds fires the
-            // action. (Attached before the leading padding so the gesture's
-            // coordinate space is exactly the glyph, not the padded cell.)
-            .gesture(
-                DragGesture(minimumDistance: 0)
-                    .onChanged { _ in if !pressed { pressed = true } }
-                    .onEnded { value in
-                        pressed = false
-                        let bounds = CGRect(x: 0, y: 0, width: 22, height: 22)
-                        if bounds.contains(value.location) { action() }
-                    }
-            )
-            .onHover { hovering = $0 }
-            .padding(.leading, 8)
-            .help(help)
-    }
-}
-
 /// The header "+" capture glyph. Like `RowActionGlyph` (same hover/press
 /// feedback and tap-gesture primitive — a nested borderless `Button` hit-tests
 /// unreliably in this layout), but sized to match the header status badges
@@ -1543,7 +1195,10 @@ private struct CaptureGlyph: View {
 /// browser window's `detailRowID` to present the in-window modal overlay pane.
 /// This replaced the earlier design, in which the tap called `openWindow(id:value:)`
 /// to open a standalone detail window; that window's scene no longer exists.
-private struct OpenDetailOnTap: ViewModifier {
+///
+/// #094: no longer `private` so the cross-project `TaskListRow` reuses the same
+/// tap-to-open-detail seam the card rows use.
+struct OpenDetailOnTap: ViewModifier {
     let row: TaskRow
     let onOpenDetail: (TaskRow.ID) -> Void
 

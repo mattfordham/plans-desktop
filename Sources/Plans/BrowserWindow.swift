@@ -291,10 +291,32 @@ struct BrowserWindow: View {
     }
 
     var body: some View {
-        // A pure, full-width card dashboard. Tapping a plan row opens that plan's
-        // detail as a modal overlay pane over this window (#073, `detailOverlay`).
-        cardGrid
-            .frame(minWidth: 480, minHeight: 520)
+        // #094: a two-column browser — a smart-view/project sidebar on the left,
+        // and a content column on the right that dispatches on the persisted
+        // `store.browserSelection`: the all-projects card dashboard, a
+        // cross-project smart-view task list, or a single project's task list.
+        // The window-level chrome (New Plan sheet, detail overlay + ⌘N trigger,
+        // the main toolbar) lives on the OUTER split view so it covers the whole
+        // window regardless of which column is focused. `cardGrid`'s own inner
+        // toolbar / drill-down scroll stays with `cardGrid` (the all-projects
+        // content).
+        NavigationSplitView {
+            sidebar
+        } detail: {
+            contentColumn
+        }
+            // A two-column layout needs more width than the single-pane grid did:
+            // ~240pt sidebar + a comfortable content column. (See Assumptions.)
+            .frame(minWidth: 820, minHeight: 520)
+            // §004 drill-down handoff (#094): when the menu bar sets a target
+            // project before opening this window, SELECT that project's task list
+            // in the sidebar (the primary drill-down effect now). The grid's own
+            // scroll-to-project still fires for the all-projects case. Guarded so a
+            // stale path naming a project that is no longer live is ignored.
+            .onAppear { selectDrillDownProjectIfLive() }
+            .onChange(of: store.selectedProjectPath) { _, _ in
+                selectDrillDownProjectIfLive()
+            }
             // #031: the shared "New Plan" modal, presented over the whole window.
             // Driven by `newPlanRequest` (set by the global toolbar button below
             // or a card's "+" glyph via the `onNewPlan` closure passed into each
@@ -432,6 +454,199 @@ struct BrowserWindow: View {
                     .help("Show or hide backlogged (deferred) plans")
                 }
             }
+    }
+
+    // MARK: - Sidebar (#094)
+
+    /// A binding that round-trips the sidebar's `List` selection with the
+    /// persisted `store.browserSelection`, resolved DEFENSIVELY on read so a
+    /// stored `.project(path)` whose project is no longer live falls back to the
+    /// all-projects dashboard rather than highlighting a dead row.
+    private var selectionBinding: Binding<SidebarSelection?> {
+        Binding(
+            get: { BrowserViewModel.resolve(store.browserSelection, in: store.projects) },
+            // A `List` single-selection binding is optional; a tap into empty
+            // space can clear it. Ignore a clear (keep the last selection) and
+            // otherwise persist the new one.
+            set: { if let new = $0 { store.browserSelection = new } }
+        )
+    }
+
+    /// The projects listed in the sidebar's "Projects" section, in the SAME
+    /// order the card grid uses (manual override when active + non-empty, else
+    /// recency). DELIBERATELY NOT filtered by `projectViewMode` or focus — the
+    /// sidebar always lists every project so any one is reachable.
+    private var sidebarProjects: [ProjectTasks] {
+        if store.manualOrderActive && !store.projectOrderOverride.isEmpty {
+            return BrowserViewModel.applyManualOrder(
+                store.projects,
+                order: store.projectOrderOverride
+            )
+        }
+        return BrowserViewModel.sortByStaleness(store.projects)
+    }
+
+    /// The left column: a selectable `List` bound to `store.browserSelection`.
+    /// Top-to-bottom — a clickable summary strip, the smart views, an optional
+    /// Favourites section (starred projects), the all-projects entry, and a
+    /// Projects section listing every project.
+    private var sidebar: some View {
+        List(selection: selectionBinding) {
+            summaryStrip
+                .listRowInsets(EdgeInsets(top: 8, leading: 12, bottom: 8, trailing: 12))
+
+            Section("Smart Views") {
+                ForEach(SmartView.allCases, id: \.rawValue) { view in
+                    smartViewRow(view)
+                        .tag(SidebarSelection.smart(view))
+                }
+            }
+
+            if !favouriteProjects.isEmpty {
+                Section("Favourites") {
+                    ForEach(favouriteProjects, id: \.projectPath) { project in
+                        Label(project.projectName, systemImage: "star.fill")
+                            .lineLimit(1)
+                            .tag(SidebarSelection.project(project.projectPath))
+                    }
+                }
+            }
+
+            Section {
+                Label("All Projects", systemImage: "rectangle.3.group")
+                    .tag(SidebarSelection.allProjects)
+            }
+
+            Section("Projects") {
+                ForEach(sidebarProjects, id: \.projectPath) { project in
+                    Label(project.projectName, systemImage: "folder")
+                        .lineLimit(1)
+                        .tag(SidebarSelection.project(project.projectPath))
+                }
+            }
+        }
+        .frame(minWidth: 220)
+    }
+
+    /// The starred projects, in the same display order as the full sidebar list.
+    private var favouriteProjects: [ProjectTasks] {
+        sidebarProjects.filter { store.starredProjectPaths.contains($0.projectPath) }
+    }
+
+    /// The clickable summary strip (#094): compact pills for the in-progress /
+    /// review / failed totals, each tinted with its smart view's colour and
+    /// selecting that smart view when clicked. Zero totals are suppressed the way
+    /// the menu bar glance suppresses empty counts (see Assumptions); an
+    /// all-zero strip collapses to nothing.
+    @ViewBuilder
+    private var summaryStrip: some View {
+        let counts = BrowserViewModel.summaryCounts(in: store.projects)
+        HStack(spacing: 6) {
+            summaryPill(.inProgress, count: counts.inProgress)
+            summaryPill(.review, count: counts.review)
+            summaryPill(.failed, count: counts.failed)
+        }
+    }
+
+    /// One summary-strip pill: a tappable count tinted with the smart view's
+    /// colour/icon that selects that smart view. Suppressed (renders nothing)
+    /// when its total is zero.
+    @ViewBuilder
+    private func summaryPill(_ view: SmartView, count: Int) -> some View {
+        if count > 0 {
+            Button {
+                store.browserSelection = .smart(view)
+            } label: {
+                HStack(spacing: 3) {
+                    Image(systemName: view.symbolName)
+                        .imageScale(.small)
+                    Text("\(count)")
+                        .font(.caption.monospacedDigit())
+                }
+                .foregroundStyle(view.color)
+                .padding(.horizontal, 7)
+                .padding(.vertical, 3)
+                .background(view.color.opacity(0.12), in: Capsule())
+            }
+            .buttonStyle(.plain)
+            .help(view.label)
+        }
+    }
+
+    /// One smart-view row: its icon (tinted) + label + a trailing count of its
+    /// matching cross-project rows (suppressed at zero).
+    @ViewBuilder
+    private func smartViewRow(_ view: SmartView) -> some View {
+        let count = BrowserViewModel.rows(in: store.projects, matching: view).count
+        HStack {
+            Label {
+                Text(view.label)
+            } icon: {
+                Image(systemName: view.symbolName)
+                    .foregroundStyle(view.color)
+            }
+            Spacer(minLength: 4)
+            if count > 0 {
+                Text("\(count)")
+                    .font(.caption.monospacedDigit())
+                    .foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    // MARK: - Content column (#094)
+
+    /// The right column: dispatches on the (defensively resolved) selection.
+    /// `.allProjects` renders the existing card grid unchanged; `.smart` renders
+    /// a cross-project task list (project labels shown); `.project` renders that
+    /// single project's active (+ optionally backlog) task list (no project
+    /// labels — every row is the same project).
+    @ViewBuilder
+    private var contentColumn: some View {
+        let selection = BrowserViewModel.resolve(store.browserSelection, in: store.projects)
+        switch selection {
+        case .allProjects:
+            cardGrid
+        case .smart(let view):
+            TaskListView(
+                rows: BrowserViewModel.rows(in: store.projects, matching: view),
+                showsProjectLabel: true,
+                onOpenDetail: { detailRowID = $0 }
+            )
+        case .project(let path):
+            projectList(path: path)
+        }
+    }
+
+    /// The single-project task list for `path`: its active rows plus its backlog
+    /// rows when `store.showBacklog` is on. Renders an empty list gracefully if
+    /// the project can't be found (the selection resolver normally prevents this).
+    @ViewBuilder
+    private func projectList(path: String) -> some View {
+        let project = store.projects.first { $0.projectPath == path }
+        let rows: [TaskRow] = {
+            guard let project else { return [] }
+            var result = BrowserViewModel.activeRows(project)
+            if store.showBacklog {
+                result += BrowserViewModel.backlogRows(project)
+            }
+            return result
+        }()
+        TaskListView(
+            rows: rows,
+            showsProjectLabel: false,
+            onOpenDetail: { detailRowID = $0 }
+        )
+    }
+
+    /// §004/#094 drill-down: when the menu bar set `store.selectedProjectPath`
+    /// to a LIVE project, select that project's task list in the sidebar. A stale
+    /// path (no matching live project) is ignored so the selection is never
+    /// stranded on a dead project. Pure store write — never touches `.plans/`.
+    private func selectDrillDownProjectIfLive() {
+        guard let path = store.selectedProjectPath,
+              store.projects.contains(where: { $0.projectPath == path }) else { return }
+        store.browserSelection = .project(path)
     }
 
     // MARK: - Plan-detail modal overlay pane (#073)
@@ -1021,6 +1236,127 @@ struct TaskRow: Identifiable {
     }
 }
 
+/// A cross-project "smart view" for the browser sidebar (#094): a saved,
+/// status-like lens over every project's tasks at once. Each case maps to a
+/// label/icon/color drawn from the EXISTING glyph vocabulary (`TaskStatus`
+/// `filterLabel`/`symbolName`/`glanceColor`, `TaskStatusIndicator` for the
+/// blocked/failed alarm, and the "Backlog" label in `TaskType+Glyph.swift`), so
+/// the sidebar never invents its own inline copy. `rawValue` gives a stable
+/// string form for persistence via `SidebarSelection`.
+///
+/// `CaseIterable`/`Equatable`/pure value code so it is `Sendable`-clean and
+/// directly unit-testable without a view.
+enum SmartView: String, CaseIterable, Equatable, Hashable {
+    /// Tasks whose status is `.inProgress`, across every project (active rows).
+    case inProgress
+    /// Tasks in EITHER `.review` OR `.inReview` — one combined review lens.
+    case review
+    /// Active tasks flagged blocked (`Task.isBlocked`).
+    case blocked
+    /// Active tasks carrying a run-failure overlay (`Task.failure != nil`).
+    case failed
+    /// Backlogged (deferred) tasks, across every project.
+    case backlog
+
+    /// The sidebar label for this view, from the shared vocabulary. Review reads
+    /// "Review" (it covers both review and in-review).
+    var label: String {
+        switch self {
+        case .inProgress: return TaskStatus.inProgress.filterLabel
+        case .review: return "Review"
+        case .blocked: return "Blocked"
+        case .failed: return "Failed"
+        case .backlog: return TaskStatus.backlogFilterLabel
+        }
+    }
+
+    /// The SF Symbol for this view, reusing the status/indicator vocabulary.
+    var symbolName: String {
+        switch self {
+        case .inProgress: return TaskStatus.inProgress.symbolName
+        case .review: return TaskStatus.review.symbolName
+        case .blocked: return TaskStatusIndicator.blockedSymbol
+        case .failed: return TaskStatusIndicator.failureSymbol
+        case .backlog: return TaskStatus.backlogSymbolName
+        }
+    }
+
+    /// The tint color for this view, reusing the status/indicator palette.
+    var color: Color {
+        switch self {
+        case .inProgress: return TaskStatus.inProgress.glanceColor
+        case .review: return TaskStatus.review.glanceColor
+        case .blocked: return TaskStatusIndicator.blockedColor
+        case .failed: return TaskStatusIndicator.failureColor
+        case .backlog: return TaskStatus.backlogGlanceColor
+        }
+    }
+}
+
+/// How a cross-project task list is ordered (#094). ONE shared setting across
+/// every list (persisted on `PlansStore`). Pure value enum — `Sendable`-clean.
+enum TaskSort: String, CaseIterable, Equatable {
+    /// By `Task.status?.activePriority`, highest first.
+    case status
+    /// By owning `projectName`, ascending.
+    case project
+    /// By staleness (`taskStalenessDate`): NEWEST first, dateless rows LAST.
+    case staleness
+}
+
+/// How a cross-project task list is grouped into titled sections (#094). Reuses
+/// the same dimensions as `TaskSort` so the sidebar can offer one coherent
+/// control. Pure value enum — `Sendable`-clean.
+enum TaskGroup: String, CaseIterable, Equatable {
+    /// One section per status, with `.review`/`.inReview` COMBINED under "Review".
+    case status
+    /// One section per owning project (`projectName`).
+    case project
+}
+
+/// The browser sidebar's current selection (#094): the all-projects dashboard,
+/// a cross-project smart view, or a single project by path.
+///
+/// `encoded`/`init?(encoded:)` give a stable STRING round trip for persistence.
+/// The encoding splits on the FIRST `:` ONLY, so a project path that itself
+/// contains `:` or `/` survives intact (`"project:/Users/x/My:Weird/Path"`).
+enum SidebarSelection: Equatable, Hashable {
+    case allProjects
+    case smart(SmartView)
+    case project(String)
+
+    /// The stable string encoding. `"all"`, `"smart:<rawValue>"`, or
+    /// `"project:<path>"` (the path kept verbatim after the first `:`).
+    var encoded: String {
+        switch self {
+        case .allProjects: return "all"
+        case .smart(let view): return "smart:\(view.rawValue)"
+        case .project(let path): return "project:\(path)"
+        }
+    }
+
+    /// Decodes an `encoded` string, splitting on the FIRST `:` only. Returns
+    /// `nil` for an unrecognized prefix or an unknown smart-view rawValue.
+    init?(encoded: String) {
+        if encoded == "all" {
+            self = .allProjects
+            return
+        }
+        guard let colon = encoded.firstIndex(of: ":") else { return nil }
+        let prefix = String(encoded[encoded.startIndex..<colon])
+        let value = String(encoded[encoded.index(after: colon)...])
+        switch prefix {
+        case "smart":
+            guard let view = SmartView(rawValue: value) else { return nil }
+            self = .smart(view)
+        case "project":
+            self = .project(value)
+        default:
+            return nil
+        }
+    }
+}
+
 /// Pure, SwiftUI-free view-model helpers for the browser so the filter/sort
 /// logic is unit-testable as plain values (segment 2 tests these directly).
 /// This namespace performs NO I/O and never mutates `.plans/` data.
@@ -1304,5 +1640,180 @@ enum BrowserViewModel {
         let plain = ISO8601DateFormatter()
         plain.formatOptions = [.withInternetDateTime]
         return plain.date(from: trimmed)
+    }
+
+    // MARK: - Smart views (#094)
+
+    /// The totals shown in the sidebar's summary strip (#094). CRITICAL: these
+    /// MUST agree with the menu-bar store semantics — `inProgress`/`review` match
+    /// `PlansStore.iconSpaceCounts` (where review = review + in-review) and
+    /// `failed` matches `PlansStore.failedCount` (tasks with `failure != nil`).
+    /// Counted over ALL of each project's `tasks` (not just active rows) so the
+    /// numbers line up with the store, which aggregates `project.counts` /
+    /// `project.tasks`.
+    struct SummaryCounts: Equatable {
+        let inProgress: Int
+        let review: Int
+        let failed: Int
+    }
+
+    static func summaryCounts(in projects: [ProjectTasks]) -> SummaryCounts {
+        var inProgress = 0
+        var review = 0
+        var failed = 0
+        for project in projects {
+            for task in project.tasks {
+                switch task.status {
+                case .inProgress: inProgress += 1
+                case .review, .inReview: review += 1
+                default: break
+                }
+                if task.failure != nil { failed += 1 }
+            }
+        }
+        return SummaryCounts(inProgress: inProgress, review: review, failed: failed)
+    }
+
+    /// The cross-project rows for a smart view (#094). For
+    /// `.inProgress/.review/.blocked/.failed` it filters over each project's
+    /// `activeRows`; for `.backlog` it collects `backlogRows`. Review combines
+    /// `.review` + `.inReview`. Project order is preserved, and within a project
+    /// the parser's row order is preserved. Pure value work — no I/O, no SwiftUI.
+    static func rows(in projects: [ProjectTasks], matching view: SmartView) -> [TaskRow] {
+        switch view {
+        case .backlog:
+            return projects.flatMap { backlogRows($0) }
+        case .inProgress:
+            return projects.flatMap { activeRows($0) }
+                .filter { $0.task.status == .inProgress }
+        case .review:
+            return projects.flatMap { activeRows($0) }
+                .filter { $0.task.status == .review || $0.task.status == .inReview }
+        case .blocked:
+            return projects.flatMap { activeRows($0) }
+                .filter { $0.task.isBlocked }
+        case .failed:
+            return projects.flatMap { activeRows($0) }
+                .filter { $0.task.failure != nil }
+        }
+    }
+
+    // MARK: - Task staleness / sorting / grouping (#094)
+
+    /// A POSIX `yyyy-MM-dd'T'HH:mm` parser for `Task.created` (#094). Cached as a
+    /// static because `DateFormatter` construction is expensive. `parseLastSeen`'s
+    /// ISO8601 parser CANNOT read this minute-precision `created` format, so a
+    /// dedicated formatter is required.
+    private static let createdMinuteFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.locale = Locale(identifier: "en_US_POSIX")
+        f.dateFormat = "yyyy-MM-dd'T'HH:mm"
+        return f
+    }()
+
+    /// A POSIX date-only `yyyy-MM-dd` fallback parser for `Task.created` (#094).
+    private static let createdDateFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.locale = Locale(identifier: "en_US_POSIX")
+        f.dateFormat = "yyyy-MM-dd"
+        return f
+    }()
+
+    /// The staleness date for a task (#094): `Task.modified` when present
+    /// (`Date(timeIntervalSinceReferenceDate:)`), else `Task.created` parsed with
+    /// the minute-precision POSIX formatter, else the date-only POSIX formatter.
+    /// Returns `nil` when none yields a date. Pure value work.
+    static func taskStalenessDate(_ task: Task) -> Date? {
+        if let modified = task.modified {
+            return Date(timeIntervalSinceReferenceDate: modified)
+        }
+        guard let created = task.created?.trimmingCharacters(in: .whitespaces),
+              !created.isEmpty else { return nil }
+        if let date = createdMinuteFormatter.date(from: created) { return date }
+        return createdDateFormatter.date(from: created)
+    }
+
+    /// Orders `rows` by `sort` (#094), STABLY (enumerate for a stable secondary
+    /// key, like `sortByStaleness`). `.status` by `activePriority` descending;
+    /// `.project` by `projectName` ascending; `.staleness` by `taskStalenessDate`
+    /// NEWEST first with dateless rows LAST. Pure value work — no I/O, no SwiftUI.
+    static func sortRows(_ rows: [TaskRow], by sort: TaskSort) -> [TaskRow] {
+        rows.enumerated().sorted { lhs, rhs in
+            switch sort {
+            case .status:
+                let l = lhs.element.task.status?.activePriority ?? -1
+                let r = rhs.element.task.status?.activePriority ?? -1
+                if l != r { return l > r }
+                return lhs.offset < rhs.offset
+            case .project:
+                let l = lhs.element.projectName
+                let r = rhs.element.projectName
+                if l != r { return l < r }
+                return lhs.offset < rhs.offset
+            case .staleness:
+                let lDate = taskStalenessDate(lhs.element.task)
+                let rDate = taskStalenessDate(rhs.element.task)
+                switch (lDate, rDate) {
+                case let (l?, r?):
+                    if l != r { return l > r }   // newest first
+                    return lhs.offset < rhs.offset
+                case (.some, .none):
+                    return true                  // dated before dateless
+                case (.none, .some):
+                    return false
+                case (.none, .none):
+                    return lhs.offset < rhs.offset
+                }
+            }
+        }
+        .map(\.element)
+    }
+
+    /// Groups `rows` into titled sections by `group` (#094). `.status` collapses
+    /// `.review` + `.inReview` into one "Review" section (and `nil` status into a
+    /// trailing "Other" section); `.project` groups by `projectName`. Section
+    /// order and within-section row order are STABLE (first-appearance order).
+    /// Pure value work — no I/O, no SwiftUI.
+    static func groupRows(
+        _ rows: [TaskRow],
+        by group: TaskGroup
+    ) -> [(title: String, rows: [TaskRow])] {
+        var order: [String] = []
+        var buckets: [String: [TaskRow]] = [:]
+        for row in rows {
+            let title = sectionTitle(for: row, group: group)
+            if buckets[title] == nil {
+                buckets[title] = []
+                order.append(title)
+            }
+            buckets[title]?.append(row)
+        }
+        return order.map { (title: $0, rows: buckets[$0] ?? []) }
+    }
+
+    /// The section title a row lands in for a grouping dimension (#094).
+    private static func sectionTitle(for row: TaskRow, group: TaskGroup) -> String {
+        switch group {
+        case .project:
+            return row.projectName
+        case .status:
+            switch row.task.status {
+            case .review, .inReview: return "Review"
+            case .some(let status): return status.filterLabel
+            case .none: return "Other"
+            }
+        }
+    }
+
+    /// Resolves a sidebar selection against the live projects (#094): a
+    /// `.project(path)` whose path is NOT among the live projects falls back to
+    /// `.allProjects`. `.allProjects` and `.smart` are returned unchanged. Pure
+    /// value work — no I/O, no SwiftUI.
+    static func resolve(
+        _ selection: SidebarSelection,
+        in projects: [ProjectTasks]
+    ) -> SidebarSelection {
+        guard case .project(let path) = selection else { return selection }
+        return projects.contains { $0.projectPath == path } ? selection : .allProjects
     }
 }

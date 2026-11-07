@@ -2894,4 +2894,85 @@ final class PlansStoreTests: XCTestCase {
         RunLoop.main.run(until: Date().addingTimeInterval(0.2))
         XCTAssertEqual(fixture.recorder.calls.count, 1)
     }
+
+    // MARK: - Browser selection (#094, persisted to injected UserDefaults)
+
+    func testBrowserSelectionDefaultsToAllProjects() throws {
+        let reader = try makeReader(projectPaths: [])
+        let store = PlansStore(registryReader: reader, defaults: makeDefaults())
+
+        XCTAssertEqual(store.browserSelection, .allProjects)
+    }
+
+    func testSettingBrowserSelectionSmartPersistsAcrossStoreInstances() throws {
+        let reader = try makeReader(projectPaths: [])
+        let defaults = makeDefaults()
+
+        let store = PlansStore(registryReader: reader, defaults: defaults)
+        store.browserSelection = .smart(.review)
+
+        let reloaded = PlansStore(registryReader: reader, defaults: defaults)
+        XCTAssertEqual(reloaded.browserSelection, .smart(.review))
+    }
+
+    func testSettingBrowserSelectionProjectWithColonAndSlashPersists() throws {
+        let reader = try makeReader(projectPaths: [])
+        let defaults = makeDefaults()
+        let path = "/Users/x/My:Weird/Path"
+
+        let store = PlansStore(registryReader: reader, defaults: defaults)
+        store.browserSelection = .project(path)
+
+        let reloaded = PlansStore(registryReader: reader, defaults: defaults)
+        XCTAssertEqual(reloaded.browserSelection, .project(path))
+    }
+
+    func testBrowserSelectionDefaultsToAllOnGarbageStoredValue() throws {
+        let reader = try makeReader(projectPaths: [])
+        let defaults = makeDefaults()
+        defaults.set("totally-bogus", forKey: "browserSelection")
+
+        let store = PlansStore(registryReader: reader, defaults: defaults)
+        XCTAssertEqual(store.browserSelection, .allProjects)
+    }
+
+    // MARK: - Task list sort (#094, persisted to injected UserDefaults)
+
+    func testTaskSortDefaultsToStaleness() throws {
+        let reader = try makeReader(projectPaths: [])
+        let store = PlansStore(registryReader: reader, defaults: makeDefaults())
+
+        XCTAssertEqual(store.taskSort, .staleness)
+    }
+
+    func testSettingTaskSortPersistsAcrossStoreInstances() throws {
+        let reader = try makeReader(projectPaths: [])
+        let defaults = makeDefaults()
+
+        let store = PlansStore(registryReader: reader, defaults: defaults)
+        store.taskSort = .status
+
+        let reloaded = PlansStore(registryReader: reader, defaults: defaults)
+        XCTAssertEqual(reloaded.taskSort, .status)
+    }
+
+    // MARK: - Task list grouping (#094, persisted to injected UserDefaults)
+
+    func testTaskGroupDefaultsToProject() throws {
+        let reader = try makeReader(projectPaths: [])
+        let store = PlansStore(registryReader: reader, defaults: makeDefaults())
+
+        XCTAssertEqual(store.taskGroup, .project)
+    }
+
+    func testSettingTaskGroupPersistsAcrossStoreInstances() throws {
+        let reader = try makeReader(projectPaths: [])
+        let defaults = makeDefaults()
+
+        let store = PlansStore(registryReader: reader, defaults: defaults)
+        store.taskGroup = .status
+
+        let reloaded = PlansStore(registryReader: reader, defaults: defaults)
+        XCTAssertEqual(reloaded.taskGroup, .status)
+    }
 }
