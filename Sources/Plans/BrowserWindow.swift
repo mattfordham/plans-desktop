@@ -357,6 +357,8 @@ struct BrowserWindow: View {
                 project: store.projects.first { $0.projectPath == path },
                 onNewPlan: { newPlanRequest = NewPlanRequest(projectPath: $0) }
             )
+            // #098: a fresh list per project so its type filter doesn't carry over.
+            .id(path)
         }
     }
 
@@ -857,7 +859,13 @@ enum BrowserViewModel {
     /// `task.type` equals it, preserving `TaskParser`'s order. Does NOT re-sort
     /// and performs no I/O or SwiftUI work.
     static func activeRows(_ project: ProjectTasks, matchingType: TaskType?) -> [TaskRow] {
-        let rows = activeRows(project)
+        filterRows(activeRows(project), matchingType: matchingType)
+    }
+
+    /// Narrows `rows` to those whose task type is `matchingType`, preserving
+    /// order; a `nil` type passes every row through. Shared by the card's type
+    /// filter and the single-project `TaskListView`'s (#098).
+    static func filterRows(_ rows: [TaskRow], matchingType: TaskType?) -> [TaskRow] {
         guard let matchingType else { return rows }
         return rows.filter { $0.task.type == matchingType }
     }

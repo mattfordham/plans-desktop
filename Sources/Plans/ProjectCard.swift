@@ -100,16 +100,6 @@ struct ProjectCard: View {
         )
     }
 
-    /// The status counts to show in the header, in `glanceOrder`. EVERY status
-    /// is included; statuses absent from `counts` or with a `0` count surface as
-    /// a `0` and are rendered dimmed (50% white) rather than dropped.
-    ///
-    /// #098: delegates to the shared `BrowserViewModel.statusCounts(_:)` — the
-    /// single source of truth also used by the single-project `TaskListView`.
-    private var statusCounts: [(status: TaskStatus, count: Int)] {
-        BrowserViewModel.statusCounts(project)
-    }
-
     /// The clickable plan rows for this card: the active plans in `TaskParser`'s
     /// active order. Starring is a PROJECT-level concern (#035) that drives the
     /// sidebar's Favourites section and does not inject completed plans into
@@ -380,7 +370,9 @@ struct ProjectCard: View {
             // being a git project). Mirrors the header's treatment: the header is
             // FOLLOWED by a `Divider()`; the footer is PRECEDED by one.
             Divider()
-            footer
+            ProjectFooter(project: project)
+                // #087: re-inset by the card gutter — only the plan rows bleed full width.
+                .padding(.horizontal, ProjectCard.rowColumns.cardHorizontalPadding)
         }
         // Bottom padding matches the header's 14pt top gap. The footer is now
         // always the bottom-most element (a plain HStack with no vertical padding
@@ -498,73 +490,12 @@ struct ProjectCard: View {
 
             Spacer(minLength: 8)
 
-            typeFilterMenu
+            TaskTypeFilterMenu(selection: $typeFilter)
 
-            ForEach(statusCounts, id: \.status) { entry in
-                HStack(spacing: 4) {
-                    Image(systemName: entry.status.symbolName)
-                        .imageScale(.large)
-                        // Zero-count statuses dim to 10% white so they read as
-                        // present-but-empty; non-zero keep the vivid glance hue.
-                        .foregroundStyle(entry.count == 0 ? Color.white.opacity(0.1) : entry.status.glanceColor)
-                        .frame(width: 20, alignment: .center)
-                    Text("\(entry.count)")
-                        .font(.body)
-                        .foregroundStyle(entry.count == 0 ? Color.white.opacity(0.1) : Color.secondary)
-                }
-            }
+            ProjectStatusBadges(project: project)
         }
         // #087: re-inset by the card gutter — only the plan rows bleed full width.
         .padding(.horizontal, ProjectCard.rowColumns.cardHorizontalPadding)
-    }
-
-    /// #076: the per-card task-type filter control, placed in the header between
-    /// the `Spacer` and the (unfiltered) status count badges — i.e. to the LEFT of
-    /// the counts, so the badges keep the right edge they share with every other
-    /// card and the filter reads as a control rather than another readout. A
-    /// `Menu` modelled on
-    /// the `ProjectViewMode` ("All / Active / Starred") toolbar select in
-    /// `BrowserWindow`: an "All" reset entry (clears the filter) plus one entry per
-    /// `TaskType.allCases`, each a `Label` pairing the type's SF `symbolName` with
-    /// its text `label`.
-    ///
-    /// Like that select, the menu's own label renders the current selection as
-    /// visible TEXT beside its symbol (`.titleAndIcon`) rather than a bare glyph —
-    /// an unlabeled icon can't say WHICH type is active, which is the whole point
-    /// of the control. Unfiltered it reads "All"; filtered it reads the type's
-    /// symbol + name, accent-tinted while the list is actually narrowed. SF
-    /// Symbols (not the emoji `glyph`) so it matches the native toolbar chrome.
-    ///
-    /// Purely view state (§2 read-only): selecting an entry only sets the local
-    /// `typeFilter`, which the `rows` computed property feeds through the pure
-    /// `BrowserViewModel.activeRows(_:matchingType:)` helper. It NEVER mutates
-    /// `.plans/` and does NOT touch the header `statusCounts`.
-    @ViewBuilder
-    private var typeFilterMenu: some View {
-        Menu {
-            Button {
-                typeFilter = nil
-            } label: {
-                Label("All", systemImage: "square.grid.2x2")
-            }
-            ForEach(TaskType.allCases, id: \.self) { type in
-                Button {
-                    typeFilter = type
-                } label: {
-                    Label(type.label, systemImage: type.symbolName)
-                }
-            }
-        } label: {
-            Label(
-                typeFilter?.label ?? "All",
-                systemImage: typeFilter?.symbolName ?? "square.grid.2x2"
-            )
-            .labelStyle(.titleAndIcon)
-        }
-        .menuStyle(.borderlessButton)
-        .fixedSize()
-        .foregroundStyle(typeFilter == nil ? AnyShapeStyle(.primary) : AnyShapeStyle(.tint))
-        .help("Filter plans by type")
     }
 
     // MARK: - Capture ("+" new plan)
@@ -656,140 +587,6 @@ struct ProjectCard: View {
         }
         .help(failed ? "Capture failed — click for details, close to dismiss"
                      : "Show capture progress")
-    }
-
-    // MARK: - Footer (project star + git status)
-
-    /// The card footer row: the git status (when the project is a git repo)
-    /// pinned bottom-LEFT and the project toggles bottom-RIGHT, across from
-    /// each other. Git status is leading-aligned and the `Spacer` pushes the
-    /// star toggle to the trailing edge; a non-git project simply shows the star
-    /// alone. (#096 removed the focus toggle that sat beside the star.)
-    private var footer: some View {
-        HStack(spacing: 8) {
-            gitFooter
-            Spacer(minLength: 8)
-            starToggle
-        }
-        // #087: re-inset by the card gutter — only the plan rows bleed full width.
-        .padding(.horizontal, ProjectCard.rowColumns.cardHorizontalPadding)
-        .contextMenu { plansStorageActions }
-    }
-
-    /// The plans-storage actions offered from the footer's context menu: a
-    /// manual sync for branch-mode projects, and converting a local-mode project
-    /// with a remote to branch mode. Empty for every other project.
-    @ViewBuilder
-    private var plansStorageActions: some View {
-        if project.plansMode == .branch {
-            Button("Sync plans now") {
-                store.syncNow(projectPath: project.projectPath)
-            }
-            .disabled(store.syncSkipReason(for: project.projectPath, trigger: .manual) != nil)
-        }
-        if store.convertSkipReason(for: project.projectPath) == nil {
-            Button("Convert to tracked plans…") {
-                confirmAndConvert()
-            }
-        }
-    }
-
-    /// Asks for confirmation, then runs the migrate and reports its outcome.
-    /// Never retries: a failed convert leaves the user to read the error.
-    private func confirmAndConvert() {
-        let confirmation = Self.convertConfirmation
-        let alert = NSAlert()
-        alert.messageText = confirmation.title
-        alert.informativeText = confirmation.message
-        alert.addButton(withTitle: confirmation.confirmButton)
-        alert.addButton(withTitle: "Cancel")
-        guard alert.runModal() == .alertFirstButtonReturn else { return }
-
-        let started = store.convertToTrackedPlans(projectPath: project.projectPath) { result in
-            let report = Self.convertReport(for: result)
-            let reportAlert = NSAlert()
-            reportAlert.alertStyle = report.isError ? .warning : .informational
-            reportAlert.messageText = report.title
-            reportAlert.informativeText = report.message
-            reportAlert.addButton(withTitle: "OK")
-            reportAlert.runModal()
-        }
-        if !started {
-            cardLog.notice("convert not started for \(project.projectPath, privacy: .public)")
-        }
-    }
-
-    /// The branch-mode sync glyph, or the in-flight convert spinner. Tapping
-    /// the glyph syncs now (bypassing the debounce and any conflict back-off)
-    /// when a manual sync is allowed.
-    @ViewBuilder
-    private var plansSyncIndicator: some View {
-        if store.pausedPaths.contains(project.projectPath) {
-            HStack(spacing: 4) {
-                ProgressView()
-                    .controlSize(.mini)
-                Text("Converting plans…")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-            .help("Moving .plans onto a dedicated plans branch")
-        } else if let state = PlansSyncState.resolve(
-            mode: project.plansMode,
-            status: project.plansSync,
-            lastOutcome: store.lastSyncResult(for: project.projectPath)?.outcome,
-            isSyncing: store.syncingPaths.contains(project.projectPath)
-        ) {
-            let canSync = store.syncSkipReason(for: project.projectPath, trigger: .manual) == nil
-            let tooltip = PlansSyncState.tooltip(
-                for: state,
-                status: project.plansSync,
-                lastResult: store.lastSyncResult(for: project.projectPath)
-            )
-            HStack(spacing: 2) {
-                Image(systemName: state.symbolName)
-                    .imageScale(.small)
-                    .foregroundStyle(state.color)
-                if let counts = state.countText {
-                    Text(counts)
-                        .font(.caption.monospacedDigit())
-                        .foregroundStyle(state.color)
-                }
-            }
-            .contentShape(Rectangle())
-            .onTapGesture {
-                if canSync {
-                    store.syncNow(projectPath: project.projectPath)
-                }
-            }
-            .help(canSync ? tooltip + "\nClick to sync plans now." : tooltip)
-        }
-    }
-
-    /// The card's git status — the branch glyph + name plus
-    /// an orange dirty dot when the working tree is known-dirty (#026 moved this
-    /// out of the header). Rendered only when the project is a git repo
-    /// (`gitBranch != nil`); a `nil`/`false` `gitIsDirty` shows no dot. The
-    /// branch text truncates so it never crowds the card.
-    @ViewBuilder
-    private var gitFooter: some View {
-        if let branch = project.gitBranch {
-            HStack(spacing: 4) {
-                Image(systemName: "arrow.triangle.branch")
-                    .imageScale(.small)
-                    .foregroundStyle(.secondary)
-                Text(branch)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-                if project.gitIsDirty == true {
-                    Image(systemName: "circle.fill")
-                        .imageScale(.small)
-                        .foregroundStyle(.orange)
-                }
-                plansSyncIndicator
-            }
-        }
     }
 
     // MARK: - Body (the active plan rows, or the empty state)
@@ -993,6 +790,149 @@ struct ProjectCard: View {
         .padding(.leading, ProjectCard.rowColumns.rowBandLeadingMargin)
     }
 
+
+
+}
+
+/// The project footer row shared by a `ProjectCard` and the single-project
+/// `TaskListView` (#098): git status + plans-sync glyph bottom-left, the project
+/// star bottom-right, and the plans-storage context menu. Callers apply their
+/// own horizontal inset.
+struct ProjectFooter: View {
+    let project: ProjectTasks
+
+    @Environment(PlansStore.self) private var store
+
+    /// The card footer row: the git status (when the project is a git repo)
+    /// pinned bottom-LEFT and the project toggles bottom-RIGHT, across from
+    /// each other. Git status is leading-aligned and the `Spacer` pushes the
+    /// star toggle to the trailing edge; a non-git project simply shows the star
+    /// alone. (#096 removed the focus toggle that sat beside the star.)
+    var body: some View {
+        HStack(spacing: 8) {
+            gitFooter
+            Spacer(minLength: 8)
+            starToggle
+        }
+        .contextMenu { plansStorageActions }
+    }
+
+    /// The plans-storage actions offered from the footer's context menu: a
+    /// manual sync for branch-mode projects, and converting a local-mode project
+    /// with a remote to branch mode. Empty for every other project.
+    @ViewBuilder
+    private var plansStorageActions: some View {
+        if project.plansMode == .branch {
+            Button("Sync plans now") {
+                store.syncNow(projectPath: project.projectPath)
+            }
+            .disabled(store.syncSkipReason(for: project.projectPath, trigger: .manual) != nil)
+        }
+        if store.convertSkipReason(for: project.projectPath) == nil {
+            Button("Convert to tracked plans…") {
+                confirmAndConvert()
+            }
+        }
+    }
+
+    /// Asks for confirmation, then runs the migrate and reports its outcome.
+    /// Never retries: a failed convert leaves the user to read the error.
+    private func confirmAndConvert() {
+        let confirmation = ProjectCard.convertConfirmation
+        let alert = NSAlert()
+        alert.messageText = confirmation.title
+        alert.informativeText = confirmation.message
+        alert.addButton(withTitle: confirmation.confirmButton)
+        alert.addButton(withTitle: "Cancel")
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+
+        let started = store.convertToTrackedPlans(projectPath: project.projectPath) { result in
+            let report = ProjectCard.convertReport(for: result)
+            let reportAlert = NSAlert()
+            reportAlert.alertStyle = report.isError ? .warning : .informational
+            reportAlert.messageText = report.title
+            reportAlert.informativeText = report.message
+            reportAlert.addButton(withTitle: "OK")
+            reportAlert.runModal()
+        }
+        if !started {
+            cardLog.notice("convert not started for \(project.projectPath, privacy: .public)")
+        }
+    }
+
+    /// The branch-mode sync glyph, or the in-flight convert spinner. Tapping
+    /// the glyph syncs now (bypassing the debounce and any conflict back-off)
+    /// when a manual sync is allowed.
+    @ViewBuilder
+    private var plansSyncIndicator: some View {
+        if store.pausedPaths.contains(project.projectPath) {
+            HStack(spacing: 4) {
+                ProgressView()
+                    .controlSize(.mini)
+                Text("Converting plans…")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            .help("Moving .plans onto a dedicated plans branch")
+        } else if let state = PlansSyncState.resolve(
+            mode: project.plansMode,
+            status: project.plansSync,
+            lastOutcome: store.lastSyncResult(for: project.projectPath)?.outcome,
+            isSyncing: store.syncingPaths.contains(project.projectPath)
+        ) {
+            let canSync = store.syncSkipReason(for: project.projectPath, trigger: .manual) == nil
+            let tooltip = PlansSyncState.tooltip(
+                for: state,
+                status: project.plansSync,
+                lastResult: store.lastSyncResult(for: project.projectPath)
+            )
+            HStack(spacing: 2) {
+                Image(systemName: state.symbolName)
+                    .imageScale(.small)
+                    .foregroundStyle(state.color)
+                if let counts = state.countText {
+                    Text(counts)
+                        .font(.caption.monospacedDigit())
+                        .foregroundStyle(state.color)
+                }
+            }
+            .contentShape(Rectangle())
+            .onTapGesture {
+                if canSync {
+                    store.syncNow(projectPath: project.projectPath)
+                }
+            }
+            .help(canSync ? tooltip + "\nClick to sync plans now." : tooltip)
+        }
+    }
+
+    /// The card's git status — the branch glyph + name plus
+    /// an orange dirty dot when the working tree is known-dirty (#026 moved this
+    /// out of the header). Rendered only when the project is a git repo
+    /// (`gitBranch != nil`); a `nil`/`false` `gitIsDirty` shows no dot. The
+    /// branch text truncates so it never crowds the card.
+    @ViewBuilder
+    private var gitFooter: some View {
+        if let branch = project.gitBranch {
+            HStack(spacing: 4) {
+                Image(systemName: "arrow.triangle.branch")
+                    .imageScale(.small)
+                    .foregroundStyle(.secondary)
+                Text(branch)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                if project.gitIsDirty == true {
+                    Image(systemName: "circle.fill")
+                        .imageScale(.small)
+                        .foregroundStyle(.orange)
+                }
+                plansSyncIndicator
+            }
+        }
+    }
+
     /// The project star/unstar toggle (#035). A filled yellow `star.fill` when
     /// this project's path is in `store.starredProjectPaths`, otherwise an outline
     /// `star`. Tapping toggles membership of `project.projectPath` in the persisted
@@ -1013,8 +953,86 @@ struct ProjectCard: View {
             }
         }
     }
+}
 
+/// The task-type filter `Menu` shared by a `ProjectCard` header and the
+/// single-project `TaskListView` (#098), bound to the caller's view-local filter.
+struct TaskTypeFilterMenu: View {
+    /// #076: the per-card task-type filter control, placed in the header between
+    /// the `Spacer` and the (unfiltered) status count badges — i.e. to the LEFT of
+    /// the counts, so the badges keep the right edge they share with every other
+    /// card and the filter reads as a control rather than another readout. A
+    /// `Menu` modelled on
+    /// the `ProjectViewMode` ("All / Active / Starred") toolbar select in
+    /// `BrowserWindow`: an "All" reset entry (clears the filter) plus one entry per
+    /// `TaskType.allCases`, each a `Label` pairing the type's SF `symbolName` with
+    /// its text `label`.
+    ///
+    /// Like that select, the menu's own label renders the current selection as
+    /// visible TEXT beside its symbol (`.titleAndIcon`) rather than a bare glyph —
+    /// an unlabeled icon can't say WHICH type is active, which is the whole point
+    /// of the control. Unfiltered it reads "All"; filtered it reads the type's
+    /// symbol + name, accent-tinted while the list is actually narrowed. SF
+    /// Symbols (not the emoji `glyph`) so it matches the native toolbar chrome.
+    ///
+    /// Purely view state (§2 read-only): selecting an entry only sets the local
+    /// `selection`, which the `rows` computed property feeds through the pure
+    /// `BrowserViewModel.activeRows(_:matchingType:)` helper. It NEVER mutates
+    /// `.plans/` and does NOT touch the header `statusCounts`.
+    @Binding var selection: TaskType?
 
+    var body: some View {
+        Menu {
+            Button {
+                selection = nil
+            } label: {
+                Label("All", systemImage: "square.grid.2x2")
+            }
+            ForEach(TaskType.allCases, id: \.self) { type in
+                Button {
+                    selection = type
+                } label: {
+                    Label(type.label, systemImage: type.symbolName)
+                }
+            }
+        } label: {
+            Label(
+                selection?.label ?? "All",
+                systemImage: selection?.symbolName ?? "square.grid.2x2"
+            )
+            .labelStyle(.titleAndIcon)
+        }
+        .menuStyle(.borderlessButton)
+        .fixedSize()
+        .foregroundStyle(selection == nil ? AnyShapeStyle(.primary) : AnyShapeStyle(.tint))
+        .help("Filter plans by type")
+    }
+}
+
+/// The per-status count badges for one project, in `glanceOrder` (#098: shared
+/// by the card header and the single-project `TaskListView`). Zero-count
+/// statuses dim to 10% white so they read as present-but-empty; non-zero keep
+/// the vivid glance hue. `fixedSize` so a narrow container never squeezes the
+/// counts into clipped stubs.
+struct ProjectStatusBadges: View {
+    let project: ProjectTasks
+
+    var body: some View {
+        HStack(spacing: 8) {
+            ForEach(BrowserViewModel.statusCounts(project), id: \.status) { entry in
+                HStack(spacing: 4) {
+                    Image(systemName: entry.status.symbolName)
+                        .imageScale(.large)
+                        .foregroundStyle(entry.count == 0 ? Color.white.opacity(0.1) : entry.status.glanceColor)
+                        .frame(width: 20, alignment: .center)
+                    Text("\(entry.count)")
+                        .font(.body)
+                        .foregroundStyle(entry.count == 0 ? Color.white.opacity(0.1) : Color.secondary)
+                }
+            }
+        }
+        .fixedSize()
+    }
 }
 
 /// The project star/unstar glyph (#035). A `Button` with `.buttonStyle(.plain)`

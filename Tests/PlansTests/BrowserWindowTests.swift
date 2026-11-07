@@ -441,6 +441,22 @@ final class BrowserWindowTests: XCTestCase {
         XCTAssertEqual(filtered.map(\.id), ["/p/001", "/p/003"])
     }
 
+    // MARK: - filterRows(matchingType:) — single-project list type filter (#098)
+
+    /// A `nil` filter passes every row through unchanged.
+    func testFilterRowsMatchingNilReturnsAllRows() {
+        let rows = BrowserViewModel.activeRows(mixedTypeProject())
+        let filtered = BrowserViewModel.filterRows(rows, matchingType: nil)
+        XCTAssertEqual(filtered.map(\.id), ["/p/001", "/p/002"])
+    }
+
+    /// A type filter keeps only matching rows, in their original order.
+    func testFilterRowsMatchingTypeKeepsOnlyMatchingRows() {
+        let rows = BrowserViewModel.activeRows(mixedTypeProject())
+        XCTAssertEqual(BrowserViewModel.filterRows(rows, matchingType: .feature).map(\.id), ["/p/002"])
+        XCTAssertTrue(BrowserViewModel.filterRows(rows, matchingType: .chore).isEmpty)
+    }
+
     // MARK: - visibleUnderViewMode (#072/#096: one labelled All / Active view mode)
 
     /// `.all` keeps every project, including one with NO outstanding work.

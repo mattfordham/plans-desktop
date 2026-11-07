@@ -203,13 +203,27 @@ struct TaskListView: View {
     /// The shared store, read for the persisted sort/group selection.
     @Environment(PlansStore.self) private var store
 
+    /// #098: the single-project type filter, view-local like a card's. `nil` is
+    /// "All". Reset per project by the caller's `.id(projectPath)`.
+    @State private var typeFilter: TaskType? = nil
+
+    /// The rows after the single-project type filter (a no-op for smart views,
+    /// which never show the filter).
+    private var visibleRows: [TaskRow] {
+        BrowserViewModel.filterRows(rows, matchingType: project == nil ? nil : typeFilter)
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
+            if let project {
+                projectHeader(project)
+                Divider()
+            }
             controlBar
             Divider()
-            if rows.isEmpty {
+            if visibleRows.isEmpty {
                 // Centered muted empty state, mirroring the grid's "No projects".
-                Text("No tasks")
+                Text(rows.isEmpty ? "No tasks" : "No matching tasks")
                     .foregroundStyle(.secondary)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
@@ -223,7 +237,29 @@ struct TaskListView: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
                 }
             }
+            if let project {
+                Divider()
+                ProjectFooter(project: project)
+                    .padding(.horizontal, ProjectCard.rowColumns.cardHorizontalPadding)
+                    .padding(.vertical, 8)
+            }
         }
+    }
+
+    /// #098: single-project only — the card header's controls on their own row
+    /// above sort/group, so the fixed-size count badges always have room: the
+    /// "+" new-plan glyph leading, the type filter and status badges trailing.
+    private func projectHeader(_ project: ProjectTasks) -> some View {
+        HStack(spacing: 8) {
+            if let onNewPlan {
+                CaptureGlyph { onNewPlan(project.projectPath) }
+            }
+            Spacer(minLength: 8)
+            TaskTypeFilterMenu(selection: $typeFilter)
+            ProjectStatusBadges(project: project)
+        }
+        .padding(.horizontal, ProjectCard.rowColumns.cardHorizontalPadding)
+        .padding(.vertical, 8)
     }
 
     /// The sort + group control bar: two `Menu`s mirroring the `ProjectViewMode`
@@ -232,13 +268,6 @@ struct TaskListView: View {
     @ViewBuilder
     private var controlBar: some View {
         HStack(spacing: 12) {
-            // #098: single-project only — the card header's exact "+" new-plan
-            // affordance, leading the sort/group menus. Gated on both props so the
-            // cross-project smart-view bar is byte-for-byte unchanged.
-            if let project, let onNewPlan {
-                CaptureGlyph { onNewPlan(project.projectPath) }
-            }
-
             Menu {
                 ForEach(TaskSort.allCases, id: \.rawValue) { sort in
                     Button {
@@ -272,25 +301,6 @@ struct TaskListView: View {
             .help("Group tasks")
 
             Spacer(minLength: 0)
-
-            // #098: single-project only — the per-status count badges, trailing the
-            // bar exactly as they trail the card header. Same view vocabulary as
-            // `ProjectCard`'s header badges (symbol in `glanceColor`, dimmed to 10%
-            // white at zero, count text) so a project reads identically on its card
-            // and in this single-project list.
-            if let project {
-                ForEach(BrowserViewModel.statusCounts(project), id: \.status) { entry in
-                    HStack(spacing: 4) {
-                        Image(systemName: entry.status.symbolName)
-                            .imageScale(.large)
-                            .foregroundStyle(entry.count == 0 ? Color.white.opacity(0.1) : entry.status.glanceColor)
-                            .frame(width: 20, alignment: .center)
-                        Text("\(entry.count)")
-                            .font(.body)
-                            .foregroundStyle(entry.count == 0 ? Color.white.opacity(0.1) : Color.secondary)
-                    }
-                }
-            }
         }
         .padding(.horizontal, ProjectCard.rowColumns.cardHorizontalPadding)
         .padding(.vertical, 8)
@@ -298,7 +308,7 @@ struct TaskListView: View {
 
     /// The sorted rows grouped into titled sections for the current selection.
     private var sections: [(title: String, rows: [TaskRow])] {
-        let sorted = BrowserViewModel.sortRows(rows, by: store.taskSort)
+        let sorted = BrowserViewModel.sortRows(visibleRows, by: store.taskSort)
         return BrowserViewModel.groupRows(sorted, by: store.taskGroup)
     }
 
