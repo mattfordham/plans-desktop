@@ -224,6 +224,35 @@ enum RunMode: String {
     }
 }
 
+extension RunMode {
+    /// The present-participle verb for a run of this mode ("Executing",
+    /// "Capturing & elaborating", …) — the shared label used by the run-progress
+    /// dialog and the toolbar's live-runs indicator.
+    var activityVerb: String {
+        switch self {
+        case .execute: return "Executing"
+        case .elaborate: return "Elaborating"
+        case .reElaborate, .reElaborateReview: return "Refining"
+        case .capture: return "Capturing"
+        case .captureElaborate: return "Capturing & elaborating"
+        case .executeYolo: return "Capturing & executing"
+        case .delete: return "Deleting"
+        case .backlog: return "Backlogging"
+        case .restore: return "Restoring"
+        }
+    }
+}
+
+/// A plain-value snapshot of one in-flight run — what the toolbar's live-runs
+/// indicator needs, decoupled from the `Process`-owning `TaskRun` so the
+/// mapping to display items is unit-testable without spawning `node`.
+struct RunSnapshot: Equatable {
+    let projectPath: String
+    let taskID: String
+    let mode: RunMode
+    let description: String?
+}
+
 /// A `RunEvent` paired with a fresh `UUID` so the SwiftUI log list can iterate
 /// `runner.lines` with stable identity (chosen over view-side `.enumerated()`
 /// so appends don't re-key earlier rows). One is created per decoded line.
@@ -1023,6 +1052,16 @@ final class TaskRunner {
     /// the live spinner state never disagree. Finished-but-not-dismissed runs stay
     /// in `runs` but are not counted (their `isRunning` is false).
     var runningRunCount: Int { runs.values.filter { $0.isRunning }.count }
+
+    /// Snapshots of every run currently in flight (finished runs excluded), for
+    /// the browser toolbar's live-runs indicator.
+    var runningSnapshots: [RunSnapshot] {
+        runs.values.compactMap { run in
+            guard run.isRunning, let path = run.runProjectPath else { return nil }
+            return RunSnapshot(projectPath: path, taskID: run.taskID,
+                               mode: run.mode, description: run.description)
+        }
+    }
 
     /// Convenience over `runningRunCount` for the common "is anything running?"
     /// branch in the terminate hook.

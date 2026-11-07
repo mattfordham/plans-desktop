@@ -72,6 +72,9 @@ struct BrowserWindow: View {
     /// deliberately NOT persisted to UserDefaults, mirroring `newPlanRequest`.
     @State private var selectedRowID: TaskRow.ID? = nil
 
+    /// The live run registry, read by the toolbar's active-runs indicator (#101).
+    @Environment(TaskRunner.self) private var runner
+
     var body: some View {
         // #094: a smart-view/project sidebar on the left, and a content column
         // that dispatches on the persisted
@@ -196,19 +199,20 @@ struct BrowserWindow: View {
                     .foregroundStyle(store.showBacklog ? AnyShapeStyle(.tint) : AnyShapeStyle(.primary))
                     .help("Show or hide backlogged (deferred) plans")
                 }
-                // #101: a window-wide indicator of how many plans are currently
-                // in progress across EVERY project, suppressed at zero (mirroring
-                // `smartViewRow` / `iconSpaceCounts`). It opens a popover rather
-                // than a `Menu`: NSMenu items can't wrap or cap their width, so
-                // long plan titles produced an unbounded single-line menu.
-                let runningRows = BrowserViewModel.runningPlanRows(in: store.projects)
-                if !runningRows.isEmpty {
+                // #101: a window-wide indicator of what the app is actively
+                // RUNNING right now (captures, elaborations, executions, …) —
+                // live `TaskRunner` runs, NOT plans whose status merely reads
+                // in-progress. Suppressed when nothing is running. It opens a
+                // fixed-width popover (not a `Menu`) so long titles can wrap.
+                let activeRuns = BrowserViewModel.activeRunItems(
+                    from: runner.runningSnapshots, projects: store.projects)
+                if !activeRuns.isEmpty {
                     ToolbarItem {
-                        RunningPlansIndicator(rows: runningRows) { row in
-                            // Select the cross-project In-progress smart view,
-                            // then open this plan in the detail column.
-                            store.browserSelection = .smart(.inProgress)
-                            selectedRowID = row.id
+                        ActiveRunsIndicator(items: activeRuns) { item in
+                            // Show the run's project; for a run on an existing
+                            // plan, also open that plan in the detail column.
+                            store.browserSelection = .project(item.projectPath)
+                            selectedRowID = item.rowID
                         }
                     }
                 }
@@ -624,12 +628,25 @@ enum SidebarSelection: Equatable, Hashable {
 /// Pure, SwiftUI-free view-model helpers for the browser so the filter/sort
 /// logic is unit-testable as plain values (segment 2 tests these directly).
 /// This namespace performs NO I/O and never mutates `.plans/` data.
-/// The toolbar's running-plans indicator (#101): the `.inProgress` glyph plus a
-/// count, opening a fixed-width popover that lists each running plan with its
-/// title wrapping onto multiple lines and the project name beneath.
-private struct RunningPlansIndicator: View {
-    let rows: [TaskRow]
-    let onOpen: (TaskRow) -> Void
+/// One in-flight run as listed by the toolbar's active-runs indicator (#101).
+struct ActiveRunItem: Identifiable, Equatable {
+    /// The run's `TaskRunner.runKey`, unique per run.
+    let id: String
+    let verb: String
+    let title: String
+    let projectName: String
+    let projectPath: String
+    /// The plan row to open on click, or `nil` for a capture (no plan yet) or a
+    /// task not currently listed.
+    let rowID: TaskRow.ID?
+}
+
+/// The toolbar's active-runs indicator (#101): a spinner-style glyph plus the
+/// number of runs in flight, opening a fixed-width popover that lists each run
+/// with its verb, a wrapping title and its project.
+private struct ActiveRunsIndicator: View {
+    let items: [ActiveRunItem]
+    let onOpen: (ActiveRunItem) -> Void
 
     @State private var isOpen = false
 
@@ -637,18 +654,18 @@ private struct RunningPlansIndicator: View {
         Button {
             isOpen.toggle()
         } label: {
-            Label("\(rows.count)", systemImage: TaskStatus.inProgress.symbolName)
+            Label("\(items.count)", systemImage: TaskStatus.inProgress.symbolName)
                 .labelStyle(.titleAndIcon)
         }
         .foregroundStyle(TaskStatus.inProgress.glanceColor)
-        .help("Plans currently in progress across all projects")
+        .help("Work the app is running right now")
         .popover(isPresented: $isOpen, arrowEdge: .bottom) {
             ScrollView {
                 VStack(alignment: .leading, spacing: 2) {
-                    ForEach(rows) { row in
-                        RunningPlanRow(row: row) {
+                    ForEach(items) { item in
+                        ActiveRunRow(item: item) {
                             isOpen = false
-                            onOpen(row)
+                            onOpen(item)
                         }
                     }
                 }
@@ -661,9 +678,9 @@ private struct RunningPlansIndicator: View {
     }
 }
 
-/// One wrapping row in the running-plans popover, highlighted on hover.
-private struct RunningPlanRow: View {
-    let row: TaskRow
+/// One wrapping row in the active-runs popover, highlighted on hover.
+private struct ActiveRunRow: View {
+    let item: ActiveRunItem
     let onOpen: () -> Void
 
     @State private var isHovered = false
@@ -671,13 +688,13 @@ private struct RunningPlanRow: View {
     var body: some View {
         Button(action: onOpen) {
             HStack(alignment: .firstTextBaseline, spacing: 8) {
-                Image(systemName: TaskStatus.inProgress.symbolName)
-                    .foregroundStyle(TaskStatus.inProgress.glanceColor)
+                ProgressView()
+                    .controlSize(.mini)
                 VStack(alignment: .leading, spacing: 2) {
-                    Text(row.title ?? row.task.id)
+                    Text(item.title)
                         .fixedSize(horizontal: false, vertical: true)
                         .multilineTextAlignment(.leading)
-                    Text(row.projectName)
+                    Text("\(item.verb) · \(item.projectName)")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
@@ -1071,13 +1088,38 @@ enum BrowserViewModel {
         }
     }
 
-    /// The currently-running (in-progress) plan rows across every project
-    /// (#101), in project order — the source for the top-bar running-count
-    /// indicator and its dropdown. A thin alias over `rows(in:matching:)` with
-    /// the `.inProgress` lens so the indicator and the In-progress smart view
-    /// never diverge. Pure value work — no I/O, no SwiftUI.
-    static func runningPlanRows(in projects: [ProjectTasks]) -> [TaskRow] {
-        rows(in: projects, matching: .inProgress)
+    /// Maps in-flight run snapshots to the toolbar indicator's items (#101).
+    /// A run on an existing task resolves its title and row from `projects`
+    /// (falling back to `#id`); a capture shows its description. Ordered by
+    /// project name then title so the list is stable across polls.
+    static func activeRunItems(from runs: [RunSnapshot], projects: [ProjectTasks]) -> [ActiveRunItem] {
+        let byPath = Dictionary(projects.map { ($0.projectPath, $0) }, uniquingKeysWith: { a, _ in a })
+        let items = runs.map { run -> ActiveRunItem in
+            let project = byPath[run.projectPath]
+            let projectName = project?.projectName
+                ?? URL(fileURLWithPath: run.projectPath).lastPathComponent
+            let isCapture = TaskRunner.isSyntheticCaptureID(run.taskID)
+            let task = isCapture ? nil : project.flatMap { p in
+                (p.activeTasks + p.backloggedTasks + p.tasks).first { $0.id == run.taskID }
+            }
+            let title: String
+            if isCapture {
+                title = run.description ?? run.mode.activityVerb
+            } else {
+                title = task?.title ?? "#\(run.taskID)"
+            }
+            return ActiveRunItem(
+                id: TaskRunner.runKey(projectPath: run.projectPath, taskID: run.taskID),
+                verb: run.mode.activityVerb,
+                title: title,
+                projectName: projectName,
+                projectPath: run.projectPath,
+                rowID: task.map { _ in run.projectPath + "/" + run.taskID }
+            )
+        }
+        return items.sorted {
+            ($0.projectName, $0.title) < ($1.projectName, $1.title)
+        }
     }
 
     // MARK: - Task staleness / sorting / grouping (#094)

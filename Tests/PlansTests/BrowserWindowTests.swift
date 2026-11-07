@@ -1251,36 +1251,78 @@ final class BrowserWindowTests: XCTestCase {
         XCTAssertEqual(rows.map(\.id), ["/a/001", "/b/003"])
     }
 
-    // MARK: - (#101) runningPlanRows: the top-bar running-count indicator
+    // MARK: - (#101) activeRunItems: the top-bar live-runs indicator
 
-    /// `runningPlanRows` returns exactly the in-progress rows across every
-    /// project, in project order — identical to the `.inProgress` smart view.
-    func testRunningPlanRowsAreInProgressRowsInProjectOrder() {
+    /// A run on an existing task resolves to that task's row: its title, its
+    /// project name, the mode verb, and the row id to open in the detail column.
+    func testActiveRunItemForExistingTaskResolvesItsRow() {
         let a = makeProject(
             path: "/a", name: "A",
-            activeTasks: [makeTask(id: "001", status: .inProgress),
-                          makeTask(id: "002", status: .review)]
+            activeTasks: [makeTask(id: "001", title: "Fix the thing", status: .pending)]
         )
-        let b = makeProject(
-            path: "/b", name: "B",
-            activeTasks: [makeTask(id: "003", status: .inProgress)]
+        let items = BrowserViewModel.activeRunItems(
+            from: [RunSnapshot(projectPath: "/a", taskID: "001", mode: .elaborate, description: nil)],
+            projects: [a]
         )
-        let rows = BrowserViewModel.runningPlanRows(in: [a, b])
-        XCTAssertEqual(rows.map(\.id), ["/a/001", "/b/003"])
+        XCTAssertEqual(items.count, 1)
+        XCTAssertEqual(items[0].verb, "Elaborating")
+        XCTAssertEqual(items[0].title, "Fix the thing")
+        XCTAssertEqual(items[0].projectName, "A")
+        XCTAssertEqual(items[0].projectPath, "/a")
+        XCTAssertEqual(items[0].rowID, "/a/001")
     }
 
-    /// With no in-progress task in any project, `runningPlanRows` is empty — the
-    /// indicator is suppressed at zero.
-    func testRunningPlanRowsEmptyWhenNothingInProgress() {
-        let a = makeProject(
-            path: "/a", name: "A",
-            activeTasks: [makeTask(id: "001", status: .review)]
+    /// A capture run has no task yet: it shows its description, has no row to
+    /// open, and still names its project.
+    func testActiveRunItemForCaptureUsesDescriptionAndHasNoRow() {
+        let a = makeProject(path: "/a", name: "A")
+        let items = BrowserViewModel.activeRunItems(
+            from: [RunSnapshot(projectPath: "/a", taskID: "capture:/a:XYZ",
+                               mode: .captureElaborate, description: "Add dark mode")],
+            projects: [a]
         )
-        let b = makeProject(
-            path: "/b", name: "B",
-            activeTasks: [makeTask(id: "002", status: .pending)]
+        XCTAssertEqual(items.map(\.verb), ["Capturing & elaborating"])
+        XCTAssertEqual(items.map(\.title), ["Add dark mode"])
+        XCTAssertEqual(items.map(\.projectName), ["A"])
+        XCTAssertNil(items[0].rowID)
+    }
+
+    /// A run whose task is not (or no longer) listed falls back to `#id` and the
+    /// project path's last component, so the row is never blank.
+    func testActiveRunItemFallsBackWhenTaskOrProjectUnknown() {
+        let items = BrowserViewModel.activeRunItems(
+            from: [RunSnapshot(projectPath: "/x/proj", taskID: "042", mode: .execute, description: nil)],
+            projects: []
         )
-        XCTAssertTrue(BrowserViewModel.runningPlanRows(in: [a, b]).isEmpty)
+        XCTAssertEqual(items.map(\.title), ["#042"])
+        XCTAssertEqual(items.map(\.projectName), ["proj"])
+        XCTAssertNil(items[0].rowID)
+    }
+
+    /// Items are ordered by project name then title, so the list is stable
+    /// across polls regardless of dictionary order.
+    func testActiveRunItemsAreStablyOrdered() {
+        let a = makeProject(path: "/a", name: "Alpha",
+                            activeTasks: [makeTask(id: "002", title: "Zed"),
+                                          makeTask(id: "001", title: "Apple")])
+        let b = makeProject(path: "/b", name: "Beta",
+                            activeTasks: [makeTask(id: "003", title: "Mid")])
+        let items = BrowserViewModel.activeRunItems(
+            from: [RunSnapshot(projectPath: "/b", taskID: "003", mode: .execute, description: nil),
+                   RunSnapshot(projectPath: "/a", taskID: "002", mode: .execute, description: nil),
+                   RunSnapshot(projectPath: "/a", taskID: "001", mode: .execute, description: nil)],
+            projects: [a, b]
+        )
+        XCTAssertEqual(items.map(\.title), ["Apple", "Zed", "Mid"])
+    }
+
+    /// Every run mode has a present-participle verb for the indicator.
+    func testRunModeActivityVerbs() {
+        XCTAssertEqual(RunMode.execute.activityVerb, "Executing")
+        XCTAssertEqual(RunMode.capture.activityVerb, "Capturing")
+        XCTAssertEqual(RunMode.executeYolo.activityVerb, "Capturing & executing")
+        XCTAssertEqual(RunMode.reElaborate.activityVerb, "Refining")
+        XCTAssertEqual(RunMode.delete.activityVerb, "Deleting")
     }
 
     func testSmartViewReviewCombinesReviewAndInReview() {

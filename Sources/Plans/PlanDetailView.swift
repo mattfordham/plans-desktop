@@ -1096,17 +1096,7 @@ struct RunProgressSheet: View {
     /// / "Capturing & elaborating" / "Capturing & executing" / "Deleting" /
     /// "Backlogging" / "Restoring").
     private var modeVerb: String {
-        switch run?.mode {
-        case .elaborate: return "Elaborating"
-        case .reElaborate, .reElaborateReview: return "Refining"
-        case .capture: return "Capturing"
-        case .captureElaborate: return "Capturing & elaborating"
-        case .executeYolo: return "Capturing & executing"
-        case .delete: return "Deleting"
-        case .backlog: return "Backlogging"
-        case .restore: return "Restoring"
-        case .execute, .none: return "Executing"
-        }
+        run?.mode.activityVerb ?? RunMode.execute.activityVerb
     }
 
     /// The dialog title. Capture / captureElaborate / executeYolo runs have no
