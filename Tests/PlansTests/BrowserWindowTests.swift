@@ -1251,6 +1251,38 @@ final class BrowserWindowTests: XCTestCase {
         XCTAssertEqual(rows.map(\.id), ["/a/001", "/b/003"])
     }
 
+    // MARK: - (#101) runningPlanRows: the top-bar running-count indicator
+
+    /// `runningPlanRows` returns exactly the in-progress rows across every
+    /// project, in project order — identical to the `.inProgress` smart view.
+    func testRunningPlanRowsAreInProgressRowsInProjectOrder() {
+        let a = makeProject(
+            path: "/a", name: "A",
+            activeTasks: [makeTask(id: "001", status: .inProgress),
+                          makeTask(id: "002", status: .review)]
+        )
+        let b = makeProject(
+            path: "/b", name: "B",
+            activeTasks: [makeTask(id: "003", status: .inProgress)]
+        )
+        let rows = BrowserViewModel.runningPlanRows(in: [a, b])
+        XCTAssertEqual(rows.map(\.id), ["/a/001", "/b/003"])
+    }
+
+    /// With no in-progress task in any project, `runningPlanRows` is empty — the
+    /// indicator is suppressed at zero.
+    func testRunningPlanRowsEmptyWhenNothingInProgress() {
+        let a = makeProject(
+            path: "/a", name: "A",
+            activeTasks: [makeTask(id: "001", status: .review)]
+        )
+        let b = makeProject(
+            path: "/b", name: "B",
+            activeTasks: [makeTask(id: "002", status: .pending)]
+        )
+        XCTAssertTrue(BrowserViewModel.runningPlanRows(in: [a, b]).isEmpty)
+    }
+
     func testSmartViewReviewCombinesReviewAndInReview() {
         let a = makeProject(
             path: "/a", name: "A",

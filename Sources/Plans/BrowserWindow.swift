@@ -196,6 +196,40 @@ struct BrowserWindow: View {
                     .foregroundStyle(store.showBacklog ? AnyShapeStyle(.tint) : AnyShapeStyle(.primary))
                     .help("Show or hide backlogged (deferred) plans")
                 }
+                // #101: a window-wide indicator of how many plans are currently
+                // in progress across EVERY project. Its label is the shared
+                // `.inProgress` glyph + a running count, tinted amber from the
+                // status vocabulary (never inlined). The whole item is SUPPRESSED
+                // at zero — mirroring `smartViewRow` / `iconSpaceCounts`, which
+                // hide a zero count. The dropdown lists each running plan; a tap
+                // selects the In-progress smart view and opens that plan's detail.
+                let runningRows = BrowserViewModel.runningPlanRows(in: store.projects)
+                if !runningRows.isEmpty {
+                    ToolbarItem {
+                        Menu {
+                            ForEach(runningRows) { row in
+                                Button {
+                                    // Select the cross-project In-progress smart
+                                    // view, then open this plan in the detail column.
+                                    store.browserSelection = .smart(.inProgress)
+                                    selectedRowID = row.id
+                                } label: {
+                                    Label {
+                                        Text("\(row.projectName) — \(row.title ?? row.task.id)")
+                                    } icon: {
+                                        Image(systemName: TaskStatus.inProgress.symbolName)
+                                            .foregroundStyle(TaskStatus.inProgress.glanceColor)
+                                    }
+                                }
+                            }
+                        } label: {
+                            Label("\(runningRows.count)", systemImage: TaskStatus.inProgress.symbolName)
+                                .labelStyle(.titleAndIcon)
+                        }
+                        .foregroundStyle(TaskStatus.inProgress.glanceColor)
+                        .help("Plans currently in progress across all projects")
+                    }
+                }
             }
     }
 
@@ -981,6 +1015,15 @@ enum BrowserViewModel {
             return projects.flatMap { activeRows($0) }
                 .filter { $0.task.failure != nil }
         }
+    }
+
+    /// The currently-running (in-progress) plan rows across every project
+    /// (#101), in project order — the source for the top-bar running-count
+    /// indicator and its dropdown. A thin alias over `rows(in:matching:)` with
+    /// the `.inProgress` lens so the indicator and the In-progress smart view
+    /// never diverge. Pure value work — no I/O, no SwiftUI.
+    static func runningPlanRows(in projects: [ProjectTasks]) -> [TaskRow] {
+        rows(in: projects, matching: .inProgress)
     }
 
     // MARK: - Task staleness / sorting / grouping (#094)
