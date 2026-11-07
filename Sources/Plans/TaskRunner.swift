@@ -46,9 +46,15 @@ enum RunEvent: Codable, Equatable {
     /// The agent's clean final answer, emitted on success just before `done`.
     /// Unlike the `text` chunks it excludes intermediate narration.
     case reply(text: String, sessionID: String)
+    /// A NON-terminal signal (task #100): the launcher created (captured) a task
+    /// and is reporting its authoritative real task id. Carried per-run so a live
+    /// description-driven capture can re-key off its synthetic `capture:` key
+    /// directly to this id — bypassing the ambiguous baseline-diff guard when two
+    /// captures overlap. The run continues (and still finishes) after reporting.
+    case captured(taskID: String)
 
     private enum CodingKeys: String, CodingKey {
-        case kind, tool, detail, chunk, costUsd, turns, stopReason, message, sessionId, text
+        case kind, tool, detail, chunk, costUsd, turns, stopReason, message, sessionId, text, taskId
     }
 
     init(from decoder: Decoder) throws {
@@ -81,6 +87,10 @@ enum RunEvent: Codable, Equatable {
             let text = try container.decode(String.self, forKey: .text)
             let sessionID = try container.decode(String.self, forKey: .sessionId)
             self = .reply(text: text, sessionID: sessionID)
+        case "captured":
+            // Task #100: the launcher's reported real task id.
+            let taskID = try container.decode(String.self, forKey: .taskId)
+            self = .captured(taskID: taskID)
         default:
             // Unknown `kind`: throw a clear DecodingError. The caller
             // (`RunEvent.parseLines`) catches per-line decode failures and skips
@@ -122,6 +132,9 @@ enum RunEvent: Codable, Equatable {
             try container.encode("reply", forKey: .kind)
             try container.encode(text, forKey: .text)
             try container.encode(sessionID, forKey: .sessionId)
+        case let .captured(taskID):
+            try container.encode("captured", forKey: .kind)
+            try container.encode(taskID, forKey: .taskId)
         }
     }
 
@@ -399,6 +412,15 @@ final class TaskRun {
     /// `nil` for a first discussion turn and for every other mode (ignored by
     /// the argument builder for non-discuss modes).
     let resume: String?
+
+    /// The authoritative real task id the launcher reported via a `captured`
+    /// NDJSON event (task #100), or `nil` if none has arrived. For a live
+    /// description-driven capture this is the id reconciliation prefers to re-key
+    /// off its synthetic `capture:` key — bypassing the ambiguous baseline-diff
+    /// guard when two captures overlap and both new ids are present at reconcile
+    /// time (the bug: neither live run ever handed off). Internal bookkeeping, not
+    /// part of the observable UI surface.
+    var reportedTaskID: String?
 
     /// Bounded fallback counter for reconciliation. A finished capture that never
     /// observes a new task id (e.g. the underlying run failed, or plans-cc reused
@@ -878,6 +900,11 @@ final class TaskRun {
             // Informational only: the reply never affects `error` / `summary`.
             reply = text
             sessionID = id
+        case let .captured(taskID):
+            // The launcher's authoritative real task id (task #100). NON-terminal
+            // like `.denied`: record it for reconciliation's live-capture hand-off
+            // but do NOT touch `error` or `summary` — the run keeps running.
+            reportedTaskID = taskID
         case .activity, .text:
             break
         }
@@ -1609,10 +1636,25 @@ final class TaskRunner {
                 .subtracting(claimedByProject[projectPath] ?? [])
 
             if run.isRunning {
-                // Hand off a live capture by re-keying to the real id — but only
-                // when it can be attributed unambiguously (one running capture
-                // for the project, one new id). Never touch the bounded fallback
-                // for a live run.
+                // Hand off a live capture by re-keying to the real id. Prefer the
+                // run's OWN authoritative `reportedTaskID` (task #100, from the
+                // `captured` event): it names the id THIS run created, so it
+                // re-keys directly even when two captures overlap — the exact case
+                // the baseline-diff guard below cannot disambiguate (two running
+                // captures, both new ids present ⇒ neither ever handed off). The
+                // id must still be genuinely new for the project (present now,
+                // absent from the baseline) and not already claimed by another run
+                // this pass, so two runs never claim the same id.
+                if let reportedID = run.reportedTaskID,
+                   currentIDs.contains(reportedID),
+                   newIDs.contains(reportedID) {
+                    result.toRekey[run.taskID] = reportedID
+                    claimedByProject[projectPath, default: []].insert(reportedID)
+                    continue
+                }
+                // Fallback (no reported id): re-key only when it can be attributed
+                // unambiguously (one running capture for the project, one new id).
+                // Never touch the bounded fallback for a live run.
                 if runningCapturesByProject[projectPath] == 1, newIDs.count == 1,
                    let realID = newIDs.first {
                     result.toRekey[run.taskID] = realID

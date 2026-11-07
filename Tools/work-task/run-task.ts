@@ -52,6 +52,7 @@
  *   {"kind":"denied","tool":"mcp__sentry__…"}
  *   {"kind":"session","sessionId":"…"}
  *   {"kind":"reply","text":"…","sessionId":"…"}
+ *   {"kind":"captured","taskId":"NNN"}
  *   {"kind":"done","costUsd":N,"turns":N,"stopReason":"…"}
  *   {"kind":"error","message":"…"}
  * `session` is emitted once, at the start of a run, with the Agent SDK session
@@ -62,6 +63,12 @@
  * The `denied` line is a NON-fatal signal (task #092): a tool call the agent
  * reached for was refused because it wasn't on the allowlist. The run still
  * continues and finishes normally — this is a distinct signal from `error`.
+ * The `captured` line is a NON-fatal signal (task #100) emitted ONCE by the
+ * NEW-TASK modes (`captureElaborate` / `executeYolo`): it carries the real task
+ * id the run just created, letting the Swift side re-key the live capture
+ * spinner to the real plan row directly instead of inferring the id from an
+ * ambiguous baseline diff (which strands when two captures overlap). The run
+ * continues and finishes normally after reporting.
  * Raw SDK message shapes are never emitted; they are mapped to the above.
  */
 
@@ -921,6 +928,51 @@ function readTaskStatus(
 const TERMINAL_TASK_STATUSES = new Set(["review", "in-review"]);
 
 /**
+ * The set of task ids currently present in the project's `.plans/` directory
+ * (task #100). Scans the same three status folders `readTaskStatus` does
+ * (`pending`, `review`, `completed`) and parses the leading `NNN-` id from each
+ * `*.md` filename (plans-cc names task files `<id>-<slug>.md`). Ids are kept as
+ * raw strings so they compare byte-for-byte against the Swift baseline (which is
+ * also string-keyed), covering 3-digit AND 4-digit ids alike.
+ *
+ * Used by the NEW-TASK modes (`captureElaborate` / `executeYolo`) to detect the
+ * single task id that THIS run created, so the launcher can report it
+ * authoritatively via a `captured` event instead of leaving the Swift side to
+ * infer it from an ambiguous baseline diff. Guarded in try/catch like
+ * `readTaskStatus`: any read failure returns the ids found so far (possibly
+ * empty), so a filesystem hiccup can NEVER crash the run — it just means no
+ * diff this scan, and Swift's baseline-diff fallback still applies.
+ */
+function readPlansTaskIDs(projectRoot: string): Set<string> {
+  const ids = new Set<string>();
+  try {
+    const folders = ["pending", "review", "completed"];
+    for (const folder of folders) {
+      const dir = path.join(projectRoot, ".plans", folder);
+      let entries: string[];
+      try {
+        entries = fs.readdirSync(dir);
+      } catch {
+        continue;
+      }
+      for (const name of entries) {
+        if (!name.endsWith(".md")) {
+          continue;
+        }
+        // Leading digit run before the first `-` (e.g. `098-foo.md` → `098`).
+        const m = name.match(/^(\d+)-/);
+        if (m) {
+          ids.add(m[1]);
+        }
+      }
+    }
+  } catch {
+    // Any unexpected failure: return whatever was gathered so far. Never throw.
+  }
+  return ids;
+}
+
+/**
  * Built-in, always-on tool allowlist (task #092 refactor). Includes the Skill
  * tool (so the agent can invoke the plan-* skills this hand-off drives — without
  * it on the allowlist, the Skill invocation is denied and the agent flails), the
@@ -1082,6 +1134,41 @@ async function main(): Promise<void> {
     // to the tool the agent tried to call. Task #092.
     const toolUseNames = new Map<string, string>();
 
+    // Task #100: the NEW-TASK modes (`captureElaborate` / `executeYolo`) have no
+    // `taskId` at launch — the task does not exist yet — so the created id is
+    // reported authoritatively from the launcher rather than inferred by Swift's
+    // ambiguous baseline diff. Snapshot the project's existing `.plans` ids BEFORE
+    // the stream begins; as the run streams we re-scan and, when EXACTLY one new
+    // id has appeared, emit `captured` once. Every other mode leaves this inert.
+    const reportsCapturedID =
+      args.mode === "captureElaborate" || args.mode === "executeYolo";
+    const capturedBaseline = reportsCapturedID
+      ? readPlansTaskIDs(args.projectRoot)
+      : new Set<string>();
+    // One-shot guard: once the created id is emitted we stop scanning, so a later
+    // re-scan can never double-emit `captured` for the same run.
+    let capturedEmitted = false;
+
+    // Re-scan `.plans` for the single new id and emit `captured` exactly once.
+    // Ambiguity (more than one new id in a scan) is left to Swift's baseline-diff
+    // fallback — the launcher only speaks when it can name the id unambiguously.
+    const maybeEmitCaptured = (): void => {
+      if (!reportsCapturedID || capturedEmitted) {
+        return;
+      }
+      const current = readPlansTaskIDs(args.projectRoot);
+      const newIds: string[] = [];
+      for (const id of current) {
+        if (!capturedBaseline.has(id)) {
+          newIds.push(id);
+        }
+      }
+      if (newIds.length === 1) {
+        capturedEmitted = true;
+        emit({ kind: "captured", taskId: newIds[0] });
+      }
+    };
+
     for await (const message of response) {
       switch (message.type) {
         case "assistant": {
@@ -1106,6 +1193,12 @@ async function main(): Promise<void> {
               }
             }
           }
+          // Task #100: after each assistant turn (the points at which the agent
+          // has just run tools that may have written the new task file), re-scan
+          // `.plans` for the created id and report it the moment it appears — so
+          // the live spinner hands off to the real plan row mid-run rather than
+          // at process exit. No-op after the first emit and for non-new-task modes.
+          maybeEmitCaptured();
           break;
         }
         case "result": {

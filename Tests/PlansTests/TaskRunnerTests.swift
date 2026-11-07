@@ -1992,21 +1992,90 @@ final class TaskRunnerTests: XCTestCase {
         XCTAssertEqual(run.reconcileAttempts, 0)
     }
 
-    /// When TWO running captures exist for one project, a single new id cannot be
-    /// attributed to a specific run, so neither is re-keyed (the re-key only
-    /// fires when exactly one running capture exists for the project).
+    /// Baseline-diff FALLBACK, ambiguous case (#100): when TWO running captures
+    /// exist for one project and NEITHER reported its real id (no `captured`
+    /// event), a single new id cannot be attributed to a specific run, so neither
+    /// is re-keyed. This is the DEMOTED fallback path — the `reportedTaskID`
+    /// preference (covered by `testConcurrentRunningCapturesRekeyViaReportedTaskID`)
+    /// is what now lets overlapping captures hand off; absent that signal the
+    /// re-key still only fires under the single-running-capture + single-new-id
+    /// guard, so ambiguous overlaps are left to resolve at process exit rather
+    /// than mis-attributed. (Renamed from `testConcurrentRunningCapturesAreNotRekeyed`
+    /// to make the "no reported id" precondition explicit.)
     @MainActor
-    func testConcurrentRunningCapturesAreNotRekeyed() {
+    func testConcurrentRunningCapturesWithoutReportedIDAreNotRekeyed() {
         let runA = makeRunningCapture(path: "/p", baseline: ["001"],
                                       id: "capture:/p:A")
         let runB = makeRunningCapture(path: "/p", baseline: ["001"],
                                       id: "capture:/p:B")
+        // Neither run reports an id — the fallback baseline-diff path governs.
+        XCTAssertNil(runA.reportedTaskID)
+        XCTAssertNil(runB.reportedTaskID)
         let projects = [makeProject(path: "/p", taskIDs: ["001", "002"])]
 
         let decision = TaskRunner.reconcile(
             runs: [runA.taskID: runA, runB.taskID: runB], projects: projects
         )
         XCTAssertTrue(decision.toRekey.isEmpty)
+    }
+
+    /// Baseline-diff FALLBACK, unambiguous case (#100 regression): a SINGLE
+    /// running capture with NO `reportedTaskID` still re-keys via the baseline
+    /// diff — exactly the pre-#100 behavior — when its project gained exactly one
+    /// new id. This proves the reported-id preference did not break or bypass the
+    /// fallback for runs that report nothing (older launcher / decode skew). The
+    /// twin `…AreNotRekeyed` test above covers the ambiguous no-report case; this
+    /// covers the unambiguous no-report case.
+    @MainActor
+    func testSingleRunningCaptureWithoutReportedIDRekeysViaBaselineDiff() {
+        let run = makeRunningCapture(path: "/p", baseline: ["001"])
+        XCTAssertNil(run.reportedTaskID, "fallback path: no id reported")
+        let projects = [makeProject(path: "/p", taskIDs: ["001", "002"])]
+
+        let decision = TaskRunner.reconcile(
+            runs: [run.taskID: run], projects: projects
+        )
+        // The single-running-capture + single-new-id guard still fires.
+        XCTAssertEqual(decision.toRekey, [run.taskID: "002"])
+        XCTAssertTrue(decision.toDismiss.isEmpty)
+    }
+
+    /// #100: TWO overlapping running captures for one project, each reporting its
+    /// OWN real id via a `captured` NDJSON event, BOTH re-key off their synthetic
+    /// keys to their real ids. This is the bug `testConcurrentRunningCapturesAreNotRekeyed`
+    /// deliberately left stranded: with two running captures and both new ids
+    /// present at reconcile time, the ambiguous baseline-diff guard
+    /// (`runningCapturesByProject == 1 && newIDs.count == 1`) is doubly false, so
+    /// neither live run ever hands off and both spinner rows strand beside their
+    /// real plan rows until the processes exit. The authoritative per-run
+    /// `reportedTaskID` (from the `captured` event) breaks the ambiguity: each run
+    /// re-keys directly to the id IT reported, bypassing the baseline-diff guard.
+    @MainActor
+    func testConcurrentRunningCapturesRekeyViaReportedTaskID() {
+        // Each capture snapshotted a baseline lacking the OTHER's not-yet-written
+        // id — the real-world overlap that produced the bug. Both ids land on disk
+        // (["001","002","003"]) while both processes keep running.
+        let runA = makeRunningCapture(path: "/p", baseline: ["001"],
+                                      id: "capture:/p:A")
+        let runB = makeRunningCapture(path: "/p", baseline: ["001", "002"],
+                                      id: "capture:/p:B")
+        // Each run reports its OWN real id through the new `captured` event, fed
+        // through the exact private ingest path.
+        runA.ingestForTesting(#"{"kind":"captured","taskId":"002"}"# + "\n")
+        runB.ingestForTesting(#"{"kind":"captured","taskId":"003"}"# + "\n")
+
+        let projects = [makeProject(path: "/p", taskIDs: ["001", "002", "003"])]
+
+        let decision = TaskRunner.reconcile(
+            runs: [runA.taskID: runA, runB.taskID: runB], projects: projects
+        )
+
+        // Both live runs re-key off their synthetic keys to the id each reported —
+        // never to each other's id, and never stranded.
+        XCTAssertEqual(decision.toRekey[runA.taskID], "002")
+        XCTAssertEqual(decision.toRekey[runB.taskID], "003")
+        XCTAssertEqual(decision.toRekey.count, 2)
+        XCTAssertTrue(decision.toDismiss.isEmpty)
     }
 
     /// After a re-key the live process stays tracked, so the quit guard still

@@ -1559,6 +1559,11 @@ struct RunProgressSheet: View {
             EmptyView()
         case .session:
             EmptyView()
+        case .captured:
+            // Task #100: an internal reconciliation signal (the launcher's real
+            // task id), not a user-facing log line — consumed by TaskRunner's
+            // live-capture hand-off, nothing to show in the stream.
+            EmptyView()
         }
     }
 

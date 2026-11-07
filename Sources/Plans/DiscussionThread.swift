@@ -79,7 +79,7 @@ final class DiscussionThread {
                 setError("The agent hit its budget or turn cap before answering. Try a narrower question.",
                          at: index)
             }
-        case .text, .denied:
+        case .text, .denied, .captured:
             break
         }
     }
