@@ -215,24 +215,29 @@ struct BrowserWindow: View {
         )
     }
 
-    /// The projects listed in the sidebar's "Projects" section, in the SAME
+    /// The projects listed in the sidebar's "Projects" section: starred
+    /// projects pinned to the top, then the rest — each group in the SAME
     /// order the card stack uses (manual override when active + non-empty, else
     /// recency). DELIBERATELY NOT filtered by `projectViewMode` — the
     /// sidebar always lists every project so any one is reachable.
     private var sidebarProjects: [ProjectTasks] {
+        let ordered: [ProjectTasks]
         if store.manualOrderActive && !store.projectOrderOverride.isEmpty {
-            return BrowserViewModel.applyManualOrder(
+            ordered = BrowserViewModel.applyManualOrder(
                 store.projects,
                 order: store.projectOrderOverride
             )
+        } else {
+            ordered = BrowserViewModel.sortByStaleness(store.projects)
         }
-        return BrowserViewModel.sortByStaleness(store.projects)
+        return BrowserViewModel.pinStarredFirst(ordered, starred: store.starredProjectPaths)
     }
 
     /// The left column: a selectable `List` bound to `store.browserSelection`.
     /// Top-to-bottom — a "Status" section of smart views, the all-projects
     /// entry, and a single combined "Projects" section listing every project
-    /// (starred ones carry a filled-star glyph, the rest a folder glyph).
+    /// (starred ones pinned to the top with a filled-star glyph, the rest
+    /// below with a folder glyph).
     private var sidebar: some View {
         List(selection: selectionBinding) {
             Section("Status") {
@@ -926,6 +931,14 @@ enum BrowserViewModel {
     /// folder. Pure value work — no I/O, no SwiftUI.
     static func sidebarGlyph(starred: Bool) -> String {
         starred ? "star.fill" : "folder"
+    }
+
+    /// Stable partition for the sidebar "Projects" section (#097): starred
+    /// projects first, then the rest, each group keeping its incoming
+    /// (recency / manual) relative order. Pure value work — no I/O.
+    static func pinStarredFirst(_ projects: [ProjectTasks], starred: Set<String>) -> [ProjectTasks] {
+        projects.filter { starred.contains($0.projectPath) }
+            + projects.filter { !starred.contains($0.projectPath) }
     }
 
     /// Parses a raw registry `lastSeen` string into a `Date`, tolerating both

@@ -1077,6 +1077,31 @@ final class BrowserWindowTests: XCTestCase {
         XCTAssertEqual(BrowserViewModel.sidebarGlyph(starred: false), "folder")
     }
 
+    // MARK: - pinStarredFirst (starred projects lead the sidebar list, #097)
+
+    /// Starred projects move above every unstarred project; each group keeps
+    /// its incoming (recency / manual) relative order.
+    func testPinStarredFirstFloatsStarredAboveOthersStably() {
+        let a = makeProject(path: "/a", name: "alpha")
+        let b = makeProject(path: "/b", name: "bravo")
+        let c = makeProject(path: "/c", name: "charlie")
+        let d = makeProject(path: "/d", name: "delta")
+
+        let pinned = BrowserViewModel.pinStarredFirst([a, b, c, d], starred: ["/d", "/b"])
+
+        XCTAssertEqual(pinned.map(\.projectName), ["bravo", "delta", "alpha", "charlie"])
+    }
+
+    /// With nothing starred the order is unchanged.
+    func testPinStarredFirstWithNoStarsIsIdentity() {
+        let a = makeProject(path: "/a", name: "alpha")
+        let b = makeProject(path: "/b", name: "bravo")
+
+        let pinned = BrowserViewModel.pinStarredFirst([a, b], starred: [])
+
+        XCTAssertEqual(pinned.map(\.projectName), ["alpha", "bravo"])
+    }
+
     // MARK: - autoScrollTarget (card-stack edge auto-scroll, #096)
 
     /// Scrolling down steps from the top-visible card to the next one.
