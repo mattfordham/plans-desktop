@@ -1291,25 +1291,36 @@ final class PlansStoreTests: XCTestCase {
         XCTAssertFalse(reloaded.manualOrderActive)
     }
 
-    // MARK: - Card layout mode (#033, persisted to injected UserDefaults)
+    // MARK: - Stale card-layout / focus keys (#096: grid layout + focus mode removed)
 
-    func testCardLayoutModeDefaultsToScroll() throws {
-        let reader = try makeReader(projectPaths: [])
-        let store = PlansStore(registryReader: reader, defaults: makeDefaults())
-
-        XCTAssertEqual(store.cardLayoutMode, .scroll)
-    }
-
-    func testSettingCardLayoutModePersistsAcrossStoreInstances() throws {
+    /// #096 dropped the fit/masonry layout toggle and focus mode. A store whose
+    /// UserDefaults still carry the old `cardLayoutMode` / `focusedProject`
+    /// values must initialise normally (the other preferences load as usual).
+    func testStoreLoadsNormallyWithStaleLayoutAndFocusKeys() throws {
         let reader = try makeReader(projectPaths: [])
         let defaults = makeDefaults()
+        defaults.set("fit", forKey: "cardLayoutMode")
+        defaults.set("/proj1", forKey: "focusedProject")
+        defaults.set("active", forKey: "projectViewMode")
 
         let store = PlansStore(registryReader: reader, defaults: defaults)
-        store.cardLayoutMode = .fit
 
-        // A fresh store over the SAME defaults reads the saved mode back.
-        let reloaded = PlansStore(registryReader: reader, defaults: defaults)
-        XCTAssertEqual(reloaded.cardLayoutMode, .fit)
+        XCTAssertEqual(store.projectViewMode, .active)
+        XCTAssertEqual(store.browserSelection, .allProjects)
+    }
+
+    /// The stale keys are removed on load so they don't linger in the
+    /// user's preferences forever.
+    func testStoreRemovesStaleLayoutAndFocusKeysOnLoad() throws {
+        let reader = try makeReader(projectPaths: [])
+        let defaults = makeDefaults()
+        defaults.set("fit", forKey: "cardLayoutMode")
+        defaults.set("/proj1", forKey: "focusedProject")
+
+        _ = PlansStore(registryReader: reader, defaults: defaults)
+
+        XCTAssertNil(defaults.object(forKey: "cardLayoutMode"))
+        XCTAssertNil(defaults.object(forKey: "focusedProject"))
     }
 
     // MARK: - Project view mode (#072, persisted to injected UserDefaults)
@@ -1326,11 +1337,23 @@ final class PlansStoreTests: XCTestCase {
         let defaults = makeDefaults()
 
         let store = PlansStore(registryReader: reader, defaults: defaults)
-        store.projectViewMode = .starred
+        store.projectViewMode = .active
 
         // A fresh store over the SAME defaults reads the saved mode back.
         let reloaded = PlansStore(registryReader: reader, defaults: defaults)
-        XCTAssertEqual(reloaded.projectViewMode, .starred)
+        XCTAssertEqual(reloaded.projectViewMode, .active)
+    }
+
+    /// #096: the `.starred` view mode was dropped (sidebar Favourites cover it).
+    /// A `"starred"` value persisted by an older build must load as `.all`
+    /// rather than leaving the grid filtered by a mode that no longer exists.
+    func testStaleStarredProjectViewModeLoadsAsAll() throws {
+        let reader = try makeReader(projectPaths: [])
+        let defaults = makeDefaults()
+        defaults.set("starred", forKey: "projectViewMode")
+
+        let store = PlansStore(registryReader: reader, defaults: defaults)
+        XCTAssertEqual(store.projectViewMode, .all)
     }
 
     // MARK: - Show backlog (#077, persisted to injected UserDefaults)
@@ -1391,62 +1414,6 @@ final class PlansStoreTests: XCTestCase {
         // A fresh store over the SAME defaults reflects the removal.
         let reloaded = PlansStore(registryReader: reader, defaults: defaults)
         XCTAssertEqual(reloaded.starredProjectPaths, ["/proj2"])
-    }
-
-    // MARK: - Focused project (#067, persisted to injected UserDefaults)
-
-    func testFocusedProjectPathDefaultsToNil() throws {
-        let reader = try makeReader(projectPaths: [])
-        let store = PlansStore(registryReader: reader, defaults: makeDefaults())
-
-        XCTAssertNil(store.focusedProjectPath)
-    }
-
-    func testFocusedProjectPathPersistsAcrossStoreInstances() throws {
-        let reader = try makeReader(projectPaths: [])
-        let defaults = makeDefaults()
-
-        let store = PlansStore(registryReader: reader, defaults: defaults)
-        store.focusedProjectPath = "/proj1"
-
-        XCTAssertEqual(store.focusedProjectPath, "/proj1")
-
-        // A fresh store over the SAME defaults restores the focused path.
-        let reloaded = PlansStore(registryReader: reader, defaults: defaults)
-        XCTAssertEqual(reloaded.focusedProjectPath, "/proj1")
-    }
-
-    func testClearFocusSetsPathToNilAndPersists() throws {
-        let reader = try makeReader(projectPaths: [])
-        let defaults = makeDefaults()
-
-        let store = PlansStore(registryReader: reader, defaults: defaults)
-        store.focusedProjectPath = "/proj1"
-        store.clearFocus()
-
-        XCTAssertNil(store.focusedProjectPath)
-
-        // The cleared (nil) state persists across a fresh store.
-        let reloaded = PlansStore(registryReader: reader, defaults: defaults)
-        XCTAssertNil(reloaded.focusedProjectPath)
-    }
-
-    func testToggleFocusSetsWhenUnfocusedAndClearsWhenAlreadyFocused() throws {
-        let reader = try makeReader(projectPaths: [])
-        let store = PlansStore(registryReader: reader, defaults: makeDefaults())
-
-        // Toggling an unfocused path focuses it.
-        store.toggleFocus("/proj1")
-        XCTAssertEqual(store.focusedProjectPath, "/proj1")
-
-        // Toggling the SAME (already-focused) path clears the focus.
-        store.toggleFocus("/proj1")
-        XCTAssertNil(store.focusedProjectPath)
-
-        // Toggling a DIFFERENT path while one is focused switches focus.
-        store.toggleFocus("/proj1")
-        store.toggleFocus("/proj2")
-        XCTAssertEqual(store.focusedProjectPath, "/proj2")
     }
 
     // MARK: - New Plan trigger (non-persisted ⌘N → sheet bridge, #034)

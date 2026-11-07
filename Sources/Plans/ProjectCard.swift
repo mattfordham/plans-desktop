@@ -4,7 +4,10 @@ import OSLog
 
 private let cardLog = Logger(subsystem: "com.plans.desktop", category: "ProjectCard")
 
-/// Surface C: a single project rendered as a discrete dashboard card.
+/// A single project rendered as a card in the browser's "All projects" stack
+/// (`ProjectStackView`, Surface B's content column under the sidebar's "All
+/// projects" entry, #096). Cards lay out at their natural, content-hugging
+/// height; the stack's `ScrollView` absorbs any overflow.
 ///
 /// The card has two parts:
 ///
@@ -33,18 +36,6 @@ private let cardLog = Logger(subsystem: "com.plans.desktop", category: "ProjectC
 struct ProjectCard: View {
     /// The project this card renders. Read-only; never mutated.
     let project: ProjectTasks
-
-    /// The fixed cell height imposed on this card by `BrowserWindow.cardGrid` in
-    /// fit-to-screen ("grid") layout, or `nil` in scroll layout (#038).
-    ///
-    /// When non-nil the card is height-constrained, so its body scrolls
-    /// internally (`shouldScrollContent`) rather than overflowing the cell. When
-    /// `nil` the card lays out at its natural, content-hugging height exactly as
-    /// before. Defaulted to `nil` so existing call sites stay source-compatible;
-    /// declared BEFORE `onNewPlan` so the synthesized memberwise initializer is
-    /// `ProjectCard(project:constrainedHeight:onNewPlan:)` and the trailing-closure
-    /// call site keeps working.
-    var constrainedHeight: CGFloat? = nil
 
     /// #095: the browser's detail-column selection, so the matching plan row
     /// renders the selected highlight. `nil` (the default) highlights nothing.
@@ -119,9 +110,9 @@ struct ProjectCard: View {
     }
 
     /// The clickable plan rows for this card: the active plans in `TaskParser`'s
-    /// active order. Starring is now a PROJECT-level concern (#035) — it keeps an
-    /// empty card visible under the `.starred` view mode but does not inject
-    /// completed plans into the body — so this is just the active rows.
+    /// active order. Starring is a PROJECT-level concern (#035) that drives the
+    /// sidebar's Favourites section and does not inject completed plans into
+    /// the body, so this is just the active rows.
     private var rows: [TaskRow] {
         BrowserViewModel.activeRows(project, matchingType: typeFilter)
     }
@@ -144,28 +135,6 @@ struct ProjectCard: View {
     /// identical to before whenever the toggle is off.
     private var showsBacklogSection: Bool {
         store.showBacklog && !project.backloggedTasks.isEmpty
-    }
-
-    // MARK: - Layout decision (scroll the body when height-constrained)
-
-    /// Whether the card should scroll its body internally instead of laying it
-    /// out at natural height.
-    ///
-    /// #038: in fit-to-screen ("grid") card layout, `BrowserWindow.cardGrid`
-    /// imposes a FIXED per-row cell height on each card (the non-nil
-    /// `constrainedHeight`). A project with many plans has a natural content
-    /// height taller than that imposed frame, so without an inner scroll its plan
-    /// list overflows the cell and overlaps the card beneath it. In scroll mode
-    /// the card is handed `nil` (no imposed height) and lays out at its natural,
-    /// content-hugging size while the surrounding `ScrollView` absorbs overflow.
-    ///
-    /// So the rule is purely: a non-nil imposed height → scroll the body inside
-    /// the card (`true`); `nil` → natural height, no inner scroll (`false`). Any
-    /// non-nil value (including `0`) counts as "constrained". Pure and view-free
-    /// so the decision is unit-tested as a plain value, mirroring the layout
-    /// helpers in `BrowserWindow`.
-    static func shouldScrollContent(constrainedHeight: CGFloat?) -> Bool {
-        constrainedHeight != nil
     }
 
     /// #047: the file URL to reveal when the project name is tapped — the
@@ -399,46 +368,10 @@ struct ProjectCard: View {
         VStack(alignment: .leading, spacing: 10) {
             header
             Divider()
-            // #038: the captures + plan list are the only growable content. When
-            // the card is height-constrained (fit/grid mode imposes a fixed cell
-            // height) a long list would overflow the cell and overlap the card
-            // beneath it, so wrap that middle content in a `ScrollView` — header
-            // stays pinned at the top, git footer pinned at the bottom, and the
-            // list scrolls between them. The ScrollView greedily fills the slack
-            // between header and footer, so no `Spacer` is needed in this path.
-            //
-            // In scroll mode (`constrainedHeight == nil`) the card lays out at its
-            // natural, content-hugging height and the surrounding `ScrollView` in
-            // `BrowserWindow.cardGrid` handles overflow, so render the content
-            // inline (NO inner ScrollView) and keep the trailing `Spacer` that
-            // pins header to the top and footer to the bottom of a taller cell —
-            // byte-for-byte unchanged from before.
-            if ProjectCard.shouldScrollContent(constrainedHeight: constrainedHeight) {
-                ScrollView {
-                    VStack(alignment: .leading, spacing: 10) {
-                        scrollableContent
-                    }
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    // #046: trailing inset so the per-row action buttons clear the
-                    // card-internal overlay scroller (this inner ScrollView only
-                    // exists in fit-to-screen mode). Reuses the shared clearance
-                    // constant so it tracks the outer grid's value.
-                    .padding(.trailing, BrowserWindow.scrollerClearance)
-                }
-            } else {
-                scrollableContent
-                // Top-anchor the header + body and bottom-anchor the footer:
-                // LazyVGrid sizes every cell to its ROW's max height, so a short
-                // card handed a taller cell has slack to distribute. This
-                // `Spacer(minLength: 0)` sits BETWEEN the body and the footer, so
-                // it absorbs all that slack in the middle — keeping
-                // header/divider/plan rows pinned to the TOP and the git footer
-                // pinned to the BOTTOM edge of the card. The card's frame sets NO
-                // maxHeight (below), so a content-sized card still hugs its
-                // content — the Spacer only does work when the card is given extra
-                // height. Mirrors the wrapper Spacer in `BrowserWindow.cardGrid`.
-                Spacer(minLength: 0)
-            }
+            // The captures + plan list: the card's growable middle content,
+            // laid out inline at natural height (the stack's ScrollView handles
+            // overflow — the card has no inner scroll since #096).
+            scrollableContent
             // Footer (#026 git status + #035 project star): the star toggle sits
             // bottom-LEFT and the git status (when present) bottom-RIGHT, across
             // from each other. Always emitted — the star is always available — so
@@ -462,13 +395,10 @@ struct ProjectCard: View {
         .padding(.bottom, 14)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(.background.secondary, in: RoundedRectangle(cornerRadius: 12))
-        // #038: clip the card's content to the same rounded rect as its
-        // background/border so a height-constrained card's scrolled body can
-        // never paint outside its rounded bounds (e.g. into the corners or over
-        // the card beneath it). Placed AFTER `.background` and BEFORE `.overlay`
-        // so the stroke border still renders crisply on top of the clipped
-        // content. A no-op in scroll/natural-height mode where the card already
-        // hugs its content.
+        // Clip the card's content to the same rounded rect as its
+        // background/border so the edge-to-edge plan-row bands (#087) can't
+        // paint into the rounded corners. Placed AFTER `.background` and BEFORE
+        // `.overlay` so the stroke border still renders crisply on top.
         .clipShape(RoundedRectangle(cornerRadius: 12))
         .overlay(
             RoundedRectangle(cornerRadius: 12)
@@ -478,12 +408,9 @@ struct ProjectCard: View {
         // shared `PlanRowActions` view, which owns their request state now.
     }
 
-    /// The growable middle content of the card: the in-flight capture rows and
-    /// the active plan list. Factored into one `@ViewBuilder` so it can be
-    /// rendered either inline (scroll mode, natural height) or inside a
-    /// `ScrollView` (fit/grid mode, height-constrained) without duplicating it
-    /// across the `if`/`else` in `body` (#038). The header and git footer stay
-    /// OUTSIDE this — they're pinned to the card's top and bottom edges.
+    /// The growable middle content of the card: the in-flight capture rows, the
+    /// active plan list and the optional backlog section, between the header and
+    /// the git footer.
     @ViewBuilder
     private var scrollableContent: some View {
         captureRows
@@ -735,13 +662,12 @@ struct ProjectCard: View {
     /// The card footer row: the git status (when the project is a git repo)
     /// pinned bottom-LEFT and the project toggles bottom-RIGHT, across from
     /// each other. Git status is leading-aligned and the `Spacer` pushes the
-    /// toggles to the trailing edge; a non-git project simply shows the toggles
-    /// alone. The trailing cluster reads focus → star.
+    /// star toggle to the trailing edge; a non-git project simply shows the star
+    /// alone. (#096 removed the focus toggle that sat beside the star.)
     private var footer: some View {
         HStack(spacing: 8) {
             gitFooter
             Spacer(minLength: 8)
-            focusToggle
             starToggle
         }
         // #087: re-inset by the card gutter — only the plan rows bleed full width.
@@ -933,11 +859,8 @@ struct ProjectCard: View {
     ///   which sits inside the row's background and so never breaks the band.
     /// - `.padding(.vertical, 5)` on the row sets its height/tap area.
     ///   We deliberately do NOT use `.frame(maxHeight: .infinity)` here: that makes
-    ///   each row a greedy vertical slack-absorber, so when LazyVGrid hands the card
-    ///   a taller cell the rows expand and distribute the extra height (drifting
-    ///   toward center). With rows content-sized, the card's trailing `Spacer` (and
-    ///   the cardGrid wrapper Spacer) absorb all the slack and the rows stay pinned
-    ///   under the header.
+    ///   each row a greedy vertical slack-absorber that would spread any extra
+    ///   height the card is given across the rows. Rows stay content-sized.
     @ViewBuilder
     private func planRow(_ row: TaskRow, index: Int) -> some View {
         let indicator = row.indicator
@@ -1072,9 +995,9 @@ struct ProjectCard: View {
     /// The project star/unstar toggle (#035). A filled yellow `star.fill` when
     /// this project's path is in `store.starredProjectPaths`, otherwise an outline
     /// `star`. Tapping toggles membership of `project.projectPath` in the persisted
-    /// set (`insert`/`remove` triggers the store's `didSet` persistence). Starring
-    /// is a filter input in its own right (#072): the `.starred` project view mode
-    /// shows exactly the starred projects, empty or not.
+    /// set (`insert`/`remove` triggers the store's `didSet` persistence). Starred
+    /// projects are listed in the sidebar's Favourites section (#094); the card
+    /// stack's `.starred` view mode that once filtered on them was dropped in #096.
     @ViewBuilder
     private var starToggle: some View {
         let isStarred = store.starredProjectPaths.contains(project.projectPath)
@@ -1090,21 +1013,6 @@ struct ProjectCard: View {
         }
     }
 
-    /// The project focus toggle (#067). A `viewfinder` glyph, opaque/tinted when
-    /// this project is the currently-focused one and muted otherwise. Tapping
-    /// toggles focus on `project.projectPath` (`store.toggleFocus`), which the
-    /// browser's `sortedProjects` reacts to — collapsing the grid to this card, or
-    /// restoring the full grid when the same card is toggled off.
-    @ViewBuilder
-    private var focusToggle: some View {
-        let isFocused = store.focusedProjectPath == project.projectPath
-        FocusToggleGlyph(
-            isFocused: isFocused,
-            help: isFocused ? "Exit focus" : "Focus project"
-        ) {
-            store.toggleFocus(project.projectPath)
-        }
-    }
 
 }
 
@@ -1126,36 +1034,6 @@ private struct StarToggleGlyph: View {
             Image(systemName: "star.fill")
                 .imageScale(.medium)
                 .foregroundStyle(Color.white.opacity(isStarred ? 0.6 : (hovering ? 0.35 : 0.15)))
-                .frame(width: 22, height: 22)
-                .background(
-                    RoundedRectangle(cornerRadius: 5)
-                        .fill(Color.primary.opacity(hovering ? 0.10 : 0))
-                )
-                .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-        .animation(.easeOut(duration: 0.12), value: hovering)
-        .onHover { hovering = $0 }
-        .help(help)
-    }
-}
-
-/// The project focus glyph (#067). Mirrors `StarToggleGlyph`: a `.plain` `Button`
-/// showing a solid `viewfinder` whose white opacity conveys state — medium when
-/// this project is focused, very low otherwise (brightening slightly on hover) —
-/// over the same subtle hover background and cursor treatment as the star.
-private struct FocusToggleGlyph: View {
-    let isFocused: Bool
-    let help: String
-    let action: () -> Void
-
-    @State private var hovering = false
-
-    var body: some View {
-        Button(action: action) {
-            Image(systemName: "viewfinder")
-                .imageScale(.medium)
-                .foregroundStyle(Color.white.opacity(isFocused ? 0.6 : (hovering ? 0.35 : 0.15)))
                 .frame(width: 22, height: 22)
                 .background(
                     RoundedRectangle(cornerRadius: 5)

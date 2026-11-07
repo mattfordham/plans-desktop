@@ -31,7 +31,7 @@ final class PlansStore {
     var selectedProjectPath: String?
 
     /// The user's manual card order as an ordered list of project paths (#017).
-    /// Drives the browser grid order when `manualOrderActive` is true; project
+    /// Drives the browser card-stack order when `manualOrderActive` is true; project
     /// paths absent from this list are treated as new and sort to the TOP (see
     /// `BrowserViewModel.applyManualOrder`). Persisted to `defaults` on every set
     /// so the override survives app restarts. NEVER written to `.plans/` (§2
@@ -178,25 +178,14 @@ final class PlansStore {
     }
 
     /// The set of "starred" project paths the user has curated (#035), keyed by
-    /// `ProjectTasks.projectPath`. Starring is a first-class filter INPUT: the
-    /// `.starred` project view mode (#072) shows exactly these projects (see
-    /// `BrowserWindow.sortedProjects`). It is no longer a mere exception to an
-    /// empty-project gate, so it now means something in every mode. Persisted
+    /// `ProjectTasks.projectPath`. The browser sidebar's Favourites section lists
+    /// exactly these projects (#094; this replaced the `.starred` view mode,
+    /// dropped in #096). Persisted
     /// on every set by writing `Array(starredProjectPaths)` to
     /// `starredProjectsKey` in `defaults` (UserDefaults stores arrays, not Sets).
     /// NEVER written to `.plans/` (§2 read-only) — UserDefaults is the only sink.
     var starredProjectPaths: Set<String> = [] {
         didSet { defaults.set(Array(starredProjectPaths), forKey: Self.starredProjectsKey) }
-    }
-
-    /// The path of the single project the dashboard is "focused" on (#067), or
-    /// `nil` when focus mode is off and every project is shown. When set, the
-    /// browser filters the grid down to just this project's card (see
-    /// `BrowserViewModel.visibleUnderFocus`). Pure UI-only state — like every
-    /// other browser preference it is persisted ONLY to `defaults` on each set
-    /// and is NEVER written to `.plans/` (§2 read-only).
-    var focusedProjectPath: String? {
-        didSet { defaults.set(focusedProjectPath, forKey: Self.focusedProjectKey) }
     }
 
     /// A non-persisted "open the New Plan form" trigger (#034). Bridges the
@@ -219,19 +208,11 @@ final class PlansStore {
     /// stored value is the JSON-encoded `[String: CaptureDraft]` as `Data`.
     private static let captureDraftsKey = "captureDrafts"
 
-    /// The card-grid layout mode for the browser dashboard (#033): `.scroll` (the
-    /// default responsive scrolling grid) or `.fit` (a near-square grid sized to
-    /// fit every card on screen). Persisted on every set (its `rawValue` is the
-    /// wire form) so the choice survives app restarts. NEVER written to `.plans/`
-    /// (§2 read-only) — UserDefaults is the only persistence sink.
-    var cardLayoutMode: CardLayoutMode = .scroll {
-        didSet { defaults.set(cardLayoutMode.rawValue, forKey: Self.cardLayoutKey) }
-    }
-
-    /// Which projects the browser dashboard shows (#072): `.all` (the default),
-    /// `.active` (outstanding work only) or `.starred` (curated only). The single
-    /// labelled control that replaced the old "Hide Empty" toggle and the star
-    /// exception. Persisted on every set (its `rawValue` is the wire form) so the
+    /// Which projects the "All projects" card stack shows (#072): `.all` (the
+    /// default) or `.active` (outstanding work only). The single labelled
+    /// control that replaced the old "Hide Empty" toggle and the star
+    /// exception. A stale persisted `"starred"` (the mode dropped in #096) fails
+    /// `ProjectViewMode(rawValue:)` and loads as `.all`. Persisted on every set (its `rawValue` is the wire form) so the
     /// choice survives app restarts. NEVER written to `.plans/` (§2 read-only) —
     /// UserDefaults is the only persistence sink.
     var projectViewMode: ProjectViewMode = .all {
@@ -286,8 +267,10 @@ final class PlansStore {
     /// UserDefaults key for the persisted manual-order-active flag.
     private static let activeKey = "cardOrderManualActive"
 
-    /// UserDefaults key for the persisted card layout mode (#033).
-    private static let cardLayoutKey = "cardLayoutMode"
+    /// UserDefaults keys left behind by the removed card-grid layout toggle
+    /// (#033) and focus mode (#067). Both features were dropped in #096; the
+    /// keys are only ever REMOVED on load so stale values can't linger.
+    private static let staleDefaultsKeys = ["cardLayoutMode", "focusedProject"]
 
     /// UserDefaults key for the persisted project view mode (#072).
     private static let projectViewModeKey = "projectViewMode"
@@ -311,9 +294,6 @@ final class PlansStore {
     /// UserDefaults key for the persisted starred project paths (#035). The
     /// stored value is `Array(starredProjectPaths)` (UserDefaults stores arrays).
     private static let starredProjectsKey = "starredProjects"
-
-    /// UserDefaults key for the persisted focused project path (#067).
-    private static let focusedProjectKey = "focusedProject"
 
     /// The statuses surfaced in the menu bar icon space, in a fresh order that
     /// leads with actively-running work: in-progress → review → in-review. This
@@ -502,7 +482,7 @@ final class PlansStore {
     /// fixtures-backed readers/writer (all pointed at the same temp registry URL)
     /// and an isolated `UserDefaults(suiteName:)` in tests. The persisted
     /// manual-order state (#017) is loaded eagerly here so the override is in
-    /// effect before the first grid layout.
+    /// effect before the card stack first renders.
     init(
         registryReader: RegistryReader = RegistryReader(),
         registryWriter: RegistryWriter = RegistryWriter(),
@@ -529,7 +509,13 @@ final class PlansStore {
         // re-persisting (the `didSet` would write the just-read value back).
         _projectOrderOverride = defaults.stringArray(forKey: Self.orderKey) ?? []
         _manualOrderActive = defaults.bool(forKey: Self.activeKey)
-        _cardLayoutMode = CardLayoutMode(rawValue: defaults.string(forKey: Self.cardLayoutKey) ?? "") ?? .scroll
+        // #096: the card-grid layout toggle and focus mode are gone; drop any
+        // values they persisted so they are ignored harmlessly.
+        for key in Self.staleDefaultsKeys {
+            defaults.removeObject(forKey: key)
+        }
+        // An unknown raw value (e.g. the `"starred"` mode dropped in #096) falls
+        // back to `.all` rather than stranding the stack on a missing mode.
         _projectViewMode = ProjectViewMode(rawValue: defaults.string(forKey: Self.projectViewModeKey) ?? "") ?? .all
         // Load persisted show-backlog flag (#077). `bool(forKey:)` returns false
         // for a missing key, so the default is correctly OFF. Assigning the
@@ -550,9 +536,6 @@ final class PlansStore {
         // back into the `Set`. Assigning the backing field avoids the `didSet`
         // re-persisting the just-read value.
         _starredProjectPaths = Set(defaults.stringArray(forKey: Self.starredProjectsKey) ?? [])
-        // Load persisted focused project path (#067): assigning the backing field
-        // avoids the `didSet` re-persisting the just-read value.
-        _focusedProjectPath = defaults.string(forKey: Self.focusedProjectKey)
         // Load persisted capture drafts (#031): decode the stored JSON `Data`,
         // defaulting to an empty map on missing/corrupt data. Assigning the
         // backing field avoids the `didSet` re-persisting the just-read value.
@@ -664,21 +647,6 @@ final class PlansStore {
     /// via the `manualOrderActive` setter.
     func clearManualOrder() {
         manualOrderActive = false
-    }
-
-    /// Toggles focus mode for `path` (#067): focuses it when it is not already the
-    /// focused project, or clears focus when it already is (a second toggle on the
-    /// same card exits focus mode). Persisted via the `focusedProjectPath` setter.
-    /// UI-only state — never touches `.plans/` (§2 read-only).
-    func toggleFocus(_ path: String) {
-        focusedProjectPath = (focusedProjectPath == path) ? nil : path
-    }
-
-    /// Exits focus mode by clearing the focused project (#067), restoring the full
-    /// dashboard. Persisted via the `focusedProjectPath` setter. UI-only state —
-    /// never touches `.plans/` (§2 read-only).
-    func clearFocus() {
-        focusedProjectPath = nil
     }
 
     /// Errors surfaced by `linkProject(at:)` so the UI can present a message.

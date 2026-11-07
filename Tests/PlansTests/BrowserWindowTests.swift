@@ -440,7 +440,7 @@ final class BrowserWindowTests: XCTestCase {
         XCTAssertEqual(filtered.map(\.id), ["/p/001", "/p/003"])
     }
 
-    // MARK: - visibleUnderViewMode (#072: one labelled three-state view mode)
+    // MARK: - visibleUnderViewMode (#072/#096: one labelled All / Active view mode)
 
     /// `.all` keeps every project, including one with NO outstanding work.
     func testVisibleUnderViewModeAllKeepsEmptyProject() {
@@ -451,7 +451,7 @@ final class BrowserWindowTests: XCTestCase {
             activeTasks: []
         )
         XCTAssertTrue(
-            BrowserViewModel.visibleUnderViewMode(project, mode: .all, starredProjectPaths: [])
+            BrowserViewModel.visibleUnderViewMode(project, mode: .all)
         )
     }
 
@@ -464,7 +464,7 @@ final class BrowserWindowTests: XCTestCase {
             activeTasks: [makeTask(id: "001", status: .inProgress)]
         )
         XCTAssertTrue(
-            BrowserViewModel.visibleUnderViewMode(project, mode: .active, starredProjectPaths: [])
+            BrowserViewModel.visibleUnderViewMode(project, mode: .active)
         )
     }
 
@@ -477,77 +477,55 @@ final class BrowserWindowTests: XCTestCase {
             activeTasks: []
         )
         XCTAssertFalse(
-            BrowserViewModel.visibleUnderViewMode(project, mode: .active, starredProjectPaths: [])
+            BrowserViewModel.visibleUnderViewMode(project, mode: .active)
         )
     }
 
-    /// THE BEHAVIOR-CHANGE CRUX — under the OLD "Hide Empty" gate a STARRED but
-    /// empty project was rescued by an `|| isStarred` exception. That exception
-    /// is deliberately GONE: `.active` means exactly "has outstanding work", so a
-    /// starred-but-empty project is filtered out. Curated projects now live in
-    /// `.starred`, which is a filter in its own right.
-    func testVisibleUnderViewModeActiveFiltersStarredButEmptyProject() {
-        let project = makeProject(
-            path: "/p",
-            name: "p",
-            tasks: [makeTask(id: "099", status: .completed)],
-            activeTasks: []
-        )
-        XCTAssertFalse(
-            BrowserViewModel.visibleUnderViewMode(project, mode: .active, starredProjectPaths: ["/p"])
-        )
+    /// #096: `ProjectViewMode` is exactly All / Active — `.starred` was dropped
+    /// because the sidebar's Favourites section already lists starred projects.
+    func testProjectViewModeCasesAreAllAndActive() {
+        XCTAssertEqual(ProjectViewMode.allCases, [.all, .active])
+        XCTAssertEqual(ProjectViewMode.allCases.map(\.label), ["All", "Active"])
     }
 
-    /// `.starred` keeps a starred project, even one with no outstanding work.
-    func testVisibleUnderViewModeStarredKeepsStarredProject() {
-        let project = makeProject(
-            path: "/p",
-            name: "p",
-            tasks: [makeTask(id: "099", status: .completed)],
-            activeTasks: []
-        )
-        XCTAssertTrue(
-            BrowserViewModel.visibleUnderViewMode(project, mode: .starred, starredProjectPaths: ["/p"])
-        )
+    /// #096: the two-mode cycle flips between `.all` and `.active`.
+    func testProjectViewModeNextCyclesBetweenAllAndActive() {
+        XCTAssertEqual(ProjectViewMode.all.next, .active)
+        XCTAssertEqual(ProjectViewMode.active.next, .all)
     }
 
-    /// `.starred` filters out an UNSTARRED project even when it HAS outstanding
-    /// work — starred is a curation filter, not an activity filter.
-    func testVisibleUnderViewModeStarredFiltersUnstarredProjectWithWork() {
-        let project = makeProject(
-            path: "/p",
-            name: "p",
-            tasks: [makeTask(id: "001", status: .inProgress)],
-            activeTasks: [makeTask(id: "001", status: .inProgress)]
+    // MARK: - ProjectStackView.stackProjects (#096: the "All projects" card list)
+
+    /// `.active` drops projects without outstanding work, keeping manual order.
+    func testStackProjectsAppliesManualOrderAndViewMode() {
+        let a = makeProject(path: "/a", name: "a",
+                            tasks: [makeTask(id: "001", status: .pending)],
+                            activeTasks: [makeTask(id: "001", status: .pending)])
+        let b = makeProject(path: "/b", name: "b",
+                            tasks: [makeTask(id: "002", status: .completed)])
+        let c = makeProject(path: "/c", name: "c",
+                            tasks: [makeTask(id: "003", status: .inProgress)],
+                            activeTasks: [makeTask(id: "003", status: .inProgress)])
+        let result = ProjectStackView.stackProjects(
+            [a, b, c],
+            manualOrderActive: true,
+            order: ["/c", "/b", "/a"],
+            viewMode: .active
         )
-        XCTAssertFalse(
-            BrowserViewModel.visibleUnderViewMode(project, mode: .starred, starredProjectPaths: ["/other"])
-        )
+        XCTAssertEqual(result.map(\.projectPath), ["/c", "/a"])
     }
 
-    // MARK: - visibleUnderFocus (#067: focus mode shows only the focused project)
-
-    /// With no project focused (`nil`), every project is visible.
-    func testVisibleUnderFocusTrueWhenNoFocus() {
-        let project = makeProject(path: "/p", name: "p")
-        XCTAssertTrue(
-            BrowserViewModel.visibleUnderFocus(project, focusedProjectPath: nil)
+    /// With no manual order active, `.all` keeps every project in recency order
+    /// (the same order `sortByStaleness` produces).
+    func testStackProjectsFallsBackToRecencyWithoutManualOrder() {
+        let a = makeProject(path: "/a", name: "a")
+        let b = makeProject(path: "/b", name: "b")
+        let result = ProjectStackView.stackProjects(
+            [a, b], manualOrderActive: false, order: ["/b", "/a"], viewMode: .all
         )
-    }
-
-    /// With a focus set, only the project whose path MATCHES is visible.
-    func testVisibleUnderFocusTrueForMatchingProject() {
-        let project = makeProject(path: "/p", name: "p")
-        XCTAssertTrue(
-            BrowserViewModel.visibleUnderFocus(project, focusedProjectPath: "/p")
-        )
-    }
-
-    /// With a focus set, a non-matching project is hidden.
-    func testVisibleUnderFocusFalseForNonMatchingProject() {
-        let project = makeProject(path: "/p", name: "p")
-        XCTAssertFalse(
-            BrowserViewModel.visibleUnderFocus(project, focusedProjectPath: "/other")
+        XCTAssertEqual(
+            result.map(\.projectPath),
+            BrowserViewModel.sortByStaleness([a, b]).map(\.projectPath)
         )
     }
 
@@ -772,13 +750,13 @@ final class BrowserWindowTests: XCTestCase {
     private func displayedIDs(
         _ selection: SidebarSelection,
         _ projects: [ProjectTasks],
-        gridProjects: [ProjectTasks]? = nil,
+        stackProjects: [ProjectTasks]? = nil,
         showBacklog: Bool = false
     ) -> [TaskRow.ID] {
         BrowserViewModel.displayedRows(
             for: selection,
             in: projects,
-            gridProjects: gridProjects ?? projects,
+            stackProjects: stackProjects ?? projects,
             showBacklog: showBacklog
         ).map(\.id)
     }
@@ -802,7 +780,7 @@ final class BrowserWindowTests: XCTestCase {
         XCTAssertEqual(displayedIDs(.project("/missing"), projects), [])
     }
 
-    /// The all-projects card grid displays every GRID project's active rows
+    /// The all-projects card stack displays every STACK project's active rows
     /// (plus backlog when shown) — the grid projects are the view-mode/focus
     /// filtered set, not necessarily every project.
     func testDisplayedRowsForAllProjectsUsesGridProjects() {
@@ -812,7 +790,7 @@ final class BrowserWindowTests: XCTestCase {
             ["/proj1/001", "/proj1/002", "/proj2/001"]
         )
         XCTAssertEqual(
-            displayedIDs(.allProjects, projects, gridProjects: [projects[1]]),
+            displayedIDs(.allProjects, projects, stackProjects: [projects[1]]),
             ["/proj2/001"]
         )
         let withBacklog = mixedStatusFixture()
@@ -831,7 +809,7 @@ final class BrowserWindowTests: XCTestCase {
         BrowserViewModel.validSelection(
             id,
             visibleIn: BrowserViewModel.displayedRows(
-                for: selection, in: projects, gridProjects: projects, showBacklog: showBacklog
+                for: selection, in: projects, stackProjects: projects, showBacklog: showBacklog
             )
         )
     }
@@ -866,7 +844,7 @@ final class BrowserWindowTests: XCTestCase {
         XCTAssertNil(visibleSelection("/proj1/001", .smart(.inProgress), after))
     }
 
-    /// The card grid / a project list containing the selected plan keeps it;
+    /// The card stack / a project list containing the selected plan keeps it;
     /// a backlogged selection survives only while backlog rows are shown.
     func testCardGridAndProjectViewContainingSelectionKeepIt() {
         let projects = mixedStatusFixture()
@@ -909,406 +887,36 @@ final class BrowserWindowTests: XCTestCase {
         )
     }
 
-    // MARK: - columnCount (responsive grid)
+    // MARK: - Split-view column sizing (#096)
 
-    /// A narrow viewport (300pt) fits zero full `cardMinWidth` columns by the raw
-    /// formula, but the `max(1, …)` floor guarantees a single column so the grid
-    /// is never empty. usable = 300 - 32 = 268; per-column footprint = 400 + 16 =
-    /// 416; 268 / 416 = 0 → max(1, 0) = 1.
-    func testColumnCountNarrowWidthYieldsOneColumn() {
-        XCTAssertEqual(BrowserWindow.columnCount(forWidth: 300), 1)
-    }
-
-    /// The floor holds even at a tiny / degenerate width (50pt): the raw quotient
-    /// is 0 (or could go negative once padding exceeds the width), yet the column
-    /// count never drops below 1.
-    func testColumnCountFloorHoldsAtTinyWidth() {
-        XCTAssertEqual(BrowserWindow.columnCount(forWidth: 50), 1)
-    }
-
-    /// At the legacy reference width (820pt) the new 400pt card min yields a
-    /// SINGLE column. usable = 820 - 32 = 788; per-column footprint = 400 + 16 =
-    /// 416; 788 / 416 = 1.89 → Int = 1 → max(1, 1) = 1. (Pre-400 this was 2; the
-    /// window can now shrink below 820 anyway, so 820 is no longer a floor.)
-    func testColumnCountAtLegacyReferenceWidthYieldsOneColumn() {
-        XCTAssertEqual(BrowserWindow.columnCount(forWidth: 820), 1)
-    }
-
-    /// A roomier viewport (1000pt) yields EXACTLY 2 columns under the 400pt card
-    /// min. usable = 1000 - 32 = 968; 968 / 416 = 2.32 → Int = 2 → max(1, 2) = 2.
-    func testColumnCountAtRoomyWidthYieldsTwoColumns() {
-        XCTAssertEqual(BrowserWindow.columnCount(forWidth: 1000), 2)
-    }
-
-    /// A wide viewport (2000pt) reflows to 4 columns. usable = 2000 - 32 = 1968;
-    /// 1968 / 416 = 4.73 → Int = 4 → max(1, 4) = 4.
-    func testColumnCountWideWidthYieldsFourColumns() {
-        XCTAssertEqual(BrowserWindow.columnCount(forWidth: 2000), 4)
-    }
-
-    // MARK: - columnCount clamped by card count (#067 focus fills the width)
-
-    /// A single card never leaves empty columns beside it: focus mode (#067)
-    /// collapses the grid to ONE card, and the raw width-driven count (4 columns
-    /// at 2000pt) would strand it at `cardMinWidth` with three empty columns of
-    /// dead space to its right. Clamping by the rendered card count widens the
-    /// lone card to the full viewport instead.
-    func testColumnCountClampsToSingleCard() {
-        XCTAssertEqual(
-            BrowserWindow.columnCount(forWidth: 2000, cardCount: 1), 1
+    /// The default window width holds all three columns at their ideal widths,
+    /// so the card stack opens at its ideal width rather than being squeezed.
+    func testDefaultWindowWidthHoldsAllColumnsAtIdealWidth() {
+        XCTAssertGreaterThanOrEqual(
+            BrowserWindow.defaultWindowWidth,
+            BrowserWindow.sidebarIdealWidth
+                + BrowserWindow.contentColumnIdealWidth
+                + BrowserWindow.detailIdealWidth
         )
     }
 
-    /// Two cards in a 4-column-wide viewport use 2 columns, not 4 — each card
-    /// takes half the width rather than a quarter with half the grid empty.
-    func testColumnCountClampsToCardCount() {
-        XCTAssertEqual(
-            BrowserWindow.columnCount(forWidth: 2000, cardCount: 2), 2
+    /// The window minimum still floors at the columns' MINIMUM widths, and the
+    /// default window is larger than that minimum.
+    func testWindowMinWidthHoldsAllColumnsAtMinimumWidth() {
+        XCTAssertGreaterThanOrEqual(
+            BrowserWindow.windowMinWidth,
+            BrowserWindow.sidebarMinWidth
+                + BrowserWindow.contentColumnMinWidth
+                + BrowserWindow.detailMinWidth
         )
+        XCTAssertLessThan(BrowserWindow.windowMinWidth, BrowserWindow.defaultWindowWidth)
     }
 
-    /// The clamp only ever narrows: with MORE cards than the width can fit, the
-    /// width-driven count still wins (4 columns at 2000pt for 10 cards) so cards
-    /// never shrink below `cardMinWidth`.
-    func testColumnCountNotWidenedByExtraCards() {
-        XCTAssertEqual(
-            BrowserWindow.columnCount(forWidth: 2000, cardCount: 10), 4
-        )
-    }
-
-    /// An exact match between card count and width capacity is unchanged.
-    func testColumnCountUnchangedWhenCardCountMatchesCapacity() {
-        XCTAssertEqual(
-            BrowserWindow.columnCount(forWidth: 2000, cardCount: 4), 4
-        )
-    }
-
-    /// The `max(1, …)` floor survives the clamp: an empty grid (no projects yet,
-    /// or every project hidden) must not yield 0 columns and divide by zero in
-    /// the row math.
-    func testColumnCountFloorHoldsAtZeroCards() {
-        XCTAssertEqual(
-            BrowserWindow.columnCount(forWidth: 2000, cardCount: 0), 1
-        )
-    }
-
-    /// The clamp composes with the narrow-width floor: one card in a narrow
-    /// viewport is still exactly one column.
-    func testColumnCountSingleCardInNarrowViewport() {
-        XCTAssertEqual(
-            BrowserWindow.columnCount(forWidth: 300, cardCount: 1), 1
-        )
-    }
-
-    // MARK: - columnCount balances the last row (#082: avoid grid holes)
-    //
-    // At width 1400 the raw width capacity is 3 columns. With 4 cards the old
-    // maximize-columns policy laid out 3 + 1 — a 3-card row atop a lone card,
-    // leaving a two-slot hole in the final row. The balancing step prefers a
-    // fuller final row: 4 cards fall back to 2 columns (a 2x2 grid, no hole).
-
-    /// FOUR cards at capacity-3 width reflow to 2 columns (2x2, no hole) rather
-    /// than the ragged 3 + 1. This is the #082 fix.
-    func testColumnCountBalancesFourCardsToTwoByTwo() {
-        XCTAssertEqual(
-            BrowserWindow.columnCount(forWidth: 1400, cardCount: 4), 2
-        )
-    }
-
-    /// FIVE cards at capacity-3 width keep 3 columns: the near-square floor
-    /// (ceil(sqrt(5)) == 3) is the only candidate, and 5 is not divisible by 3,
-    /// so the width capacity stands and a single one-slot hole is deliberately
-    /// tolerated rather than collapsing to a jaggeder 2-column layout.
-    func testColumnCountKeepsThreeForFiveCardsAtCapacityThree() {
-        XCTAssertEqual(
-            BrowserWindow.columnCount(forWidth: 1400, cardCount: 5), 3
-        )
-    }
-
-    // MARK: - effectiveLayoutMode (fit collapses to scroll at one column)
-
-    /// Fit-to-screen at a SINGLE column collapses to scroll: stacking full-width
-    /// cards with stretched heights would just make one tall card per screen, so
-    /// the grid scrolls normally instead.
-    func testEffectiveLayoutModeFitAtOneColumnFallsBackToScroll() {
-        XCTAssertEqual(BrowserWindow.effectiveLayoutMode(.fit, columnCount: 1), .scroll)
-    }
-
-    /// A zero/degenerate column count is also treated as the single-column case
-    /// and falls back to scroll (defensive — the grid floors columns at 1 anyway).
-    func testEffectiveLayoutModeFitAtZeroColumnsFallsBackToScroll() {
-        XCTAssertEqual(BrowserWindow.effectiveLayoutMode(.fit, columnCount: 0), .scroll)
-    }
-
-    /// With two or more columns the requested fit mode is honored verbatim.
-    func testEffectiveLayoutModeFitAtTwoColumnsStaysFit() {
-        XCTAssertEqual(BrowserWindow.effectiveLayoutMode(.fit, columnCount: 2), .fit)
-    }
-
-    /// Scroll mode is never altered by the column count.
-    func testEffectiveLayoutModeScrollAlwaysScroll() {
-        XCTAssertEqual(BrowserWindow.effectiveLayoutMode(.scroll, columnCount: 1), .scroll)
-        XCTAssertEqual(BrowserWindow.effectiveLayoutMode(.scroll, columnCount: 4), .scroll)
-    }
-
-    // MARK: - rowIndices (grouping card indices into fit-grid rows #039)
-
-    /// An empty grid has no rows regardless of the column count.
-    func testRowIndicesZeroCardsIsEmpty() {
-        XCTAssertEqual(BrowserWindow.rowIndices(count: 0, columns: 3), [])
-    }
-
-    /// A partial final row keeps the remaining indices: 5 cards over 2 columns is
-    /// [0,1] [2,3] [4] in reading order.
-    func testRowIndicesPartialFinalRow() {
-        XCTAssertEqual(
-            BrowserWindow.rowIndices(count: 5, columns: 2),
-            [[0, 1], [2, 3], [4]]
-        )
-    }
-
-    /// An exact fit groups evenly: 6 cards over 3 columns is [0,1,2] [3,4,5].
-    func testRowIndicesExactFit() {
-        XCTAssertEqual(
-            BrowserWindow.rowIndices(count: 6, columns: 3),
-            [[0, 1, 2], [3, 4, 5]]
-        )
-    }
-
-    /// A degenerate zero column count yields no rows (no infinite loop / divide).
-    func testRowIndicesZeroColumnsIsEmpty() {
-        XCTAssertEqual(BrowserWindow.rowIndices(count: 4, columns: 0), [])
-    }
-
-    // MARK: - columnAssignments (masonry column distribution #039)
-
-    /// An even split distributes indices round-robin in reading order: 4 cards
-    /// over 2 columns puts 0,2 in the first column and 1,3 in the second.
-    func testColumnAssignmentsEvenSplit() {
-        XCTAssertEqual(
-            BrowserWindow.columnAssignments(count: 4, columns: 2),
-            [[0, 2], [1, 3]]
-        )
-    }
-
-    /// An uneven count leaves the remainder in the leading columns: 5 cards over 2
-    /// columns is [0,2,4] and [1,3].
-    func testColumnAssignmentsUnevenRemainder() {
-        XCTAssertEqual(
-            BrowserWindow.columnAssignments(count: 5, columns: 2),
-            [[0, 2, 4], [1, 3]]
-        )
-    }
-
-    /// A single column collects every index in order.
-    func testColumnAssignmentsSingleColumn() {
-        XCTAssertEqual(
-            BrowserWindow.columnAssignments(count: 3, columns: 1),
-            [[0, 1, 2]]
-        )
-    }
-
-    /// A zero (or negative) card count yields no columns at all — an empty result.
-    func testColumnAssignmentsZeroCountIsEmpty() {
-        XCTAssertEqual(BrowserWindow.columnAssignments(count: 0, columns: 3), [])
-        XCTAssertEqual(BrowserWindow.columnAssignments(count: -5, columns: 3), [])
-    }
-
-    /// A zero/negative column count is floored to a single column (defensive — the
-    /// grid floors columns at 1 anyway), so every index lands in one column.
-    func testColumnAssignmentsZeroColumnsFlooredToOne() {
-        XCTAssertEqual(
-            BrowserWindow.columnAssignments(count: 2, columns: 0),
-            [[0, 1]]
-        )
-        XCTAssertEqual(
-            BrowserWindow.columnAssignments(count: 2, columns: -3),
-            [[0, 1]]
-        )
-    }
-
-    /// The flattened union of every column's indices is exactly `0..<count` with no
-    /// duplicates and no omissions — a representative coverage guard (7 over 3).
-    func testColumnAssignmentsUnionCoversAllIndicesExactly() {
-        let assignments = BrowserWindow.columnAssignments(count: 7, columns: 3)
-        let flattened = assignments.flatMap { $0 }.sorted()
-        XCTAssertEqual(flattened, Array(0..<7))
-        // No duplicates: the flattened set size equals the count.
-        XCTAssertEqual(Set(flattened).count, 7)
-    }
-
-    // MARK: - evenRowHeights (uniform, viewport-divided row heights #045/#057)
-
-    /// All rows get an IDENTICAL height: the viewport minus chrome divided evenly
-    /// across the rows, ignoring any per-row content height.
-    func testEvenRowHeightsAllRowsEqualAndFillViewport() {
-        let viewport: CGFloat = 600
-        let spacing: CGFloat = 10
-        let padding: CGFloat = 16
-        let result = BrowserWindow.evenRowHeights(
-            rowCount: 3,
-            viewportHeight: viewport,
-            spacing: spacing, padding: padding, minRowHeight: 160
-        )
-        let chrome: CGFloat = 2 * padding + 2 * spacing // 52
-        let expected: CGFloat = (viewport - chrome) / 3
-        XCTAssertEqual(result.count, 3)
-        for h in result { XCTAssertEqual(h, expected, accuracy: 0.001) }
-        // Explicitly assert all three entries are identical to one another.
-        XCTAssertEqual(result[0], result[1], accuracy: 0.0001)
-        XCTAssertEqual(result[1], result[2], accuracy: 0.0001)
-    }
-
-    /// A viewport whose even share comfortably clears the floor keeps every row
-    /// above the floor (no clamping).
-    func testEvenRowHeightsStaysAboveFloorWhenRoomy() {
-        let floor: CGFloat = 160
-        let result = BrowserWindow.evenRowHeights(
-            rowCount: 2,
-            viewportHeight: 1000,
-            spacing: 16, padding: 16, minRowHeight: floor
-        )
-        for h in result { XCTAssertGreaterThan(h, floor) }
-    }
-
-    /// CLAMP TO FLOOR: a small viewport spread across many rows yields an even
-    /// share below the floor, so every row is pinned to EXACTLY the floor and the
-    /// ScrollView absorbs the overflow.
-    func testEvenRowHeightsClampsAllRowsToFloorWhenTight() {
-        let floor: CGFloat = 160
-        let result = BrowserWindow.evenRowHeights(
-            rowCount: 5,
-            viewportHeight: 400,
-            spacing: 16, padding: 16, minRowHeight: floor
-        )
-        XCTAssertEqual(result, [floor, floor, floor, floor, floor])
-    }
-
-    /// No rows → no heights, never a divide-by-zero.
-    func testEvenRowHeightsZeroRowsIsEmpty() {
-        let result = BrowserWindow.evenRowHeights(
-            rowCount: 0,
-            viewportHeight: 800,
-            spacing: 16, padding: 16, minRowHeight: 160
-        )
-        XCTAssertTrue(result.isEmpty)
-    }
-
-    /// An unmeasured viewport (height 0) falls back to one floor height per row.
-    func testEvenRowHeightsUnmeasuredViewportReturnsFloorPerRow() {
-        let floor: CGFloat = 160
-        let result = BrowserWindow.evenRowHeights(
-            rowCount: 3,
-            viewportHeight: 0,
-            spacing: 16, padding: 16, minRowHeight: floor
-        )
-        XCTAssertEqual(result, [floor, floor, floor])
-    }
-
-    /// A single row fills the whole viewport minus its outer padding (no inter-row
-    /// gutters), floored.
-    func testEvenRowHeightsSingleRowFillsViewport() {
-        let viewport: CGFloat = 700
-        let result = BrowserWindow.evenRowHeights(
-            rowCount: 1,
-            viewportHeight: viewport,
-            spacing: 16, padding: 16, minRowHeight: 160
-        )
-        XCTAssertEqual(result.count, 1)
-        XCTAssertEqual(result[0], viewport - 2 * 16, accuracy: 0.001)
-    }
-
-    /// #057 screenshot case: a 2-row fit grid at the measured viewport (848,
-    /// spacing 16, padding 16, floor 160) splits evenly into two equal rows of
-    /// `(848 - 48) / 2 = 400` — regardless of which cards land in which row.
-    func testEvenRowHeightsScreenshotTwoRowsSplitEvenly() {
-        let result = BrowserWindow.evenRowHeights(
-            rowCount: 2,
-            viewportHeight: 848,
-            spacing: 16, padding: 16, minRowHeight: 160
-        )
-        XCTAssertEqual(result, [400, 400])
-    }
-
-    // MARK: - isFocusedSingleCard (#071: the full-height focused-card case)
-    //
-    // Focus mode (#067) collapses the grid to a single project's card. #071 makes
-    // that lone card stretch to fill the whole viewport height. `isFocusedSingleCard`
-    // is the pure predicate that decides whether the dedicated full-height render
-    // path applies: it must be TRUE only when a project is focused (non-nil path)
-    // AND exactly one card is being rendered, and FALSE otherwise.
-
-    /// A focused path with exactly one rendered card IS the full-height case.
-    func testIsFocusedSingleCardTrueWhenFocusedAndOneCard() {
-        XCTAssertTrue(
-            BrowserWindow.isFocusedSingleCard(focusedProjectPath: "/p", cardCount: 1)
-        )
-    }
-
-    /// No focus (nil path) is never the full-height case, even with one card (e.g.
-    /// a single-project registry that isn't in focus mode scrolls normally).
-    func testIsFocusedSingleCardFalseWhenNoFocusEvenWithOneCard() {
-        XCTAssertFalse(
-            BrowserWindow.isFocusedSingleCard(focusedProjectPath: nil, cardCount: 1)
-        )
-    }
-
-    /// A focused path with more than one rendered card is not the single-card case.
-    func testIsFocusedSingleCardFalseWhenFocusedButMultipleCards() {
-        XCTAssertFalse(
-            BrowserWindow.isFocusedSingleCard(focusedProjectPath: "/p", cardCount: 2)
-        )
-    }
-
-    /// A focused path with zero rendered cards (e.g. the focused project filtered
-    /// away) is not the single-card case.
-    func testIsFocusedSingleCardFalseWhenFocusedButNoCards() {
-        XCTAssertFalse(
-            BrowserWindow.isFocusedSingleCard(focusedProjectPath: "/p", cardCount: 0)
-        )
-    }
-
-    /// No focus and no cards is likewise false.
-    func testIsFocusedSingleCardFalseWhenNoFocusAndNoCards() {
-        XCTAssertFalse(
-            BrowserWindow.isFocusedSingleCard(focusedProjectPath: nil, cardCount: 0)
-        )
-    }
-
-    // MARK: - focusedCardHeight (#071: the height the focused card must be given)
-
-    // The focus branch must IMPOSE a concrete height on the card. `ProjectCard`
-    // treats `constrainedHeight` only as a boolean signal (switch to the inner
-    // ScrollView layout) and deliberately sets no frame of its own, so a caller
-    // that forgets the frame leaves the card hugging its content — the #071 bug.
-    // `focusedCardHeight` is that value, and it must be non-nil whenever a card
-    // is focused so the caller always has a height to apply.
-
-    /// With a measured viewport the focused card fills it minus the outer padding
-    /// (chrome == 2*padding; a single row has no inter-row gutter).
-    func testFocusedCardHeightFillsViewportMinusPadding() {
-        let h = BrowserWindow.focusedCardHeight(viewportHeight: 900)
-        XCTAssertEqual(h, 900 - 2 * BrowserWindow.gridPadding, accuracy: 0.001)
-    }
-
-    /// Before the viewport is measured (height 0) it falls back to the row floor
-    /// rather than nil, so first paint still gets a real frame.
-    func testFocusedCardHeightFallsBackToFloorBeforeMeasurement() {
-        XCTAssertEqual(
-            BrowserWindow.focusedCardHeight(viewportHeight: 0),
-            BrowserWindow.fitRowMinHeight,
-            accuracy: 0.001
-        )
-    }
-
-    /// A viewport too short for the floor clamps to the floor and lets the
-    /// surrounding ScrollView absorb the overflow (clamp-to-floor contract).
-    func testFocusedCardHeightClampsToFloorOnShortViewport() {
-        XCTAssertEqual(
-            BrowserWindow.focusedCardHeight(viewportHeight: 50),
-            BrowserWindow.fitRowMinHeight,
-            accuracy: 0.001
-        )
+    /// The content column's ideal width sits between its minimum and a single
+    /// readable card width — no multi-card ideal any more (#096 dropped the grid).
+    func testContentColumnIdealWidthIsAboveMinimum() {
+        XCTAssertGreaterThan(BrowserWindow.contentColumnIdealWidth, BrowserWindow.contentColumnMinWidth)
+        XCTAssertLessThanOrEqual(BrowserWindow.contentColumnIdealWidth, 600)
     }
 
     // MARK: - applyManualOrder (manual override ordering)
@@ -1417,6 +1025,91 @@ final class BrowserWindowTests: XCTestCase {
             before: nil
         )
         XCTAssertEqual(result, ["/b", "/c", "/a"])
+    }
+
+    // MARK: - moveOrder (sidebar Projects `.onMove` -> manual order, #096)
+
+    /// Moving the first row below the third (`.onMove` destination 3) lands it
+    /// after the third, matching SwiftUI's `move(fromOffsets:toOffset:)`.
+    func testMoveOrderMovesRowDown() {
+        let result = BrowserViewModel.moveOrder(
+            ["/a", "/b", "/c", "/d"], fromOffsets: IndexSet(integer: 0), toOffset: 3
+        )
+        XCTAssertEqual(result, ["/b", "/c", "/a", "/d"])
+    }
+
+    /// Moving the last row to destination 0 puts it first.
+    func testMoveOrderMovesRowToTop() {
+        let result = BrowserViewModel.moveOrder(
+            ["/a", "/b", "/c"], fromOffsets: IndexSet(integer: 2), toOffset: 0
+        )
+        XCTAssertEqual(result, ["/c", "/a", "/b"])
+    }
+
+    /// Destination == count appends to the end.
+    func testMoveOrderMovesRowToEnd() {
+        let result = BrowserViewModel.moveOrder(
+            ["/a", "/b", "/c"], fromOffsets: IndexSet(integer: 0), toOffset: 3
+        )
+        XCTAssertEqual(result, ["/b", "/c", "/a"])
+    }
+
+    /// Out-of-range offsets (a stale `.onMove` racing a refresh) leave the order
+    /// unchanged instead of trapping.
+    func testMoveOrderOutOfRangeIsNoOp() {
+        let paths = ["/a", "/b"]
+        XCTAssertEqual(
+            BrowserViewModel.moveOrder(paths, fromOffsets: IndexSet(integer: 5), toOffset: 0),
+            paths
+        )
+        XCTAssertEqual(
+            BrowserViewModel.moveOrder(paths, fromOffsets: IndexSet(integer: 0), toOffset: 9),
+            paths
+        )
+    }
+
+    // MARK: - autoScrollTarget (card-stack edge auto-scroll, #096)
+
+    /// Scrolling down steps from the top-visible card to the next one.
+    func testAutoScrollTargetStepsDown() {
+        XCTAssertEqual(
+            ProjectStackView.autoScrollTarget(in: ["/a", "/b", "/c"], current: "/a", direction: .down),
+            "/b"
+        )
+    }
+
+    /// Scrolling up steps to the previous card.
+    func testAutoScrollTargetStepsUp() {
+        XCTAssertEqual(
+            ProjectStackView.autoScrollTarget(in: ["/a", "/b", "/c"], current: "/c", direction: .up),
+            "/b"
+        )
+    }
+
+    /// At either end there is nowhere to go, so the auto-scroll loop stops.
+    func testAutoScrollTargetIsNilAtEdges() {
+        XCTAssertNil(ProjectStackView.autoScrollTarget(in: ["/a", "/b"], current: "/a", direction: .up))
+        XCTAssertNil(ProjectStackView.autoScrollTarget(in: ["/a", "/b"], current: "/b", direction: .down))
+        XCTAssertNil(ProjectStackView.autoScrollTarget(in: [], current: nil, direction: .down))
+    }
+
+    /// No recorded scroll position means the stack is at its top: down steps to
+    /// the second card, up has nowhere to go.
+    func testAutoScrollTargetTreatsNilCurrentAsTop() {
+        XCTAssertEqual(
+            ProjectStackView.autoScrollTarget(in: ["/a", "/b"], current: nil, direction: .down),
+            "/b"
+        )
+        XCTAssertNil(ProjectStackView.autoScrollTarget(in: ["/a", "/b"], current: nil, direction: .up))
+    }
+
+    /// A current id that is no longer displayed (filtered out or removed) is
+    /// treated as the top too.
+    func testAutoScrollTargetTreatsUnknownCurrentAsTop() {
+        XCTAssertEqual(
+            ProjectStackView.autoScrollTarget(in: ["/a", "/b"], current: "/gone", direction: .down),
+            "/b"
+        )
     }
 
     // MARK: - manual-order revert control (#017 step 4)
@@ -1580,34 +1273,6 @@ final class BrowserWindowTests: XCTestCase {
             XCTAssertFalse(view.label.isEmpty, "empty label for \(view)")
             XCTAssertFalse(view.symbolName.isEmpty, "empty symbol for \(view)")
         }
-    }
-
-    /// `summaryCounts` MUST agree with `PlansStore.iconSpaceCounts` semantics
-    /// (review = review + in-review) and `PlansStore.failedCount`.
-    func testSummaryCountsAgreeWithStoreSemantics() {
-        let a = makeProject(
-            path: "/a", name: "A",
-            tasks: [makeTask(id: "001", status: .inProgress, failure: makeFailure()),
-                    makeTask(id: "002", status: .review),
-                    makeTask(id: "003", status: .inReview)],
-            activeTasks: [makeTask(id: "001", status: .inProgress, failure: makeFailure()),
-                          makeTask(id: "002", status: .review),
-                          makeTask(id: "003", status: .inReview)]
-        )
-        let b = makeProject(
-            path: "/b", name: "B",
-            tasks: [makeTask(id: "004", status: .inProgress),
-                    makeTask(id: "005", status: .inReview, failure: makeFailure())],
-            activeTasks: [makeTask(id: "004", status: .inProgress),
-                          makeTask(id: "005", status: .inReview, failure: makeFailure())]
-        )
-        let counts = BrowserViewModel.summaryCounts(in: [a, b])
-        // in-progress: /a 001 + /b 004 = 2
-        XCTAssertEqual(counts.inProgress, 2)
-        // review (review + in-review): /a 002 + /a 003 + /b 005 = 3
-        XCTAssertEqual(counts.review, 3)
-        // failed: /a 001 + /b 005 = 2
-        XCTAssertEqual(counts.failed, 2)
     }
 
     // MARK: - (#094 Step 2) Task staleness / sorting / grouping

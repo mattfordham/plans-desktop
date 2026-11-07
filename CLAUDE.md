@@ -14,7 +14,12 @@ Two surfaces:
 - **Menu bar glance (Surface A):** per-project task counts by status, compact
   glyph/label vocabulary, no window needed.
 - **Browser window (Surface B):** cross-project browser — a three-column
-  split view (sidebar / card grid or task list / plan detail).
+  split view (sidebar / content / plan detail). The sidebar lists a "Status"
+  section of cross-project smart views, Favourites, and Projects. Its "All projects"
+  entry shows a vertical, scrolling stack of project cards
+  (`ProjectStackView`, with its own stack-only toolbar items: All/Active view
+  mode and Sort by Recency); a smart view or a single project shows a flat
+  task list.
 
 `desktop-app-spec.md` is the authoritative spec, including the two plans-cc data
 contracts (the registry file and the task-file markdown format). Consult it
@@ -42,6 +47,10 @@ swift test               # run the XCTest suite
   - `MenuBarLabel.swift` / `MenuBarView.swift` — Surface A.
   - `BrowserWindow.swift` / `PlanDetailView.swift` / `ProjectCard.swift` —
     Surface B.
+  - `ProjectStackView.swift` — the "All projects" card stack (a plain
+    `ScrollView` + `VStack` of full-width, natural-height cards; drag reorder;
+    stack-only toolbar). Nothing in it measures its own size — keep it that way
+    (measured-size feedback caused layout-loop hangs, #096).
   - `TaskStatus+Glance.swift` / `TaskType+Glyph.swift` — glyph/label vocabulary.
 - `Tests/PlansTests/` — XCTest unit tests.
 - `Resources/` — `Info.plist`, `Plans.icns`.
