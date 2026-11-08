@@ -1116,6 +1116,26 @@ final class BrowserWindowTests: XCTestCase {
         )
     }
 
+    // MARK: - activeCount (sidebar project-row count badge, #108)
+
+    /// The badge count is exactly the project's `activeTasks.count`, and is `0`
+    /// for a project with no active tasks (so the row suppresses its badge).
+    func testActiveCountReflectsActiveTaskCount() {
+        let busy = makeProject(
+            path: "/busy",
+            name: "busy",
+            activeTasks: [
+                makeTask(id: "001", status: .inProgress),
+                makeTask(id: "002", status: .pending),
+                makeTask(id: "003", status: .review)
+            ]
+        )
+        let idle = makeProject(path: "/idle", name: "idle", activeTasks: [])
+
+        XCTAssertEqual(BrowserViewModel.activeCount(busy), 3)
+        XCTAssertEqual(BrowserViewModel.activeCount(idle), 0)
+    }
+
     // MARK: - sidebarGlyph (combined Projects section icon, #097)
 
     /// A starred project's row uses the filled-star glyph; an unstarred one uses
