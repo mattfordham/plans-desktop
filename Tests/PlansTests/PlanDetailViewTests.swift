@@ -798,6 +798,61 @@ final class PlanDetailViewTests: XCTestCase {
         XCTAssertEqual(PlanDetailView.progressFraction(done: 0, total: 5), 0.0)
     }
 
+    // MARK: - PlanDetailView.showsProgressDrawer (#107 — drawer presence gating)
+
+    /// The inline progress drawer is present ONLY when there is a `TaskRun` to
+    /// show for this task — a run that is live OR finished-but-not-yet-dismissed.
+    /// With no run (nil) there is nothing to chart, so the drawer is absent.
+    @MainActor
+    func testShowsProgressDrawerWhenRunPresent() {
+        XCTAssertTrue(
+            PlanDetailView.showsProgressDrawer(hasRun: true),
+            "The drawer must be present whenever a run exists to display"
+        )
+    }
+
+    /// With no run, the drawer is absent.
+    @MainActor
+    func testHidesProgressDrawerWhenNoRun() {
+        XCTAssertFalse(
+            PlanDetailView.showsProgressDrawer(hasRun: false),
+            "The drawer must stay absent when there is no run to display"
+        )
+    }
+
+    // MARK: - PlanDetailView.progressDrawerStartsExpanded (#107 — initial expanded state)
+
+    /// The drawer auto-expands on appear under the SAME rule the sheet used to
+    /// auto-open (`shouldAutoOpenProgress`): a run already live as the view
+    /// appears expands the drawer.
+    @MainActor
+    func testProgressDrawerStartsExpandedWhenAlreadyRunningOnAppear() {
+        XCTAssertTrue(PlanDetailView.progressDrawerStartsExpanded(onAppearRunning: true))
+    }
+
+    /// Not running on appear → the drawer starts collapsed.
+    @MainActor
+    func testProgressDrawerStartsCollapsedWhenNotRunningOnAppear() {
+        XCTAssertFalse(PlanDetailView.progressDrawerStartsExpanded(onAppearRunning: false))
+    }
+
+    /// A discussion run never auto-expands the drawer — its reply renders inline
+    /// in the conversation panel, mirroring `shouldAutoOpenProgress`.
+    @MainActor
+    func testProgressDrawerStartsCollapsedForDiscussRun() {
+        XCTAssertFalse(
+            PlanDetailView.progressDrawerStartsExpanded(onAppearRunning: true, mode: .discuss)
+        )
+    }
+
+    /// Any other live run (e.g. execute) auto-expands the drawer on appear.
+    @MainActor
+    func testProgressDrawerStartsExpandedForExecuteRun() {
+        XCTAssertTrue(
+            PlanDetailView.progressDrawerStartsExpanded(onAppearRunning: true, mode: .execute)
+        )
+    }
+
     // MARK: - MarkdownStyle
 
     /// The plan style keeps the editorial scale and tinted headings.

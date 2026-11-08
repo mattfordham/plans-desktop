@@ -107,16 +107,17 @@ struct PlanDetailView: View {
     /// the inline running state, and the progress sheet.
     @Environment(TaskRunner.self) private var runner
 
-    /// Whether the progress sheet is presented. Raised ONLY when this task is
-    /// already running as the window appears (the `.onAppear` already-running
-    /// case, gated by `shouldAutoOpenProgress(onAppearRunning:)`) or by the
-    /// header's "Show progress" button; lowered by the sheet's Done button. A
-    /// fresh run started from THIS view deliberately does NOT raise it (#061) —
-    /// matching the dashboard, where Execute starts the run without popping the
-    /// sheet. Kept as real view state (rather than binding the sheet to the run's
-    /// `isRunning`) so the user can close the sheet WITHOUT the close being
-    /// swallowed and without stopping the run — dismissing is decoupled from the
-    /// run's lifecycle.
+    /// Whether the inline progress DRAWER (#107) is expanded. The drawer — the
+    /// de-modalized run log that replaces the old `RunProgressSheet` — renders
+    /// below the #105 step-count `progressPanel`; this flag is its
+    /// expanded/collapsed state, NOT a sheet presentation. Raised on appear ONLY
+    /// when this task is already running (the `.onAppear` already-running case,
+    /// gated by `progressDrawerStartsExpanded(onAppearRunning:mode:)`) and
+    /// toggled by the header's "Show progress" button. A fresh run started from
+    /// THIS view deliberately does NOT auto-expand it (#061) — matching the
+    /// dashboard, where Execute starts the run without surfacing the log.
+    /// Collapsing only hides the drawer's body; it never stops the run — the run
+    /// keeps going in the background, reachable again via the chevron.
     @State private var showProgress = false
 
     /// Whether the "Refine Plan" sheet (#056) is presented. Raised by the
@@ -215,33 +216,24 @@ struct PlanDetailView: View {
             }
         }
         // If this task is ALREADY running when the window opens (e.g. the user
-        // clicked the card spinner to come here), pop the progress sheet right
-        // away. This is the ONLY auto-open path (#022): a fresh run started from
-        // this view does NOT pop the sheet (#061) — the header's "Show progress"
-        // button is the deliberate re-entry. The rule is encoded in the pure
-        // `shouldAutoOpenProgress(onAppearRunning:)` helper.
+        // clicked the card spinner to come here), start the progress drawer
+        // EXPANDED (#107). This is the ONLY auto-expand path (#022): a fresh run
+        // started from this view does NOT auto-expand (#061) — the header's
+        // "Show progress" button is the deliberate re-entry. The rule is encoded
+        // in the pure `progressDrawerStartsExpanded(onAppearRunning:mode:)` helper.
         .onAppear {
-            if let row,
-               PlanDetailView.shouldAutoOpenProgress(
-                   onAppearRunning: runner.isRunning(taskID: row.task.id, in: row.projectPath),
-                   mode: runner.run(for: row.task.id, in: row.projectPath)?.mode
-               ) {
-                showProgress = true
+            if let row {
+                showProgress = PlanDetailView.progressDrawerStartsExpanded(
+                    onAppearRunning: runner.isRunning(taskID: row.task.id, in: row.projectPath),
+                    mode: runner.run(for: row.task.id, in: row.projectPath)?.mode
+                )
             }
         }
-        // The modal progress sheet. Presented via real view state so the Done
-        // button / auto-dismiss can actually close it; `onDisappear` reloads the
-        // store so the task's new status is surfaced by the existing read path.
-        // Closing the sheet does NOT stop the run — it keeps going in the
-        // background (and stays visible on the card row's inline status).
-        .sheet(isPresented: $showProgress) {
-            RunProgressSheet(run: row.map { runner.run(for: $0.task.id, in: $0.projectPath) } ?? nil,
-                             taskID: row?.task.id)
-                .onDisappear {
-                    if let row { runner.dismiss(taskID: row.task.id, in: row.projectPath) }
-                    store.reload()
-                }
-        }
+        // #107: the modal progress sheet is gone — the run log now renders inline
+        // as the `progressDrawer` below the step-count panel (see `planScrollView`).
+        // The old sheet's `onDisappear` side effects (drop the finished run +
+        // reload the store so the new status surfaces) now fire from the drawer's
+        // finished-run "Done" affordance; collapsing a LIVE run never dismisses it.
         // The "Refine Plan" sheet (#056). Presented only when a row is resolved
         // (the Refine action that raises this only renders inside the `if let
         // row` header), so the unwrap is safe; if the row vanished mid-sheet we
@@ -369,11 +361,11 @@ struct PlanDetailView: View {
             // menu, so the bar reads as one tidy row instead of six equal pills.
             HStack(spacing: 8) {
                 if runner.isRunning(taskID: row.task.id, in: row.projectPath) {
-                    // This task is being worked: show live status + a way back
-                    // into the progress sheet (the run is independent of this
-                    // window now). No action buttons while it runs.
+                    // This task is being worked: show live status + a toggle for
+                    // the inline progress drawer (#107) — the run is independent
+                    // of this window. No action buttons while it runs.
                     ProgressView().controlSize(.small)
-                    Button("Show progress") { showProgress = true }
+                    Button("Show progress") { showProgress.toggle() }
                 } else {
                     // "Elaborate" — hands a pending plan off to the bundled
                     // runner in autonomous `plan-elaborate` mode. Available only
@@ -714,6 +706,98 @@ struct PlanDetailView: View {
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 
+    /// #107: the inline progress DRAWER — the de-modalized run log that replaces
+    /// the old `RunProgressSheet`, rendered full-bleed below the #105
+    /// `progressPanel` (same double-`.frame` full-bleed convention: inner content,
+    /// outer `.frame(maxWidth: .infinity, alignment: .leading)`, trailing
+    /// `Divider()` seam). A tappable header row shows the mode-aware run title
+    /// (`progressDrawerTitle`), a live spinner while the run runs, a Stop button
+    /// while running, and a chevron disclosure reflecting the `showProgress`
+    /// expanded state — tapping the row (or the chevron) toggles expansion. When
+    /// expanded it shows the shared `RunLogContents` (error banner, auto-scrolling
+    /// log, denial note, cost/turns summary). The log scrolls within a capped
+    /// band; nothing measures its own size (#096). Collapsing only hides the body
+    /// — it never stops the run; Stop ends it. Once the run has ENDED the header
+    /// shows a "Done" button in place of Stop — the finished-run dismissal that
+    /// replaces the old sheet's Done: it drops the finished run, reloads the store
+    /// so the new status surfaces, and collapses the drawer. A live run is never
+    /// dismissed by drawer interaction.
+    ///
+    /// Wired into `planScrollView` directly after the `progressPanel` block, gated
+    /// by `showsProgressDrawer(hasRun:)`. It is passed the resolved `TaskRow`;
+    /// a `nil` run renders the header with an empty log body.
+    @ViewBuilder
+    private func progressDrawer(_ row: TaskRow) -> some View {
+        let run = runner.run(for: row.task.id, in: row.projectPath)
+        VStack(spacing: 0) {
+            VStack(alignment: .leading, spacing: 0) {
+                // The tappable disclosure header: title + spinner + Stop +
+                // chevron. The whole row toggles; the chevron mirrors state.
+                Button {
+                    showProgress.toggle()
+                } label: {
+                    HStack(spacing: 10) {
+                        Image(systemName: showProgress ? "chevron.down" : "chevron.right")
+                            .imageScale(.small)
+                            .foregroundStyle(.secondary)
+                        Text(PlanDetailView.progressDrawerTitle(mode: run?.mode, taskID: row.task.id))
+                            .font(.subheadline.weight(.medium))
+                            .foregroundStyle(.primary)
+                        if run?.isRunning == true {
+                            ProgressView().controlSize(.small)
+                        }
+                        Spacer(minLength: 8)
+                        if run?.isRunning == true {
+                            Button(role: .destructive) {
+                                run?.stop()
+                            } label: {
+                                Label("Stop", systemImage: "stop.fill")
+                            }
+                            .controlSize(.small)
+                        } else if run != nil {
+                            // #107: the finished-run dismissal affordance,
+                            // replacing the old sheet's "Done" button. Only shown
+                            // once the run has ended (a LIVE run is never dropped by
+                            // interacting with the drawer — Stop ends it, collapsing
+                            // merely hides the body). Drops the finished run and
+                            // reloads the store so the task's new status surfaces,
+                            // then collapses the drawer. Rendered as its OWN button
+                            // (not nested in the disclosure Button) so its tap does
+                            // not toggle expansion.
+                            Button("Done") {
+                                if let run = runner.run(for: row.task.id, in: row.projectPath),
+                                   !run.isRunning {
+                                    runner.dismiss(taskID: row.task.id, in: row.projectPath)
+                                    store.reload()
+                                }
+                                showProgress = false
+                            }
+                            .controlSize(.small)
+                        }
+                    }
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+
+                // The expanded body: the shared run-log contents. Bounded by a
+                // max height so a long log scrolls within the band rather than
+                // growing the column unbounded; the height is a fixed cap, never
+                // a measured-and-fed-back size (#096).
+                if showProgress {
+                    RunLogContents(run: run)
+                        .frame(maxHeight: 320)
+                        .padding(.top, 12)
+                }
+            }
+            .padding(.horizontal, 28)
+            .padding(.vertical, 14)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(TaskStatus.inProgress.glanceColor.opacity(0.06))
+            Divider()
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
     /// The scrolling plan body: header, failure / denial notes, and the plan's
     /// sections.
     private func planScrollView(_ row: TaskRow) -> some View {
@@ -734,6 +818,16 @@ struct PlanDetailView: View {
                 if Self.showsProgressPanel(status: row.task.status,
                                            howProgress: row.task.howProgress) {
                     progressPanel(row)
+                }
+                // #107: the inline run-log DRAWER, rendered full-bleed in the same
+                // seam'd region directly below the step-count panel — the
+                // de-modalized replacement for the old `RunProgressSheet`. Present
+                // whenever there is a run to show (live OR finished-not-yet-
+                // dismissed); collapsed by default unless a run was already live on
+                // appear. Its own trailing Divider seams it off from the body.
+                if Self.showsProgressDrawer(
+                    hasRun: runner.run(for: row.task.id, in: row.projectPath) != nil) {
+                    progressDrawer(row)
                 }
                 VStack(alignment: .leading, spacing: 28) {
                     // #079: a PERSISTENT failure section (not a transient
@@ -1229,6 +1323,50 @@ struct PlanDetailView: View {
         return Double(done) / Double(total)
     }
 
+    /// Pure predicate for the inline progress drawer's presence (#107). The
+    /// drawer — the de-modalized run log that replaces `RunProgressSheet` — is
+    /// rendered ONLY when there is a `TaskRun` to display for this task: one that
+    /// is still live OR finished-but-not-yet-dismissed. With no run there is
+    /// nothing to chart, so the drawer is absent. Callers pass
+    /// `runner.run(for:in:) != nil`; keeping the signature a plain `Bool` keeps
+    /// the predicate pure/view-free and unit-testable without a `TaskRun`, in
+    /// keeping with #105's helper style.
+    static func showsProgressDrawer(hasRun: Bool) -> Bool {
+        hasRun
+    }
+
+    /// Decides whether the progress drawer starts EXPANDED when the detail view
+    /// appears (#107). Encodes the same auto-open-on-appear rule the modal sheet
+    /// used — delegating to `shouldAutoOpenProgress` — but named for the drawer's
+    /// initial expanded state: a run that is ALREADY live as the view appears
+    /// auto-expands the drawer, a fresh run started from this view does not (the
+    /// header's "Show progress" toggle is the deliberate re-entry), and a
+    /// `.discuss` run never auto-expands (its reply renders inline in the
+    /// conversation panel). Pure/static so the rule is unit-testable without the
+    /// view.
+    static func progressDrawerStartsExpanded(onAppearRunning: Bool, mode: RunMode? = nil) -> Bool {
+        shouldAutoOpenProgress(onAppearRunning: onAppearRunning, mode: mode)
+    }
+
+    /// The progress drawer's header title (#107), matching the old
+    /// `RunProgressSheet.title`/`modeVerb` logic so the de-modalized log keeps
+    /// the same wording. Capture / captureElaborate / executeYolo runs have no
+    /// real task id yet — they're keyed by a synthetic `"capture:<path>"`
+    /// identity — so they show only the verb ("Capturing", "Capturing &
+    /// elaborating", "Capturing & executing") rather than "Capturing task
+    /// #capture:/…". Real runs keep the "verb task #NNN" form; a `nil` mode falls
+    /// back to the Execute verb. Pure/static so the wording is unit-testable
+    /// without the view.
+    static func progressDrawerTitle(mode: RunMode?, taskID: String?) -> String {
+        let verb = mode?.activityVerb ?? RunMode.execute.activityVerb
+        switch mode {
+        case .capture, .captureElaborate, .executeYolo:
+            return verb
+        default:
+            return taskID.map { "\(verb) task #\($0)" } ?? verb
+        }
+    }
+
     /// Whether the composer may send `text`: a non-blank question while no
     /// discussion turn is pending.
     static func canSendDiscussion(_ text: String, isBusy: Bool) -> Bool {
@@ -1514,65 +1652,21 @@ struct PlanDetailView: View {
     }
 }
 
-/// The modal progress dialog for a single task's run. Renders that run's live
-/// NDJSON stream: a scrolling activity/text log, a cost/turns summary once the
-/// run reports `done`, an error banner on a streamed/terminal error, and a Stop
-/// button wired to the run's `stop()`. It dismisses via `@Environment(\.dismiss)`,
-/// so it works whether presented as a `.sheet` (the detail view) or a `.popover`
-/// (the card spinner) — the Done/Close button can close it either way; closing
-/// does NOT stop the run (it keeps going in the background).
-struct RunProgressSheet: View {
-    /// The specific run to render, or `nil` if there is none (e.g. the run was
-    /// dropped). When nil the sheet shows a minimal "no active run" state.
+/// The shared, host-agnostic run-log body (#107): the error banner, the
+/// auto-scrolling activity/text log, the denial note, and the cost/turns summary
+/// for a single `TaskRun`. Factored out of `RunProgressSheet` so BOTH the modal
+/// sheet (while it remains) and the inline progress drawer (`progressDrawer`)
+/// render one source of truth — no divergent copies of the log rendering (#107).
+/// It renders only the stream content; the title/header/footer and
+/// presentation chrome stay with each host. Nothing here measures its own size
+/// (#096) — the log scrolls within whatever height the host gives it.
+struct RunLogContents: View {
+    /// The run to render, or `nil` when there is none (e.g. it was dropped) — the
+    /// log then shows nothing.
     let run: TaskRun?
-
-    /// The task id being worked, for the header (e.g. "Working task #019").
-    let taskID: String?
-
-    @Environment(\.dismiss) private var dismiss
-
-    /// The id of the line to scroll into view on first appearance: the last
-    /// (newest) line, or `nil` when there are no lines yet. Pure so it's unit
-    /// testable without constructing the view.
-    static func scrollTarget(for lines: [LoggedEvent]) -> UUID? {
-        lines.last?.id
-    }
-
-    /// Whether the red failure banner should be shown. Pure so it's unit
-    /// testable without constructing the view.
-    ///
-    /// A `done`-derived failure (a budget/turn cap or the #058 stranded signal)
-    /// latches `run.error` the moment the terminal `done` line is ingested — but
-    /// a `done` does NOT clear `isRunning` (only `finish()` does). So without a
-    /// liveness check the banner armed mid-run and stayed armed while the run was
-    /// still live (spinner up, turns climbing) — the #081 false positive. Such a
-    /// `done`-derived failure is only meaningful once the run has actually ended,
-    /// so it is suppressed while `isRunning`.
-    ///
-    /// A genuine mid-run `.error(message)` event (a real crash / launch failure)
-    /// is a different animal: it means the run is broken now, so it must surface
-    /// immediately even while `isRunning`. We tell the two apart by comparing the
-    /// error text to `TaskRun.truncationError(for: stopReason)`: when they match,
-    /// the error came from the `done` classification and gets the liveness gate;
-    /// otherwise it's a genuine error and shows right away.
-    static func shouldShowFailureBanner(
-        error: String?,
-        isRunning: Bool,
-        stopReason: String?
-    ) -> Bool {
-        guard let error else { return false }
-        // Ended runs always show whatever error latched.
-        guard isRunning else { return true }
-        // Still running: suppress only a `done`-derived truncation/stranded
-        // failure (its text equals the mapping for the current stop reason).
-        // Any other error (a genuine mid-run crash/launch failure) shows now.
-        return TaskRun.truncationError(for: stopReason) != error
-    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            header
-
             if let error = run?.error,
                RunProgressSheet.shouldShowFailureBanner(
                    error: error,
@@ -1584,11 +1678,9 @@ struct RunProgressSheet: View {
 
             logList
 
-            // Task #092: the persistent denial note in the run-summary area. Shown
-            // whenever the run hit one or more denied tool calls, EVEN WHEN it
-            // finished cleanly — a caution, visually distinct from the red
-            // `errorBanner` above. Sits beside the cost/turns summary so the user
-            // sees the plan may be built on incomplete information.
+            // Task #092: the persistent denial note. Shown whenever the run hit
+            // one or more denied tool calls, EVEN WHEN it finished cleanly — a
+            // caution, visually distinct from the red `errorBanner` above.
             if let run, !run.deniedTools.isEmpty {
                 deniedSummary(count: run.deniedTools.count,
                               names: Array(run.deniedToolNames).sorted())
@@ -1597,47 +1689,6 @@ struct RunProgressSheet: View {
             if let summary = run?.summary {
                 summaryRow(summary)
             }
-
-            footer
-        }
-        .padding(12)
-        // Cap the height so a long run log can't grow the dialog unbounded.
-        // This matters most when presented as a popover from the card spinner,
-        // which has no enclosing window to bound it; the `logList` ScrollView
-        // scrolls any overflow within the cap.
-        .frame(minWidth: 480, minHeight: 360, maxHeight: 520)
-    }
-
-    /// The verb for this run's mode ("Executing" / "Elaborating" / "Capturing"
-    /// / "Capturing & elaborating" / "Capturing & executing" / "Deleting" /
-    /// "Backlogging" / "Restoring").
-    private var modeVerb: String {
-        run?.mode.activityVerb ?? RunMode.execute.activityVerb
-    }
-
-    /// The dialog title. Capture / captureElaborate / executeYolo runs have no
-    /// real task id yet — they're keyed by a synthetic `"capture:<path>"`
-    /// identity — so they show only the verb ("Capturing", "Capturing &
-    /// elaborating", "Capturing & executing") rather than "Capturing task
-    /// #capture:/…". Real runs keep the "verb task #NNN" form.
-    private var title: String {
-        switch run?.mode {
-        case .capture, .captureElaborate, .executeYolo:
-            return modeVerb
-        default:
-            return taskID.map { "\(modeVerb) task #\($0)" } ?? modeVerb
-        }
-    }
-
-    private var header: some View {
-        HStack {
-            Text(title)
-                .font(.headline)
-            if run?.isRunning == true {
-                ProgressView()
-                    .controlSize(.small)
-            }
-            Spacer()
         }
     }
 
@@ -1651,7 +1702,7 @@ struct RunProgressSheet: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 4) {
                     // Immediate-feedback placeholder: until the first NDJSON line
-                    // arrives, show a "Starting…" / "Waiting…" row so the sheet is
+                    // arrives, show a "Starting…" / "Waiting…" row so the log is
                     // never blank dead air while node resolves and the agent spins
                     // up (the first assistant message can take several seconds).
                     if lines.isEmpty, let phase = run?.phase {
@@ -1686,7 +1737,7 @@ struct RunProgressSheet: View {
                 }
             }
             // On first appearance against a run that already has buffered
-            // lines (e.g. opening the spinner of an in-progress task), jump
+            // lines (e.g. opening the drawer of an in-progress task), jump
             // straight to the newest line — instantly, no animation — so the
             // view opens at the bottom instead of the top.
             .onAppear {
@@ -1752,7 +1803,7 @@ struct RunProgressSheet: View {
     /// of denied tool calls and the distinct tool names, orange rather than red
     /// (the denial is non-fatal — the run still finished). Mirrors the detail
     /// view's `deniedToolsSection` so the same information persists whether the
-    /// user watches the sheet or returns to the plan body afterwards.
+    /// user watches the drawer or returns to the plan body afterwards.
     private func deniedSummary(count: Int, names: [String]) -> some View {
         VStack(alignment: .leading, spacing: 4) {
             HStack(alignment: .firstTextBaseline, spacing: 6) {
@@ -1783,6 +1834,115 @@ struct RunProgressSheet: View {
             .padding(8)
             .background(Color.red.opacity(0.85))
             .clipShape(RoundedRectangle(cornerRadius: 6))
+    }
+}
+
+/// The modal progress dialog for a single task's run. Renders that run's live
+/// NDJSON stream via the shared `RunLogContents` (#107): a scrolling
+/// activity/text log, a cost/turns summary once the run reports `done`, an error
+/// banner on a streamed/terminal error, plus its own title header and a Stop
+/// button wired to the run's `stop()`. It dismisses via `@Environment(\.dismiss)`,
+/// so it works whether presented as a `.sheet` (the detail view) or a `.popover`
+/// (the card spinner) — the Done/Close button can close it either way; closing
+/// does NOT stop the run (it keeps going in the background).
+struct RunProgressSheet: View {
+    /// The specific run to render, or `nil` if there is none (e.g. the run was
+    /// dropped). When nil the sheet shows a minimal "no active run" state.
+    let run: TaskRun?
+
+    /// The task id being worked, for the header (e.g. "Working task #019").
+    let taskID: String?
+
+    @Environment(\.dismiss) private var dismiss
+
+    /// The id of the line to scroll into view on first appearance: the last
+    /// (newest) line, or `nil` when there are no lines yet. Pure so it's unit
+    /// testable without constructing the view.
+    static func scrollTarget(for lines: [LoggedEvent]) -> UUID? {
+        lines.last?.id
+    }
+
+    /// Whether the red failure banner should be shown. Pure so it's unit
+    /// testable without constructing the view.
+    ///
+    /// A `done`-derived failure (a budget/turn cap or the #058 stranded signal)
+    /// latches `run.error` the moment the terminal `done` line is ingested — but
+    /// a `done` does NOT clear `isRunning` (only `finish()` does). So without a
+    /// liveness check the banner armed mid-run and stayed armed while the run was
+    /// still live (spinner up, turns climbing) — the #081 false positive. Such a
+    /// `done`-derived failure is only meaningful once the run has actually ended,
+    /// so it is suppressed while `isRunning`.
+    ///
+    /// A genuine mid-run `.error(message)` event (a real crash / launch failure)
+    /// is a different animal: it means the run is broken now, so it must surface
+    /// immediately even while `isRunning`. We tell the two apart by comparing the
+    /// error text to `TaskRun.truncationError(for: stopReason)`: when they match,
+    /// the error came from the `done` classification and gets the liveness gate;
+    /// otherwise it's a genuine error and shows right away.
+    static func shouldShowFailureBanner(
+        error: String?,
+        isRunning: Bool,
+        stopReason: String?
+    ) -> Bool {
+        guard let error else { return false }
+        // Ended runs always show whatever error latched.
+        guard isRunning else { return true }
+        // Still running: suppress only a `done`-derived truncation/stranded
+        // failure (its text equals the mapping for the current stop reason).
+        // Any other error (a genuine mid-run crash/launch failure) shows now.
+        return TaskRun.truncationError(for: stopReason) != error
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            header
+
+            // The shared run-log body (#107) — error banner, auto-scrolling log,
+            // denial note, and cost/turns summary — one source of truth with the
+            // inline progress drawer.
+            RunLogContents(run: run)
+
+            footer
+        }
+        .padding(12)
+        // Cap the height so a long run log can't grow the dialog unbounded.
+        // This matters most when presented as a popover from the card spinner,
+        // which has no enclosing window to bound it; the `logList` ScrollView
+        // scrolls any overflow within the cap.
+        .frame(minWidth: 480, minHeight: 360, maxHeight: 520)
+    }
+
+    /// The verb for this run's mode ("Executing" / "Elaborating" / "Capturing"
+    /// / "Capturing & elaborating" / "Capturing & executing" / "Deleting" /
+    /// "Backlogging" / "Restoring").
+    private var modeVerb: String {
+        run?.mode.activityVerb ?? RunMode.execute.activityVerb
+    }
+
+    /// The dialog title. Capture / captureElaborate / executeYolo runs have no
+    /// real task id yet — they're keyed by a synthetic `"capture:<path>"`
+    /// identity — so they show only the verb ("Capturing", "Capturing &
+    /// elaborating", "Capturing & executing") rather than "Capturing task
+    /// #capture:/…". Real runs keep the "verb task #NNN" form.
+    private var title: String {
+        switch run?.mode {
+        case .capture, .captureElaborate, .executeYolo:
+            return modeVerb
+        default:
+            return taskID.map { "\(modeVerb) task #\($0)" } ?? modeVerb
+        }
+    }
+
+    private var header: some View {
+        HStack {
+            Text(title)
+                .font(.headline)
+            if run?.isRunning == true {
+                ProgressView()
+                    .controlSize(.small)
+            }
+            Spacer()
+        }
     }
 
     private var footer: some View {
