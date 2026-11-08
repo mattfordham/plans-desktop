@@ -1812,6 +1812,27 @@ final class TaskRunnerTests: XCTestCase {
         XCTAssertTrue(runner.runningCaptures(projectPath: "/p").isEmpty)
     }
 
+    /// (#103 pinning) The capture-row SOURCE the project card reads — and the
+    /// single-project task list currently lacks — is exactly
+    /// `runningCaptures(projectPath:)`: an in-flight capture surfaces here even
+    /// though the project has NO parsed task yet (the capture has no `.plans/`
+    /// file, only its synthetic `capture:<path>:<uuid>` run). This pins the
+    /// Diagnosis before the fix wires the same source into `TaskListView`.
+    @MainActor
+    func testRunningCapturesReturnsInFlightCaptureForProjectWithNoParsedTask() {
+        let runner = TaskRunner()
+        let run = makeRunningCapture(path: "/p", baseline: [],
+                                     id: "capture:/p:" + UUID().uuidString)
+        runner.ingestRunForTesting(run)
+
+        // The capture is in flight; the project has no parsed task (empty
+        // baseline, no on-disk plan) — yet the card's row source still returns
+        // it, which is the surface `TaskListView` does not consult.
+        XCTAssertTrue(run.isRunning)
+        XCTAssertEqual(runner.runningCaptures(projectPath: "/p").map(\.taskID),
+                       [run.taskID])
+    }
+
     /// (Step 5) The manual popover-dismiss path and reconciliation do not fight:
     /// `dismiss(taskID:in:)` is idempotent. (a) Reconciliation dismissing first,
     /// then a later manual `dismiss` (popover `onDisappear`) is a safe no-op —

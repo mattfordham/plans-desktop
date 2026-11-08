@@ -221,6 +221,16 @@ struct TaskListView: View {
             }
             controlBar
             Divider()
+            // #103: in-flight capture spinner rows for the single-project list,
+            // the SAME shared source the project card reads. Placed as a sibling
+            // ABOVE the parsed task sections so a capture (which has no parsed
+            // `.plans/` file yet) surfaces even when `visibleRows` is empty, and
+            // never enters the sort/group/section pipeline or the detail-selection
+            // invariant. Smart-view lists (`project == nil`) show no capture rows.
+            if let project {
+                CaptureProgressRows(projectPath: project.projectPath)
+                    .padding(.horizontal, ProjectCard.rowColumns.cardHorizontalPadding)
+            }
             if visibleRows.isEmpty {
                 // Centered muted empty state, mirroring the grid's "No projects".
                 Text(rows.isEmpty ? "No tasks" : "No matching tasks")

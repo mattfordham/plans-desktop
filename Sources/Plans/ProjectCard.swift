@@ -59,16 +59,10 @@ struct ProjectCard: View {
     /// task's new status is surfaced by the existing read path. Read-only (§2).
     @Environment(PlansStore.self) private var store
 
-    /// The shared "Work this task" runner, for the per-row Elaborate / Execute
-    /// icon buttons and inline running status. Reads only — the run itself is the
-    /// sole writer of `.plans/` (§2), driven by the bundled Agent-SDK process.
-    @Environment(TaskRunner.self) private var runner
-
-    /// Which row's run-progress popover is currently open, by task id, or `nil`
-    /// when none is. At most one progress popover is open at a time per card; the
-    /// per-task `Binding<Bool>` from `progressPopover(for:)` drives the `.popover`
-    /// on each row's spinner.
-    @State private var progressPopoverTaskID: String? = nil
+    // #103: the card no longer reads `TaskRunner` directly — the in-flight
+    // capture rows moved to the shared `CaptureProgressRows` view, which reads
+    // the runner from the environment itself. (`PlanRowActions` likewise owns its
+    // own `TaskRunner` access for the per-row Elaborate / Execute controls.)
 
     /// #068: which plan row the pointer is currently over, by task id, or `nil`
     /// when none is. At most one row is hovered at a time; each `planRow` reads
@@ -88,17 +82,6 @@ struct ProjectCard: View {
     /// filter `Menu`; consumed by the `rows` computed property through the pure
     /// `BrowserViewModel.activeRows(_:matchingType:)` helper.
     @State private var typeFilter: TaskType? = nil
-
-    /// A per-task `Binding<Bool>` for the run-progress popover: it reads `true`
-    /// only when `progressPopoverTaskID` is this `taskID`, and on set assigns the
-    /// id when raised / clears it when lowered — so opening one row's popover (or
-    /// the popover dismissing itself) drives the single shared state.
-    private func progressPopover(for taskID: String) -> Binding<Bool> {
-        Binding(
-            get: { progressPopoverTaskID == taskID },
-            set: { progressPopoverTaskID = $0 ? taskID : nil }
-        )
-    }
 
     /// The clickable plan rows for this card: the active plans in `TaskParser`'s
     /// active order. Starring is a PROJECT-level concern (#035) that drives the
@@ -406,7 +389,12 @@ struct ProjectCard: View {
     /// the git footer.
     @ViewBuilder
     private var scrollableContent: some View {
-        captureRows
+        // #103: the in-flight capture rows are now the shared `CaptureProgressRows`
+        // view (also rendered by the single-project `TaskListView`), rendering
+        // nothing when no captures run. #087: non-plan-row content, so re-inset by
+        // the card gutter (only the plan rows bleed full width).
+        CaptureProgressRows(projectPath: project.projectPath)
+            .padding(.horizontal, ProjectCard.rowColumns.cardHorizontalPadding)
         body(for: rows)
         // #077: the optional backlog section sits BELOW the active plan list. It
         // is additive — the active `body(for:)` above (including its "No
@@ -519,75 +507,12 @@ struct ProjectCard: View {
         }
     }
 
-    // MARK: - Capture progress rows (in-flight captures)
+    // MARK: - Capture progress rows (#103 shared `CaptureProgressRows`)
 
-    /// One compact row per in-flight capture/execute run for this project,
-    /// stacked between the header divider and the plan rows. Each row is a small
-    /// spinner + the run's free-text `description`, tappable to toggle that run's
-    /// progress popover (the same `RunProgressSheet` machinery the per-row spinner
-    /// uses). The "+" stays put in the header, so submitting another capture adds
-    /// another row here rather than displacing the control. Rendered as nothing
-    /// when no captures are running, so an idle card shows no empty gap.
-    @ViewBuilder
-    private var captureRows: some View {
-        let captures = runner.runningCaptures(projectPath: project.projectPath)
-        if !captures.isEmpty {
-            VStack(alignment: .leading, spacing: 4) {
-                ForEach(captures, id: \.taskID) { run in
-                    captureRow(run)
-                }
-            }
-            // #087: capture rows are non-plan-row content, so re-inset by the card
-            // gutter (only the plan rows bleed full width).
-            .padding(.horizontal, ProjectCard.rowColumns.cardHorizontalPadding)
-        }
-    }
-
-    /// A single capture row: a small spinner plus the run's description,
-    /// tappable (same `contentShape` + `onTapGesture` primitive as the per-row
-    /// spinner) to toggle that run's progress popover, anchored to the row bounds.
-    /// On the popover's close the finished run is dropped and the store reloaded
-    /// so the new task surfaces via the read path.
-    ///
-    /// A capture that finished IN ERROR swaps the spinner for a warning glyph —
-    /// reconciliation pins errored runs (they are never auto-dismissed), so this
-    /// row is how the failure is raised; closing its popover is what clears it.
-    @ViewBuilder
-    private func captureRow(_ run: TaskRun) -> some View {
-        let failed = !run.isRunning && run.error != nil
-        HStack(spacing: 8) {
-            if failed {
-                Image(systemName: "exclamationmark.triangle.fill")
-                    .foregroundStyle(.red)
-                    .imageScale(.small)
-            } else {
-                ProgressView()
-                    .controlSize(.small)
-            }
-            Text(run.description ?? "Capturing…")
-                .font(.body)
-                .foregroundStyle(failed ? AnyShapeStyle(.red) : AnyShapeStyle(.secondary))
-                .lineLimit(1)
-                .truncationMode(.tail)
-            Spacer(minLength: 0)
-        }
-        .padding(.vertical, 5)
-        .contentShape(Rectangle())
-        .onTapGesture {
-            progressPopoverTaskID = (progressPopoverTaskID == run.taskID) ? nil : run.taskID
-        }
-        .popover(isPresented: progressPopover(for: run.taskID),
-                 attachmentAnchor: .rect(.bounds)) {
-            RunProgressSheet(run: run, taskID: run.taskID)
-                .frame(width: 480)
-                .onDisappear {
-                    runner.dismiss(taskID: run.taskID, in: project.projectPath)
-                    store.reload()
-                }
-        }
-        .help(failed ? "Capture failed — click for details, close to dismiss"
-                     : "Show capture progress")
-    }
+    // The in-flight capture spinner rows were extracted into the shared
+    // `CaptureProgressRows` view so the single-project `TaskListView` renders the
+    // same live-capture source and reconcile-on-close hand-off (#103). The card
+    // renders it from `scrollableContent`; see `CaptureProgressRows.swift`.
 
     // MARK: - Body (the active plan rows, or the empty state)
 
