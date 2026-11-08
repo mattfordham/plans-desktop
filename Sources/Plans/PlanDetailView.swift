@@ -17,6 +17,9 @@ private enum PlanType {
     static let listSpacing: CGFloat = 8
     /// Gap between a section heading and its body / between sections' blocks.
     static let sectionSpacing: CGFloat = 12
+    /// #105: the widest the plan body's text runs, so long lines stay a
+    /// comfortable reading measure in a wide detail column.
+    static let readingWidth: CGFloat = 760
 }
 
 /// Sizes and spacing for the shared markdown renderer, so plan bodies and
@@ -302,32 +305,48 @@ struct PlanDetailView: View {
     /// name (since there is no longer a selected sidebar project for context),
     /// plus a status line (the type badge and the status's `filterLabel`).
     private func detailHeader(_ row: TaskRow) -> some View {
-        VStack(alignment: .leading, spacing: 4) {
-            Text(row.projectName)
-                .font(.body)
+        VStack(alignment: .leading, spacing: 0) {
+            // #105: the owning project as a small eyebrow above the title.
+            Label(row.projectName, systemImage: "folder")
+                .font(.subheadline.weight(.medium))
                 .foregroundStyle(.secondary)
+                .labelStyle(.titleAndIcon)
+                .padding(.bottom, 4)
 
             Text(row.title ?? "(untitled)")
                 .font(.title)
                 .fontWeight(.semibold)
+                .fixedSize(horizontal: false, vertical: true)
+                .textSelection(.enabled)
+                .padding(.bottom, 10)
 
-            HStack(spacing: 6) {
-                // The status icon + color (blocked takes precedence), matching
-                // the cards and the menu-bar glance via the same `symbolName`.
+            HStack(spacing: 8) {
+                // #105: the status as a tinted capsule (icon + label in the
+                // status colour; blocked takes precedence), matching the cards
+                // and the menu-bar glance via the same `symbolName`.
                 let indicator = row.indicator
-                Image(systemName: indicator.symbolName)
-                    .imageScale(.medium)
-                    .foregroundStyle(indicator.color)
-                    .frame(width: 20, alignment: .center)
-                if row.task.isBlocked {
-                    Text("Blocked")
-                        .foregroundStyle(TaskStatusIndicator.blockedColor)
-                } else if let status = row.task.status {
-                    Text(status.filterLabel)
+                HStack(spacing: 5) {
+                    Image(systemName: indicator.symbolName)
+                        .imageScale(.small)
+                    if row.task.isBlocked {
+                        Text("Blocked")
+                    } else if let status = row.task.status {
+                        Text(status.filterLabel)
+                    }
                 }
+                .font(.subheadline.weight(.medium))
+                .foregroundStyle(indicator.color)
+                .padding(.horizontal, 8)
+                .padding(.vertical, 3)
+                .background(indicator.color.opacity(0.15), in: Capsule())
+                // The id and type in the plan rows' monospaced vocabulary.
+                Text(row.task.id)
+                    .font(.system(.subheadline, design: .monospaced))
+                    .foregroundStyle(.secondary)
                 if let type = row.type {
-                    Text("·").foregroundStyle(.secondary)
                     Text("[\(type.label)]")
+                        .font(.system(.subheadline, design: .monospaced))
+                        .foregroundStyle(.tertiary)
                 }
                 // A kept-worktree task (executed with the `keep` keyword) shows a
                 // muted house glyph — the desktop analogue of the plans-cc
@@ -336,16 +355,19 @@ struct PlanDetailView: View {
                 // so `showsKeptWorktreeMarker` (not `isKeptWorktree`) restricts the
                 // display to review-state rows, shared with the browser card (#086).
                 if row.task.showsKeptWorktreeMarker {
-                    Text("·").foregroundStyle(.secondary)
                     Image(systemName: TaskStatusIndicator.keptWorktreeSymbol)
                         .imageScale(.small)
                         .help("Kept in worktree — reviewable in isolation")
                 }
             }
-            .font(.body)
             .foregroundStyle(.secondary)
+            .padding(.bottom, 16)
 
-            HStack(spacing: 4) {
+            // #105: the action bar — the status-relevant run actions as text
+            // buttons (Execute prominent), the read-only file actions as compact
+            // icon buttons, and the backlog/delete housekeeping in an overflow
+            // menu, so the bar reads as one tidy row instead of six equal pills.
+            HStack(spacing: 8) {
                 if runner.isRunning(taskID: row.task.id, in: row.projectPath) {
                     // This task is being worked: show live status + a way back
                     // into the progress sheet (the run is independent of this
@@ -387,6 +409,7 @@ struct PlanDetailView: View {
                         } label: {
                             Label("Execute", systemImage: "play.fill")
                         }
+                        .buttonStyle(.borderedProminent)
                     }
 
                     // "Refine" — reopens an already-elaborated plan in
@@ -418,6 +441,7 @@ struct PlanDetailView: View {
                         } label: {
                             Label("Execute", systemImage: "play.fill")
                         }
+                        .buttonStyle(.borderedProminent)
                     }
 
                     // "Refine" (review) — resets a REVIEW-state plan back to
@@ -454,8 +478,11 @@ struct PlanDetailView: View {
                         } label: {
                             Label("Execute", systemImage: "play.fill")
                         }
+                        .buttonStyle(.borderedProminent)
                     }
                 }
+
+                Spacer(minLength: 8)
 
                 // Read-only file actions, ALWAYS visible regardless of task
                 // status or running state: reveal the plan's markdown file in
@@ -471,7 +498,9 @@ struct PlanDetailView: View {
                     }
                 } label: {
                     Label("Show in Finder", systemImage: "folder")
+                        .labelStyle(.iconOnly)
                 }
+                .help("Show in Finder")
 
                 Button {
                     if let url = Self.taskFileURL(
@@ -483,62 +512,87 @@ struct PlanDetailView: View {
                     }
                 } label: {
                     Label("Open in Markdown App", systemImage: "doc.text")
+                        .labelStyle(.iconOnly)
                 }
+                .help("Open in Markdown App")
 
-                // "Backlog" / "Restore" (#077 follow-up) — the two halves of
-                // plans-cc's defer/undefer pair, each handing the plan off to the
-                // bundled runner (the sole writer of `.plans/`, §2). They are
-                // mutually exclusive by construction: a task is either in
-                // `pending/` (backloggable) or in `backlog/` (restorable), never
-                // both, because the skills MOVE the file. `canRestore` is checked
-                // FIRST because a backlogged task keeps its real
-                // `pending`/`elaborated` status, so `canBacklog` would also be
-                // true for it — source directory wins over status.
-                //
-                // Neither needs a confirm alert: Restore is non-destructive, and
-                // Backlog is gated by `canBacklog` to the two quiescent statuses
-                // precisely so the skill's git-touching auto-pause can never fire
-                // from one click (see `canBacklog`).
-                if Self.canRestore(isBacklogged: row.task.isBacklogged) {
-                    Button {
-                        runner.run(projectPath: row.projectPath,
-                                   taskID: row.task.id, mode: .restore)
+                // #105: housekeeping (backlog/restore, delete) lives in an
+                // overflow menu; hidden entirely when neither applies.
+                if Self.canRestore(isBacklogged: row.task.isBacklogged)
+                    || Self.canBacklog(status: row.task.status, isBlocked: row.task.isBlocked)
+                    || Self.canDelete(status: row.task.status, isBlocked: row.task.isBlocked) {
+                    Menu {
+                        housekeepingActions(row)
                     } label: {
-                        Label("Restore", systemImage: "arrow.uturn.left")
+                        Label("More", systemImage: "ellipsis")
+                            .labelStyle(.iconOnly)
                     }
-                    .help("Move this plan out of the backlog, back to the active list")
-                } else if Self.canBacklog(status: row.task.status,
-                                          isBlocked: row.task.isBlocked) {
-                    Button {
-                        runner.run(projectPath: row.projectPath,
-                                   taskID: row.task.id, mode: .backlog)
-                    } label: {
-                        Label("Backlog", systemImage: "archivebox")
-                    }
-                    .help("Defer this plan — move it to the backlog holding pen")
-                }
-
-                // "Delete" — hands the plan off to the bundled runner in
-                // `plan-delete` mode. Lives in this always-visible file-actions
-                // block (so it's hidden automatically while a run is in flight)
-                // rather than the status-gated block, because `canDelete` is
-                // true at every status. The modal confirm below is the REAL
-                // safety gate: the runner does not allowlist `AskUserQuestion`,
-                // so `plan-delete`'s own yes/no prompts can never reach the user
-                // (the delete prompt pre-answers them). This is the only place a
-                // human consents to an irreversible deletion.
-                if Self.canDelete(status: row.task.status, isBlocked: row.task.isBlocked) {
-                    Button {
-                        if Self.confirmDelete(row: row) {
-                            runner.run(projectPath: row.projectPath,
-                                       taskID: row.task.id, mode: .delete)
-                        }
-                    } label: {
-                        Label("Delete", systemImage: "trash")
-                    }
+                    .menuIndicator(.hidden)
+                    .fixedSize()
+                    .help("More actions")
                 }
             }
-            .padding(.top, 4)
+            .controlSize(.large)
+        }
+    }
+
+    /// #105: the backlog/restore and delete actions, shown in the detail
+    /// header's overflow menu.
+    @ViewBuilder
+    private func housekeepingActions(_ row: TaskRow) -> some View {
+        Group {
+            // "Backlog" / "Restore" (#077 follow-up) — the two halves of
+            // plans-cc's defer/undefer pair, each handing the plan off to the
+            // bundled runner (the sole writer of `.plans/`, §2). They are
+            // mutually exclusive by construction: a task is either in
+            // `pending/` (backloggable) or in `backlog/` (restorable), never
+            // both, because the skills MOVE the file. `canRestore` is checked
+            // FIRST because a backlogged task keeps its real
+            // `pending`/`elaborated` status, so `canBacklog` would also be
+            // true for it — source directory wins over status.
+            //
+            // Neither needs a confirm alert: Restore is non-destructive, and
+            // Backlog is gated by `canBacklog` to the two quiescent statuses
+            // precisely so the skill's git-touching auto-pause can never fire
+            // from one click (see `canBacklog`).
+            if Self.canRestore(isBacklogged: row.task.isBacklogged) {
+                Button {
+                    runner.run(projectPath: row.projectPath,
+                               taskID: row.task.id, mode: .restore)
+                } label: {
+                    Label("Restore", systemImage: "arrow.uturn.left")
+                }
+                .help("Move this plan out of the backlog, back to the active list")
+            } else if Self.canBacklog(status: row.task.status,
+                                      isBlocked: row.task.isBlocked) {
+                Button {
+                    runner.run(projectPath: row.projectPath,
+                               taskID: row.task.id, mode: .backlog)
+                } label: {
+                    Label("Backlog", systemImage: "archivebox")
+                }
+                .help("Defer this plan — move it to the backlog holding pen")
+            }
+
+            // "Delete" — hands the plan off to the bundled runner in
+            // `plan-delete` mode. Lives in this always-visible file-actions
+            // block (so it's hidden automatically while a run is in flight)
+            // rather than the status-gated block, because `canDelete` is
+            // true at every status. The modal confirm below is the REAL
+            // safety gate: the runner does not allowlist `AskUserQuestion`,
+            // so `plan-delete`'s own yes/no prompts can never reach the user
+            // (the delete prompt pre-answers them). This is the only place a
+            // human consents to an irreversible deletion.
+            if Self.canDelete(status: row.task.status, isBlocked: row.task.isBlocked) {
+                Button {
+                    if Self.confirmDelete(row: row) {
+                        runner.run(projectPath: row.projectPath,
+                                   taskID: row.task.id, mode: .delete)
+                    }
+                } label: {
+                    Label("Delete…", systemImage: "trash")
+                }
+            }
         }
     }
 
@@ -630,32 +684,41 @@ struct PlanDetailView: View {
     /// sections.
     private func planScrollView(_ row: TaskRow) -> some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 28) {
+            // #105: the header, then a full-bleed rule (outside the padded,
+            // width-capped columns), then the body.
+            VStack(alignment: .leading, spacing: 0) {
                 detailHeader(row)
-                // #079: a PERSISTENT failure section (not a transient
-                // banner) when the latest run for this task failed. Reuses
-                // the `errorBanner` visual style and offers a Retry that
-                // re-runs via the same Execute consent gate.
-                if let failure = row.task.failure {
-                    failureSection(row, failure: failure)
+                    .frame(maxWidth: PlanType.readingWidth, alignment: .leading)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(28)
+                Divider()
+                VStack(alignment: .leading, spacing: 28) {
+                    // #079: a PERSISTENT failure section (not a transient
+                    // banner) when the latest run for this task failed. Reuses
+                    // the `errorBanner` visual style and offers a Retry that
+                    // re-runs via the same Execute consent gate.
+                    if let failure = row.task.failure {
+                        failureSection(row, failure: failure)
+                    }
+                    // Task #092: a non-fatal DENIAL note for a run that reached
+                    // for tools not on the allowlist. Surfaced from the live
+                    // `TaskRun` (the detail body's only run handle) so it shows
+                    // EVEN WHEN the run otherwise finished cleanly — the user
+                    // needs to know the plan may be built on incomplete
+                    // information. Distinct from the red `failureSection`: this
+                    // is a caution (orange), not a failure.
+                    if let run = runner.run(for: row.task.id, in: row.projectPath),
+                       !run.deniedTools.isEmpty {
+                        deniedToolsSection(run)
+                    }
+                    ForEach(Array(row.task.sections.enumerated()), id: \.offset) { _, section in
+                        sectionView(section)
+                    }
                 }
-                // Task #092: a non-fatal DENIAL note for a run that reached
-                // for tools not on the allowlist. Surfaced from the live
-                // `TaskRun` (the detail body's only run handle) so it shows
-                // EVEN WHEN the run otherwise finished cleanly — the user
-                // needs to know the plan may be built on incomplete
-                // information. Distinct from the red `failureSection`: this
-                // is a caution (orange), not a failure.
-                if let run = runner.run(for: row.task.id, in: row.projectPath),
-                   !run.deniedTools.isEmpty {
-                    deniedToolsSection(run)
-                }
-                ForEach(Array(row.task.sections.enumerated()), id: \.offset) { _, section in
-                    sectionView(section)
-                }
+                .frame(maxWidth: PlanType.readingWidth, alignment: .leading)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(28)
             }
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(28)
         }
         .textSelection(.enabled)
     }
@@ -1157,10 +1220,14 @@ struct PlanDetailView: View {
     @ViewBuilder
     private func sectionView(_ section: TaskSection) -> some View {
         VStack(alignment: .leading, spacing: PlanType.sectionSpacing) {
+            // #105: one step below the plan title (`.title`), so What/Why/How
+            // read as sections of the plan rather than competing with its name.
             Text(section.heading)
-                .font(.title.weight(.bold))
+                .font(.title2.weight(.semibold))
 
-            if section.heading == "How" {
+            if let placeholder = Self.placeholderText(section.body) {
+                placeholderView(placeholder)
+            } else if section.heading == "How" {
                 howChecklist(section.body)
             } else {
                 markdownBlockView(section.body)
@@ -1321,6 +1388,47 @@ struct PlanDetailView: View {
     /// These are never interactive (§2): no `Toggle`, no `Button`, no binding,
     /// no writes.
     @ViewBuilder
+    /// #105: the plans-cc "to be filled" stub for a section that a later
+    /// lifecycle stage writes (`_To be filled during elaboration_`, …), with its
+    /// emphasis markers stripped, or `nil` when the body is real content. Only a
+    /// body that is SOLELY one such italic line counts. Pure.
+    static func placeholderText(_ body: String) -> String? {
+        let trimmed = body.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.contains("\n"), trimmed.count > 2 else { return nil }
+        for marker in ["_", "*"] where trimmed.hasPrefix(marker) && trimmed.hasSuffix(marker) {
+            let inner = String(trimmed.dropFirst().dropLast())
+                .trimmingCharacters(in: .whitespaces)
+            return inner.hasPrefix("To be filled") ? inner : nil
+        }
+        return nil
+    }
+
+    /// #105: a soft, recessed note standing in for a section a later stage will
+    /// write — muted italic text with a small hourglass in a faint dashed box,
+    /// so it reads as "not yet" rather than as plan content.
+    private func placeholderView(_ text: String) -> some View {
+        HStack(spacing: 8) {
+            Image(systemName: "hourglass")
+                .imageScale(.small)
+            Text(text)
+                .italic()
+        }
+        .font(.system(size: PlanType.bodySize - 2))
+        .foregroundStyle(.tertiary)
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            RoundedRectangle(cornerRadius: 8)
+                .fill(Color.primary.opacity(0.025))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 8)
+                .strokeBorder(Color.primary.opacity(0.1),
+                              style: StrokeStyle(lineWidth: 1, dash: [4, 3]))
+        )
+    }
+
     private func howChecklist(_ body: String) -> some View {
         VStack(alignment: .leading, spacing: PlanType.listSpacing) {
             ForEach(Array(BrowserViewModel.howSteps(body).enumerated()), id: \.offset) { _, step in

@@ -714,6 +714,30 @@ final class PlanDetailViewTests: XCTestCase {
         XCTAssertFalse(PlanDetailView.composerShowsStop(isBusy: false))
     }
 
+    // MARK: - Placeholder sections (#105)
+
+    /// A section body that is only plans-cc's italic "to be filled" stub is
+    /// recognised, and its text returned without the emphasis markers.
+    func testPlaceholderTextRecognisesToBeFilledStubs() {
+        XCTAssertEqual(PlanDetailView.placeholderText("_To be filled during execution_"),
+                       "To be filled during execution")
+        XCTAssertEqual(PlanDetailView.placeholderText("  _To be filled during elaboration._\n"),
+                       "To be filled during elaboration.")
+        XCTAssertEqual(PlanDetailView.placeholderText("_To be filled during elaboration (if 3+ files affected)_"),
+                       "To be filled during elaboration (if 3+ files affected)")
+        XCTAssertEqual(PlanDetailView.placeholderText("*To be filled during execution*"),
+                       "To be filled during execution")
+    }
+
+    /// Real content — including content that merely mentions the phrase, or a
+    /// stub followed by more lines — is never treated as a placeholder.
+    func testPlaceholderTextIgnoresRealContent() {
+        XCTAssertNil(PlanDetailView.placeholderText("Upgrade the stack."))
+        XCTAssertNil(PlanDetailView.placeholderText("_Note: to be filled in later_"))
+        XCTAssertNil(PlanDetailView.placeholderText("_To be filled during elaboration_\n\n- a real step"))
+        XCTAssertNil(PlanDetailView.placeholderText(""))
+    }
+
     // MARK: - MarkdownStyle
 
     /// The plan style keeps the editorial scale and tinted headings.

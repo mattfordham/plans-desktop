@@ -137,11 +137,9 @@ struct TaskListRow: View {
             PlanRowActions(row: row)
         }
         .padding(.vertical, 5)
-        // #095: unlike a card row, the list row's band runs flush to the content
-        // column's edges (no `rowBandLeadingMargin` outside the band), so the
-        // whole leading gutter moves INSIDE the band. The full card gutter keeps
-        // the row text aligned with the section header and control bar.
-        .padding(.leading, ProjectCard.rowColumns.cardHorizontalPadding)
+        // #095/#105: the band runs flush to the content column's edges, so the
+        // whole leading gutter sits INSIDE the band — shared with the card row.
+        .padding(.leading, ProjectCard.rowColumns.rowLeadingInset)
         .padding(.trailing, ProjectCard.rowColumns.rowHorizontalPadding)
         .background(
             ProjectCard.rowStyling.background(
@@ -173,6 +171,28 @@ struct TaskListRow: View {
 ///   toolbar idiom, bound to the persisted `store.taskSort` / `store.taskGroup`),
 /// - and shows a centered muted empty state when there are no rows (mirroring the
 ///   grid's "No projects" overlay).
+/// #105: the full-width section-header band shared by the grouped task list's
+/// group headers and the All Projects stack's project headers. The band's
+/// surface colour carries the space ABOVE its content (so the gap between
+/// sections reads as part of the next header, not the list background), and a
+/// separator runs along its bottom edge. Callers supply only the content.
+struct SectionHeaderBand: ViewModifier {
+    /// Space above the band's content, in the band's colour.
+    static let topPadding: CGFloat = 22
+    /// Space below the band's content, above its bottom separator.
+    static let bottomPadding: CGFloat = 6
+
+    func body(content: Content) -> some View {
+        content
+            .padding(.horizontal, ProjectCard.rowColumns.cardHorizontalPadding)
+            .padding(.top, Self.topPadding)
+            .padding(.bottom, Self.bottomPadding)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(.background.secondary)
+            .overlay(alignment: .bottom) { Divider() }
+    }
+}
+
 struct TaskListView: View {
     /// The already-resolved rows to display. Resolution (active + optional backlog,
     /// filtered by the sidebar selection) happens upstream in Segment 3.
@@ -238,12 +258,12 @@ struct TaskListView: View {
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
                 ScrollView {
-                    LazyVStack(alignment: .leading, spacing: 10) {
+                    LazyVStack(alignment: .leading, spacing: 0) {
                         ForEach(sections, id: \.title) { entry in
                             sectionView(title: entry.title, rows: entry.rows)
                         }
                     }
-                    .padding(.vertical, 8)
+                    .padding(.bottom, 8)
                     .frame(maxWidth: .infinity, alignment: .leading)
                 }
             }
@@ -346,14 +366,26 @@ struct TaskListView: View {
     /// from zero within the section so zebra parity is section-local.
     @ViewBuilder
     private func sectionView(title: String, rows: [TaskRow]) -> some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Text(title)
-                .font(.caption.weight(.semibold))
-                .textCase(.uppercase)
-                .foregroundStyle(.secondary)
-                .padding(.horizontal, ProjectCard.rowColumns.cardHorizontalPadding)
+        VStack(alignment: .leading, spacing: 0) {
+            // #105: a full-width header band — the project card's surface and a
+            // bottom separator — so each group reads as distinct from the rows
+            // instead of a muted caption floating on the same background. The
+            // space between groups belongs to the band (extra top padding in the
+            // band's colour) rather than a gap in the list's colour.
+            HStack(spacing: 6) {
+                Text(title)
+                    .font(.caption.weight(.semibold))
+                    .textCase(.uppercase)
+                    .foregroundStyle(.primary)
+                Text("\(rows.count)")
+                    .font(.caption.weight(.semibold))
+                    .monospacedDigit()
+                    .foregroundStyle(.secondary)
+                Spacer(minLength: 0)
+            }
+            .modifier(SectionHeaderBand())
 
-            VStack(spacing: 2) {
+            VStack(spacing: 0) {
                 ForEach(Array(rows.enumerated()), id: \.element.id) { index, row in
                     TaskListRow(
                         row: row,

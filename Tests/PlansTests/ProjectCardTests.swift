@@ -1,5 +1,6 @@
 import AppKit
 import XCTest
+import SwiftUI
 @testable import Plans
 
 /// Tests for the data-layer invariants the `ProjectCard` git footer depends on
@@ -237,6 +238,17 @@ final class ProjectCardTests: XCTestCase {
             )
         }
     }
+
+    /// #105: a selected row uses the same system selection fill as the
+    /// sidebar's selected row when it isn't focused (a neutral grey), not a
+    /// translucent wash of the accent colour.
+    func testSelectedRowUsesTheSidebarSelectionColor() {
+        XCTAssertEqual(
+            ProjectCard.rowStyling.background(isEven: true, isHovered: false, isSelected: true),
+            Color(nsColor: .unemphasizedSelectedContentBackgroundColor)
+        )
+    }
+
     // MARK: - rowColumns (row-owned band, #068 review fix)
 
     /// #068 review: the zebra/hover band must be ONE rectangle spanning the full
@@ -383,26 +395,39 @@ final class ProjectCardTests: XCTestCase {
         )
     }
 
-    /// #087 review: the row band stops short of the card's LEADING edge by a
-    /// small margin (it still bleeds to the trailing edge), so it doesn't sit
-    /// flush against the card's left border.
-    func testRowBandHasLeadingMargin() {
-        XCTAssertGreaterThan(
-            ProjectCard.rowColumns.rowBandLeadingMargin, 0,
-            "The row band must stop short of the card's leading edge"
+    /// #105: the All Projects stack is full-bleed like the All Plans list, so a
+    /// card row's band runs flush to the column's leading edge and the whole
+    /// card gutter moves INSIDE the band. That keeps the row text aligned with
+    /// the header/footer content, and identical to a `TaskListRow`.
+    func testRowLeadingInsetKeepsBandTextAlignedWithCardContent() {
+        XCTAssertEqual(
+            ProjectCard.rowColumns.rowLeadingInset,
+            ProjectCard.rowColumns.cardHorizontalPadding,
+            "The in-band leading inset must equal the card gutter so row text "
+                + "aligns with the header/footer content"
         )
     }
 
-    /// #087: the band's leading margin plus its inner text inset must equal the
-    /// card gutter, so the row text lines up with the re-inset header/footer
-    /// content.
-    func testRowInsetKeepsBandTextAlignedWithCardContent() {
-        XCTAssertEqual(
-            ProjectCard.rowColumns.rowBandLeadingMargin
-                + ProjectCard.rowColumns.rowHorizontalPadding,
-            ProjectCard.rowColumns.cardHorizontalPadding,
-            "Band margin + band text inset must match the card gutter so row "
-                + "text aligns with the re-inset header/footer content"
+    /// #105: project sections run full-bleed (no side inset), like the All
+    /// Plans list, so their row bands reach the column edges.
+    func testStackHasNoHorizontalInset() {
+        XCTAssertEqual(ProjectStackView.stackHorizontalPadding, 0)
+    }
+
+    /// #105: projects abut like the grouped task list's sections — no gap
+    /// between them and none above the first; each project's header band
+    /// carries the separating space instead.
+    func testStackSectionsAbutWithNoGaps() {
+        XCTAssertEqual(ProjectStackView.cardSpacing, 0)
+        XCTAssertEqual(ProjectStackView.stackVerticalPadding, 0)
+    }
+
+    /// #105: the shared section-header band carries the space ABOVE its label
+    /// (in the band's colour), so its top padding exceeds its bottom padding.
+    func testSectionHeaderBandCarriesTheSpaceAboveItsLabel() {
+        XCTAssertGreaterThan(
+            SectionHeaderBand.topPadding,
+            SectionHeaderBand.bottomPadding
         )
     }
 
