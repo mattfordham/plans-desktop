@@ -680,6 +680,40 @@ struct PlanDetailView: View {
         withAnimation { proxy.scrollTo(target, anchor: .bottom) }
     }
 
+    /// #105: the in-progress progress panel — a slim band between the header's
+    /// full-bleed Divider and the body, so an active plan reads its progress at a
+    /// glance without scrolling to the How checklist. Shows the in-progress
+    /// accent glyph (`play.circle.fill`, amber — the SAME `symbolName` /
+    /// `glanceColor` the cards and menu-bar glance use for in-progress, never a
+    /// new colour), a `"<done> of <total> steps"` count, and the built-in
+    /// `ProgressView` bar (NEVER a GeometryReader-measured width fed back into
+    /// layout — the project has a layout-loop-hang history, #096). Rendered by
+    /// the caller OUTSIDE the reading-width caps so it spans edge-to-edge; it
+    /// supplies its own faint amber background and a trailing `Divider()` so it
+    /// reads as a panel seam'd above (header Divider) and below.
+    private func progressPanel(_ row: TaskRow) -> some View {
+        let done = row.task.howProgress.done
+        let total = row.task.howProgress.total
+        return VStack(spacing: 0) {
+            HStack(spacing: 10) {
+                Image(systemName: TaskStatus.inProgress.symbolName)
+                    .foregroundStyle(TaskStatus.inProgress.glanceColor)
+                Text("\(done) of \(total) steps")
+                    .font(.subheadline.weight(.medium))
+                    .foregroundStyle(.secondary)
+                ProgressView(value: Double(done), total: Double(total))
+                    .tint(TaskStatus.inProgress.glanceColor)
+                    .frame(maxWidth: .infinity)
+            }
+            .padding(.horizontal, 28)
+            .padding(.vertical, 14)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(TaskStatus.inProgress.glanceColor.opacity(0.12))
+            Divider()
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
     /// The scrolling plan body: header, failure / denial notes, and the plan's
     /// sections.
     private func planScrollView(_ row: TaskRow) -> some View {
@@ -692,6 +726,15 @@ struct PlanDetailView: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(28)
                 Divider()
+                // #105: the in-progress progress panel, pushed down from the
+                // header — rendered full-bleed (OUTSIDE the reading-width caps,
+                // like the Divider above) so it spans edge-to-edge, with its own
+                // trailing Divider so it reads as a seam'd band between the
+                // header and the body. Gated to an in-progress plan with steps.
+                if Self.showsProgressPanel(status: row.task.status,
+                                           howProgress: row.task.howProgress) {
+                    progressPanel(row)
+                }
                 VStack(alignment: .leading, spacing: 28) {
                     // #079: a PERSISTENT failure section (not a transient
                     // banner) when the latest run for this task failed. Reuses
@@ -1160,6 +1203,30 @@ struct PlanDetailView: View {
     /// inline in the detail column.
     static func shouldAutoOpenProgress(onAppearRunning: Bool, mode: RunMode? = nil) -> Bool {
         onAppearRunning && mode != .discuss
+    }
+
+    /// Pure predicate for the in-progress progress panel's visibility (#105).
+    /// The panel — a step count + progress bar pushed down from the header — is
+    /// shown ONLY when the plan is `in-progress` AND its `## How` checklist has
+    /// at least one step (`total > 0`). `howProgress == (0, 0)` means the How
+    /// section has no checkboxes (NOT that work is complete), so there is nothing
+    /// to chart and the panel stays hidden. It deliberately stays up at 100%
+    /// (`done == total`) while the status is still `in-progress`: the panel
+    /// disappears on the status transition, not when the bar fills. Pure/static
+    /// so the gating rule is unit-testable without the view.
+    static func showsProgressPanel(status: TaskStatus?,
+                                   howProgress: (done: Int, total: Int)) -> Bool {
+        status == .inProgress && howProgress.total > 0
+    }
+
+    /// The progress bar's fill fraction for the in-progress panel (#105):
+    /// `done / total` as a `Double`, guarding divide-by-zero by returning `0`
+    /// when `total == 0`. Pure/static so the arithmetic is unit-testable without
+    /// the view; callers pass this (or `done`/`total` directly) to the built-in
+    /// `ProgressView` — nothing is measured, in keeping with #096.
+    static func progressFraction(done: Int, total: Int) -> Double {
+        guard total > 0 else { return 0 }
+        return Double(done) / Double(total)
     }
 
     /// Whether the composer may send `text`: a non-blank question while no

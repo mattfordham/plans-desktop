@@ -738,6 +738,66 @@ final class PlanDetailViewTests: XCTestCase {
         XCTAssertNil(PlanDetailView.placeholderText(""))
     }
 
+    // MARK: - PlanDetailView.showsProgressPanel (#105 — progress panel gating)
+
+    /// The progress panel shows ONLY while a plan is in-progress AND its How
+    /// checklist actually has steps. It stays up at 100% (every step ticked)
+    /// because the plan is still in-progress — the panel disappears when the
+    /// status transitions, not when the bar fills.
+    @MainActor
+    func testShowsProgressPanelForInProgressWithSteps() {
+        XCTAssertTrue(
+            PlanDetailView.showsProgressPanel(status: .inProgress, howProgress: (1, 3)),
+            "The panel must show for an in-progress plan with steps underway"
+        )
+        XCTAssertTrue(
+            PlanDetailView.showsProgressPanel(status: .inProgress, howProgress: (3, 3)),
+            "The panel must stay up at 100% while the plan is still in-progress"
+        )
+    }
+
+    /// An in-progress plan with NO checkboxes in its How section — `(0,0)` means
+    /// "no steps", not "complete" — has nothing to chart, so the panel is hidden.
+    @MainActor
+    func testHidesProgressPanelForInProgressWithoutSteps() {
+        XCTAssertFalse(
+            PlanDetailView.showsProgressPanel(status: .inProgress, howProgress: (0, 0)),
+            "The panel must stay hidden when the How section has no checkboxes"
+        )
+    }
+
+    /// The panel is in-progress ONLY: for every other status (and an undecodable
+    /// `nil`) it stays hidden even with steps present. Sweeps `CaseIterable` so a
+    /// new status is covered automatically.
+    @MainActor
+    func testHidesProgressPanelForEveryNonInProgressStatus() {
+        let others = TaskStatus.allCases.filter { $0 != .inProgress }
+        let statuses: [TaskStatus?] = others.map { $0 } + [nil]
+        for status in statuses {
+            XCTAssertFalse(
+                PlanDetailView.showsProgressPanel(status: status, howProgress: (2, 4)),
+                "The panel must stay hidden for status \(status?.rawValue ?? "nil")"
+            )
+        }
+    }
+
+    // MARK: - PlanDetailView.progressFraction (#105 — progress bar value)
+
+    /// The fraction is `done / total` when there are steps.
+    @MainActor
+    func testProgressFractionIsDoneOverTotal() {
+        XCTAssertEqual(PlanDetailView.progressFraction(done: 1, total: 4), 0.25)
+        XCTAssertEqual(PlanDetailView.progressFraction(done: 3, total: 3), 1.0)
+    }
+
+    /// With zero total the fraction guards divide-by-zero and returns `0`, even
+    /// when `done` is zero against a non-zero total too.
+    @MainActor
+    func testProgressFractionGuardsDivideByZero() {
+        XCTAssertEqual(PlanDetailView.progressFraction(done: 0, total: 0), 0.0)
+        XCTAssertEqual(PlanDetailView.progressFraction(done: 0, total: 5), 0.0)
+    }
+
     // MARK: - MarkdownStyle
 
     /// The plan style keeps the editorial scale and tinted headings.
