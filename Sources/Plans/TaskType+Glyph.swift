@@ -85,4 +85,13 @@ extension TaskStatus {
     /// The sidebar "Backlog" smart-view SF Symbol (#094): the same `archivebox`
     /// the browser's show-backlog toolbar toggle uses, kept here as vocabulary.
     static let backlogSymbolName = "archivebox"
+
+    /// The sidebar "All Plans" smart-view label (#102). "All Plans" is a
+    /// catch-all cross-project lens (every active, non-completed task), not a
+    /// `TaskStatus`, so its label/icon live here as static vocabulary alongside
+    /// the `backlog*` statics rather than being expressed inline in the view.
+    static let allPlansFilterLabel = "All Plans"
+    /// The sidebar "All Plans" smart-view SF Symbol (#102): a neutral stacked
+    /// glyph suggesting a collected pile of plans.
+    static let allPlansSymbolName = "square.stack.3d.up.fill"
 }

@@ -1400,6 +1400,57 @@ final class BrowserWindowTests: XCTestCase {
         }
     }
 
+    // MARK: - (#102) Status smart-view reorder + Pending + All Plans lenses
+
+    /// Sidebar display order IS `SmartView.allCases` order: Review first, then
+    /// Pending, In progress, Blocked, Failed, Backlog, and All Plans last.
+    func testSmartViewAllCasesOrder() {
+        XCTAssertEqual(
+            SmartView.allCases,
+            [.review, .pending, .inProgress, .blocked, .failed, .backlog, .all]
+        )
+    }
+
+    /// The Pending lens returns only active rows whose status is `.pending`,
+    /// across every project, preserving project + parser order.
+    func testSmartViewPendingActiveRowsAcrossProjects() {
+        let a = makeProject(
+            path: "/a", name: "A",
+            activeTasks: [makeTask(id: "001", status: .pending),
+                          makeTask(id: "002", status: .inProgress)]
+        )
+        let b = makeProject(
+            path: "/b", name: "B",
+            activeTasks: [makeTask(id: "003", status: .pending)]
+        )
+        let rows = BrowserViewModel.rows(in: [a, b], matching: .pending)
+        XCTAssertEqual(rows.map(\.id), ["/a/001", "/b/003"])
+    }
+
+    /// The All Plans lens returns every active row across projects — every
+    /// non-completed status — preserving project order then parser order.
+    func testSmartViewAllReturnsEveryActiveRowAcrossProjects() {
+        let a = makeProject(
+            path: "/a", name: "A",
+            activeTasks: [makeTask(id: "001", status: .pending),
+                          makeTask(id: "002", status: .inProgress),
+                          makeTask(id: "003", status: .review)]
+        )
+        let b = makeProject(
+            path: "/b", name: "B",
+            activeTasks: [makeTask(id: "004", status: .inReview),
+                          makeTask(id: "005", status: .elaborated)]
+        )
+        let rows = BrowserViewModel.rows(in: [a, b], matching: .all)
+        XCTAssertEqual(rows.map(\.id), ["/a/001", "/a/002", "/a/003", "/b/004", "/b/005"])
+    }
+
+    /// Pending reuses the shared status label; All Plans reads "All Plans".
+    func testSmartViewPendingAndAllLabels() {
+        XCTAssertEqual(SmartView.pending.label, TaskStatus.pending.filterLabel)
+        XCTAssertEqual(SmartView.all.label, "All Plans")
+    }
+
     // MARK: - (#094 Step 2) Task staleness / sorting / grouping
 
     func testTaskStalenessUsesModifiedWhenPresent() {

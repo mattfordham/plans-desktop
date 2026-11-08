@@ -518,27 +518,38 @@ struct TaskRow: Identifiable {
 ///
 /// `CaseIterable`/`Equatable`/pure value code so it is `Sendable`-clean and
 /// directly unit-testable without a view.
+/// `CaseIterable` order below IS the sidebar display order (#102): Review first,
+/// then Pending, In progress, Blocked, Failed, Backlog, and the All Plans lens
+/// last. `.pending` surfaces active tasks awaiting elaboration; `.all` surfaces
+/// every active (non-completed) task across every project.
 enum SmartView: String, CaseIterable, Equatable, Hashable {
-    /// Tasks whose status is `.inProgress`, across every project (active rows).
-    case inProgress
     /// Tasks in EITHER `.review` OR `.inReview` — one combined review lens.
     case review
+    /// Active tasks whose status is `.pending`, across every project.
+    case pending
+    /// Tasks whose status is `.inProgress`, across every project (active rows).
+    case inProgress
     /// Active tasks flagged blocked (`Task.isBlocked`).
     case blocked
     /// Active tasks carrying a run-failure overlay (`Task.failure != nil`).
     case failed
     /// Backlogged (deferred) tasks, across every project.
     case backlog
+    /// Every active (non-completed) task across every project — the "All Plans"
+    /// catch-all lens.
+    case all
 
     /// The sidebar label for this view, from the shared vocabulary. Review reads
     /// "Review" (it covers both review and in-review).
     var label: String {
         switch self {
         case .inProgress: return TaskStatus.inProgress.filterLabel
+        case .pending: return TaskStatus.pending.filterLabel
         case .review: return "Review"
         case .blocked: return "Blocked"
         case .failed: return "Failed"
         case .backlog: return TaskStatus.backlogFilterLabel
+        case .all: return TaskStatus.allPlansFilterLabel
         }
     }
 
@@ -546,10 +557,12 @@ enum SmartView: String, CaseIterable, Equatable, Hashable {
     var symbolName: String {
         switch self {
         case .inProgress: return TaskStatus.inProgress.symbolName
+        case .pending: return TaskStatus.pending.symbolName
         case .review: return TaskStatus.review.symbolName
         case .blocked: return TaskStatusIndicator.blockedSymbol
         case .failed: return TaskStatusIndicator.failureSymbol
         case .backlog: return TaskStatus.backlogSymbolName
+        case .all: return TaskStatus.allPlansSymbolName
         }
     }
 
@@ -557,10 +570,12 @@ enum SmartView: String, CaseIterable, Equatable, Hashable {
     var color: Color {
         switch self {
         case .inProgress: return TaskStatus.inProgress.glanceColor
+        case .pending: return TaskStatus.pending.glanceColor
         case .review: return TaskStatus.review.glanceColor
         case .blocked: return TaskStatusIndicator.blockedColor
         case .failed: return TaskStatusIndicator.failureColor
         case .backlog: return TaskStatus.backlogGlanceColor
+        case .all: return TaskStatusIndicator.neutralColor
         }
     }
 }
@@ -1100,6 +1115,9 @@ enum BrowserViewModel {
         case .inProgress:
             return projects.flatMap { activeRows($0) }
                 .filter { $0.task.status == .inProgress }
+        case .pending:
+            return projects.flatMap { activeRows($0) }
+                .filter { $0.task.status == .pending }
         case .review:
             return projects.flatMap { activeRows($0) }
                 .filter { $0.task.status == .review || $0.task.status == .inReview }
@@ -1109,6 +1127,8 @@ enum BrowserViewModel {
         case .failed:
             return projects.flatMap { activeRows($0) }
                 .filter { $0.task.failure != nil }
+        case .all:
+            return projects.flatMap { activeRows($0) }
         }
     }
 
