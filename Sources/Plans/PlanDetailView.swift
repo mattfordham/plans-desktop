@@ -714,12 +714,18 @@ struct PlanDetailView: View {
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 
-    /// The scrolling plan body: header, failure / denial notes, and the plan's
-    /// sections.
+    /// A PINNED top banner (header + full-bleed rule + in-progress progress
+    /// panel) above a scrolling plan body (failure / denial notes and the
+    /// plan's sections). #106: only the body scrolls; the banner stays fixed at
+    /// the top of the detail column.
     private func planScrollView(_ row: TaskRow) -> some View {
-        ScrollView {
-            // #105: the header, then a full-bleed rule (outside the padded,
-            // width-capped columns), then the body.
+        VStack(alignment: .leading, spacing: 0) {
+            // #106 pinned banner. #105: the header, then a full-bleed rule
+            // (outside the padded, width-capped columns), then the in-progress
+            // panel. An opaque `.bar` background keeps scrolled body content
+            // from showing through behind the header edges; the full-bleed rule
+            // (or the panel's own trailing Divider, when shown) reads as the
+            // banner's bottom seam.
             VStack(alignment: .leading, spacing: 0) {
                 detailHeader(row)
                     .frame(maxWidth: PlanType.readingWidth, alignment: .leading)
@@ -735,6 +741,10 @@ struct PlanDetailView: View {
                                            howProgress: row.task.howProgress) {
                     progressPanel(row)
                 }
+            }
+            .background(.bar)
+
+            ScrollView {
                 VStack(alignment: .leading, spacing: 28) {
                     // #079: a PERSISTENT failure section (not a transient
                     // banner) when the latest run for this task failed. Reuses
@@ -762,8 +772,8 @@ struct PlanDetailView: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(28)
             }
+            .textSelection(.enabled)
         }
-        .textSelection(.enabled)
     }
 
     /// The conversation half of the discussion panel: a compact header with a
