@@ -730,72 +730,83 @@ struct PlanDetailView: View {
     private func progressDrawer(_ row: TaskRow) -> some View {
         let run = runner.run(for: row.task.id, in: row.projectPath)
         VStack(spacing: 0) {
-            VStack(alignment: .leading, spacing: 0) {
-                // The tappable disclosure header: title + spinner + Stop +
-                // chevron. The whole row toggles; the chevron mirrors state.
-                Button {
-                    showProgress.toggle()
-                } label: {
-                    HStack(spacing: 10) {
-                        Image(systemName: showProgress ? "chevron.down" : "chevron.right")
-                            .imageScale(.small)
-                            .foregroundStyle(.secondary)
-                        Text(PlanDetailView.progressDrawerTitle(mode: run?.mode, taskID: row.task.id))
-                            .font(.subheadline.weight(.medium))
-                            .foregroundStyle(.primary)
-                        if run?.isRunning == true {
-                            ProgressView().controlSize(.small)
-                        }
-                        Spacer(minLength: 8)
-                        if run?.isRunning == true {
-                            Button(role: .destructive) {
-                                run?.stop()
-                            } label: {
-                                Label("Stop", systemImage: "stop.fill")
-                            }
-                            .controlSize(.small)
-                        } else if run != nil {
-                            // #107: the finished-run dismissal affordance,
-                            // replacing the old sheet's "Done" button. Only shown
-                            // once the run has ended (a LIVE run is never dropped by
-                            // interacting with the drawer — Stop ends it, collapsing
-                            // merely hides the body). Drops the finished run and
-                            // reloads the store so the task's new status surfaces,
-                            // then collapses the drawer. Rendered as its OWN button
-                            // (not nested in the disclosure Button) so its tap does
-                            // not toggle expansion.
-                            Button("Done") {
-                                if let run = runner.run(for: row.task.id, in: row.projectPath),
-                                   !run.isRunning {
-                                    runner.dismiss(taskID: row.task.id, in: row.projectPath)
-                                    store.reload()
-                                }
-                                showProgress = false
-                            }
-                            .controlSize(.small)
-                        }
-                    }
-                    .contentShape(Rectangle())
+            if showProgress {
+                // Expanded: the log runs edge-to-edge and scrolls UNDER a
+                // translucent header bar floating over its top edge. The log's
+                // top inset is a fixed constant (never a measured header height
+                // fed back into layout — #096).
+                ZStack(alignment: .top) {
+                    RunLogContents(run: run,
+                                   edgeToEdge: true,
+                                   horizontalPadding: Self.drawerGutter,
+                                   topPadding: Self.drawerLogTopInset)
+                        .frame(maxHeight: 360)
+                    progressDrawerHeader(row, run: run)
+                        .background(.bar)
+                        .overlay(alignment: .bottom) { Divider() }
                 }
-                .buttonStyle(.plain)
-
-                // The expanded body: the shared run-log contents. Bounded by a
-                // max height so a long log scrolls within the band rather than
-                // growing the column unbounded; the height is a fixed cap, never
-                // a measured-and-fed-back size (#096).
-                if showProgress {
-                    RunLogContents(run: run)
-                        .frame(maxHeight: 320)
-                        .padding(.top, 12)
-                }
+            } else {
+                progressDrawerHeader(row, run: run)
             }
-            .padding(.horizontal, 28)
-            .padding(.vertical, 14)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .background(TaskStatus.inProgress.glanceColor.opacity(0.06))
             Divider()
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    /// Horizontal gutter for the drawer header and edge-to-edge log — matches
+    /// the detail header's 28pt padding so everything lines up on one edge.
+    private static let drawerGutter: CGFloat = 28
+
+    /// Fixed top inset for the expanded log so its first line clears the
+    /// floating header bar. A constant, not a measured height (#096).
+    private static let drawerLogTopInset: CGFloat = 52
+
+    /// The drawer's disclosure header: chevron + title + spinner, with Stop
+    /// (live run) or Done (finished run) trailing. The whole row toggles
+    /// expansion; Stop/Done are their own buttons so they don't toggle.
+    private func progressDrawerHeader(_ row: TaskRow, run: TaskRun?) -> some View {
+        Button {
+            withAnimation(.snappy(duration: 0.2)) { showProgress.toggle() }
+        } label: {
+            HStack(spacing: 10) {
+                Image(systemName: "chevron.right")
+                    .imageScale(.small)
+                    .foregroundStyle(.secondary)
+                    .rotationEffect(.degrees(showProgress ? 90 : 0))
+                Text(PlanDetailView.progressDrawerTitle(mode: run?.mode, taskID: row.task.id))
+                    .font(.subheadline.weight(.medium))
+                    .foregroundStyle(.primary)
+                if run?.isRunning == true {
+                    ProgressView().controlSize(.small)
+                }
+                Spacer(minLength: 8)
+                if run?.isRunning == true {
+                    Button(role: .destructive) {
+                        run?.stop()
+                    } label: {
+                        Label("Stop", systemImage: "stop.fill")
+                    }
+                    .controlSize(.small)
+                } else if run != nil {
+                    // #107: the finished-run dismissal affordance (replaces the
+                    // old sheet's Done). A LIVE run is never dropped here.
+                    Button("Done") {
+                        if let run = runner.run(for: row.task.id, in: row.projectPath),
+                           !run.isRunning {
+                            runner.dismiss(taskID: row.task.id, in: row.projectPath)
+                            store.reload()
+                        }
+                        showProgress = false
+                    }
+                    .controlSize(.small)
+                }
+            }
+            .padding(.horizontal, Self.drawerGutter)
+            .padding(.vertical, 10)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
     }
 
     /// The scrolling plan body: header, failure / denial notes, and the plan's
@@ -1665,27 +1676,65 @@ struct RunLogContents: View {
     /// log then shows nothing.
     let run: TaskRun?
 
+    /// `false` (default): the inset rounded log field used by the popover.
+    /// `true`: the drawer's edge-to-edge treatment — no rounded field, content
+    /// padded by `horizontalPadding`, the log's top padded by `topPadding` (to
+    /// clear a floating header), and banners/summary in a footer below the log.
+    var edgeToEdge: Bool = false
+    var horizontalPadding: CGFloat = 0
+    var topPadding: CGFloat = 0
+
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            if let error = run?.error,
-               RunProgressSheet.shouldShowFailureBanner(
-                   error: error,
-                   isRunning: run?.isRunning == true,
-                   stopReason: run?.lastStopReason
-               ) {
-                errorBanner(error)
+        if edgeToEdge {
+            VStack(alignment: .leading, spacing: 0) {
+                logList
+                if hasFooter {
+                    Divider()
+                    footer
+                        .padding(.horizontal, horizontalPadding)
+                        .padding(.vertical, 12)
+                }
             }
+        } else {
+            VStack(alignment: .leading, spacing: 12) {
+                errorBannerIfNeeded
+                logList
+                footer
+            }
+        }
+    }
 
-            logList
+    private var failureMessage: String? {
+        guard let error = run?.error,
+              RunProgressSheet.shouldShowFailureBanner(
+                  error: error,
+                  isRunning: run?.isRunning == true,
+                  stopReason: run?.lastStopReason
+              ) else { return nil }
+        return error
+    }
 
-            // Task #092: the persistent denial note. Shown whenever the run hit
-            // one or more denied tool calls, EVEN WHEN it finished cleanly — a
-            // caution, visually distinct from the red `errorBanner` above.
+    private var hasFooter: Bool {
+        failureMessage != nil || !(run?.deniedTools.isEmpty ?? true) || run?.summary != nil
+    }
+
+    @ViewBuilder
+    private var errorBannerIfNeeded: some View {
+        if let error = failureMessage {
+            errorBanner(error)
+        }
+    }
+
+    /// Denial note + summary (and, edge-to-edge, the error banner too, since the
+    /// top of the log sits under the floating header).
+    @ViewBuilder
+    private var footer: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            if edgeToEdge { errorBannerIfNeeded }
             if let run, !run.deniedTools.isEmpty {
                 deniedSummary(count: run.deniedTools.count,
                               names: Array(run.deniedToolNames).sorted())
             }
-
             if let summary = run?.summary {
                 summaryRow(summary)
             }
@@ -1721,7 +1770,9 @@ struct RunLogContents: View {
                             .frame(maxWidth: .infinity, alignment: .leading)
                     }
                 }
-                .padding(8)
+                .padding(.horizontal, edgeToEdge ? horizontalPadding : 8)
+                .padding(.top, edgeToEdge ? topPadding : 8)
+                .padding(.bottom, edgeToEdge ? 14 : 8)
                 // Stretch the log column to the full scroll width even while it
                 // holds only the short "Starting…/Waiting…" placeholder, so the
                 // inset `.textBackgroundColor` field is full-width from the first
@@ -1730,7 +1781,7 @@ struct RunLogContents: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
             .background(Color(nsColor: .textBackgroundColor))
-            .clipShape(RoundedRectangle(cornerRadius: 6))
+            .clipShape(RoundedRectangle(cornerRadius: edgeToEdge ? 0 : 6))
             .onChange(of: lines.count) {
                 if let last = lines.last {
                     withAnimation { proxy.scrollTo(last.id, anchor: .bottom) }
