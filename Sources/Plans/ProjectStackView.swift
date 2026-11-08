@@ -44,17 +44,17 @@ struct ProjectStackView: View {
 
     // MARK: - Layout constants
 
-    /// The vertical gap between stacked cards.
-    static let cardSpacing: CGFloat = 16
+    /// The vertical gap between stacked projects. #105: zero — projects abut
+    /// like the grouped task list's sections; each project's `SectionHeaderBand`
+    /// carries the separating space.
+    static let cardSpacing: CGFloat = 0
 
-    /// The padding around the stack inside the scroll view.
-    static let stackPadding: CGFloat = 16
+    /// #105: no side inset — project sections and their row bands run edge to
+    /// edge like the All Plans list.
+    static let stackHorizontalPadding: CGFloat = 0
 
-    /// Extra trailing inset (#046) added on top of `stackPadding` so the cards'
-    /// per-row action buttons (`RowActionGlyph`) clear the macOS overlay
-    /// scroller, which floats over the trailing edge of the scroll content.
-    /// ~15pt is the nominal overlay-scroller width. A constant, never measured.
-    static let scrollerClearance: CGFloat = 15
+    /// #105: zero — the first project's header band sits flush at the top.
+    static let stackVerticalPadding: CGFloat = 0
 
     /// The projects in display order for the card stack. When the user's manual
     /// order is active and non-empty (#017) the stack honours that override
@@ -232,8 +232,8 @@ private struct ProjectStackContent: View {
             // Marks each card as a scroll target so `.scrollPosition(id:)`
             // reports (and can be set to) the top-visible card. No layout effect.
             .scrollTargetLayout()
-            .padding(ProjectStackView.stackPadding)
-            .padding(.trailing, ProjectStackView.scrollerClearance)
+            .padding(.horizontal, ProjectStackView.stackHorizontalPadding)
+            .padding(.vertical, ProjectStackView.stackVerticalPadding)
         }
         .scrollPosition(id: $scrolledPath, anchor: .top)
         // #045: no empty overscroll bounce when the stack fits the column.
@@ -364,11 +364,11 @@ private struct ProjectStackContent: View {
         // inserted BEFORE (above) this one. An overlay, so it adds no layout.
         .overlay(alignment: .top) {
             if dropTargetPath == project.projectPath {
-                RoundedRectangle(cornerRadius: 2)
+                // #105: sections abut, so the bar sits ON the boundary.
+                Rectangle()
                     .fill(Color.accentColor)
-                    .frame(height: 4)
-                    .padding(.horizontal, 2)
-                    .offset(y: -(ProjectStackView.cardSpacing / 2) - 2)
+                    .frame(height: 3)
+                    .offset(y: -1.5)
                     .transition(.opacity)
             }
         }

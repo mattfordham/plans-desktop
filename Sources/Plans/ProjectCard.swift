@@ -182,15 +182,17 @@ struct ProjectCard: View {
             return isEven ? 0 : stripeOpacity
         }
 
-        /// #095: `Color.accentColor` alpha for the row currently shown in the
-        /// browser's detail column. Overrides the zebra/hover tint so the
-        /// selection reads clearly in both card rows and task-list rows.
-        var selectedOpacity: Double = 0.18
+        /// #095/#105: the fill for the row currently shown in the browser's
+        /// detail column — the system selection colour the sidebar uses for its
+        /// selected row when it isn't focused (a neutral grey), so a selected
+        /// row matches the sidebar rather than a translucent accent wash.
+        /// Overrides the zebra/hover tint.
+        var selectedColor: Color = Color(nsColor: .unemphasizedSelectedContentBackgroundColor)
 
-        /// The full row background: the accent selection tint when `isSelected`,
-        /// else the subtle `Color.primary` zebra/hover tint.
+        /// The full row background: the selection fill when `isSelected`, else
+        /// the subtle `Color.primary` zebra/hover tint.
         func background(isEven: Bool, isHovered: Bool, isSelected: Bool) -> Color {
-            if isSelected { return Color.accentColor.opacity(selectedOpacity) }
+            if isSelected { return selectedColor }
             return Color.primary.opacity(backgroundOpacity(isEven: isEven, isHovered: isHovered))
         }
     }
@@ -257,16 +259,15 @@ struct ProjectCard: View {
         /// edge (the card no longer wraps all content in one horizontal padding).
         /// The single source of truth for that gutter.
         var cardHorizontalPadding: CGFloat = 14
-        /// Margin between the card's LEADING edge and the start of the row band
-        /// (#087 review), so the band doesn't sit flush against the card's left
-        /// border. The band still bleeds to the trailing edge.
-        var rowBandLeadingMargin: CGFloat = 6
-        /// Horizontal inset applied INSIDE the row background, so the band
-        /// extends past the leading status glyph and the trailing action glyph
-        /// rather than stopping flush against them. Together with
-        /// `rowBandLeadingMargin` it sums to the card gutter (#087) so the row
-        /// TEXT lines up with the re-inset header/footer content.
+        /// Trailing inset applied INSIDE the row background, so the band
+        /// extends past the trailing action glyph rather than stopping flush
+        /// against it.
         var rowHorizontalPadding: CGFloat = 8
+        /// #105: leading inset applied INSIDE the row background. The row band
+        /// runs flush to the column's leading edge (the stack is full-bleed, like
+        /// the All Plans list), so the whole card gutter sits inside the band and
+        /// the row TEXT lines up with the header/footer content.
+        var rowLeadingInset: CGFloat { cardHorizontalPadding }
     }
 
     /// The single source of truth for plan-row column widths, consumed by
@@ -339,9 +340,10 @@ struct ProjectCard: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
+        VStack(alignment: .leading, spacing: 0) {
+            // #105: the header is a `SectionHeaderBand`, the same band the
+            // grouped task list uses for its group headers.
             header
-            Divider()
             // The captures + plan list: the card's growable middle content,
             // laid out inline at natural height (the stack's ScrollView handles
             // overflow — the card has no inner scroll since #096).
@@ -356,6 +358,7 @@ struct ProjectCard: View {
             ProjectFooter(project: project)
                 // #087: re-inset by the card gutter — only the plan rows bleed full width.
                 .padding(.horizontal, ProjectCard.rowColumns.cardHorizontalPadding)
+                .padding(.vertical, 10)
         }
         // Bottom padding matches the header's 14pt top gap. The footer is now
         // always the bottom-most element (a plain HStack with no vertical padding
@@ -367,19 +370,11 @@ struct ProjectCard: View {
         // state, "Backlogged" label, capture rows) re-applies
         // `rowColumns.cardHorizontalPadding` itself — leaving only the plan rows
         // (and the dividers) full width.
-        .padding(.top, 14)
-        .padding(.bottom, 14)
+        //
+        // #105: no card surface at all — the project is a section of the
+        // full-bleed stack, styled like the grouped task list: a header band,
+        // zebra rows on the list background, then the footer.
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(.background.secondary, in: RoundedRectangle(cornerRadius: 12))
-        // Clip the card's content to the same rounded rect as its
-        // background/border so the edge-to-edge plan-row bands (#087) can't
-        // paint into the rounded corners. Placed AFTER `.background` and BEFORE
-        // `.overlay` so the stroke border still renders crisply on top.
-        .clipShape(RoundedRectangle(cornerRadius: 12))
-        .overlay(
-            RoundedRectangle(cornerRadius: 12)
-                .stroke(.separator, lineWidth: 1)
-        )
         // #094: the five per-row action `.sheet(item:)` modals moved into the
         // shared `PlanRowActions` view, which owns their request state now.
     }
@@ -434,7 +429,7 @@ struct ProjectCard: View {
             // the active rows.
             .padding(.horizontal, ProjectCard.rowColumns.cardHorizontalPadding)
 
-            VStack(spacing: 2) {
+            VStack(spacing: 0) {
                 ForEach(Array(rows.enumerated()), id: \.element.id) { index, row in
                     planRow(row, index: index)
                 }
@@ -442,6 +437,7 @@ struct ProjectCard: View {
         }
         // Deferred treatment: the whole section is dimmed so it reads as
         // secondary to the active plans while remaining interactive.
+        .padding(.top, 10)
         .opacity(0.55)
     }
 
@@ -482,8 +478,9 @@ struct ProjectCard: View {
 
             ProjectStatusBadges(project: project)
         }
-        // #087: re-inset by the card gutter — only the plan rows bleed full width.
-        .padding(.horizontal, ProjectCard.rowColumns.cardHorizontalPadding)
+        // #105: the shared section-header band (gutter inset, band colour with
+        // the space above, bottom separator).
+        .modifier(SectionHeaderBand())
     }
 
     // MARK: - Capture ("+" new plan)
@@ -535,6 +532,7 @@ struct ProjectCard: View {
                 // #087: the empty state is non-row content, so re-inset by the
                 // card gutter (only the plan rows bleed full width).
                 .padding(.horizontal, ProjectCard.rowColumns.cardHorizontalPadding)
+                .padding(.vertical, 10)
         } else {
             // #068 review: a `VStack` of `HStack` rows, NOT a `Grid`.
             //
@@ -549,10 +547,10 @@ struct ProjectCard: View {
             //
             // Each row is now a real view that owns ONE background spanning the
             // full row, and the Grid's cross-row column alignment is reproduced by
-            // the pinned widths in `ProjectCard.rowColumns`. `spacing: 2` matches
-            // the Grid's former `verticalSpacing`, so adjacent stripes still abut
-            // into continuous zebra bands.
-            VStack(spacing: 2) {
+            // the pinned widths in `ProjectCard.rowColumns`. #105: `spacing: 0` so
+            // adjacent rows abut exactly — no sliver of gap around a hovered or
+            // selected row.
+            VStack(spacing: 0) {
                 // #068: index-aware so each row knows its parity for the zebra
                 // stripe. Keyed on `\.element.id` (NOT `\.offset`) so a row's
                 // SwiftUI identity remains its `TaskRow.ID` — reordering/removing
@@ -683,13 +681,16 @@ struct ProjectCard: View {
         // #068 review: horizontal inset applied BEFORE the background, so the
         // band extends past the row's content on both edges instead of stopping
         // flush against the leading status glyph and the trailing action glyph.
-        .padding(.horizontal, ProjectCard.rowColumns.rowHorizontalPadding)
+        // #105: the full card gutter sits inside the band on the leading side so
+        // the band runs flush to the column edge, exactly like `TaskListRow`.
+        .padding(.leading, ProjectCard.rowColumns.rowLeadingInset)
+        .padding(.trailing, ProjectCard.rowColumns.rowHorizontalPadding)
         // #068: ONE very-subtle zebra + hover band for the whole row. Because the
         // row is an `HStack` (a real view) rather than a `GridRow`, this is a
         // single rectangle covering the full row — content plus its vertical
         // padding, edge to edge — instead of a set of per-cell backdrops that
         // followed each cell's own content. Adjacent striped rows abut across the
-        // enclosing `VStack(spacing: 2)` so the zebra reads as continuous bands.
+        // enclosing `VStack(spacing: 0)` so the zebra reads as continuous bands.
         // The tint sits BEHIND the content and carries no gesture, leaving the
         // per-column `OpenDetailOnTap` seams and the trailing action button's own
         // hit target untouched. `.onHover` tracks the single hovered row id;
@@ -710,9 +711,6 @@ struct ProjectCard: View {
             hoveredRowID = hovering ? row.task.id : nil
         }
         .animation(.easeOut(duration: 0.12), value: hoveredRowID)
-        // #087 review: applied AFTER the background so the band stops short of
-        // the card's leading edge while still bleeding to the trailing edge.
-        .padding(.leading, ProjectCard.rowColumns.rowBandLeadingMargin)
     }
 
 
