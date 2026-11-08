@@ -261,7 +261,11 @@ struct BrowserWindow: View {
     private var sidebar: some View {
         List(selection: selectionBinding) {
             Section("Status") {
-                ForEach(SmartView.allCases, id: \.rawValue) { view in
+                ForEach(
+                    BrowserViewModel.visibleSmartViews(in: store.projects,
+                                                       selection: store.browserSelection),
+                    id: \.rawValue
+                ) { view in
                     smartViewRow(view)
                         .tag(SidebarSelection.smart(view))
                 }
@@ -518,13 +522,18 @@ struct TaskRow: Identifiable {
 ///
 /// `CaseIterable`/`Equatable`/pure value code so it is `Sendable`-clean and
 /// directly unit-testable without a view.
-/// `CaseIterable` order below IS the sidebar display order (#102): Review first,
-/// then Pending, In progress, Blocked, Failed, Backlog, and the All Plans lens
-/// last. `.pending` surfaces active tasks awaiting elaboration; `.all` surfaces
+/// `CaseIterable` order below IS the sidebar display order (#102): Ready for
+/// review and In review first (separate lenses, using the same star/eye
+/// vocabulary as task rows), then Pending, In progress, Blocked, Failed,
+/// Backlog, and the All Plans lens last. The sidebar hides zero-count lenses
+/// (see `BrowserViewModel.visibleSmartViews`). `.pending` surfaces active tasks awaiting elaboration; `.all` surfaces
 /// every active (non-completed) task across every project.
 enum SmartView: String, CaseIterable, Equatable, Hashable {
-    /// Tasks in EITHER `.review` OR `.inReview` — one combined review lens.
+    /// Tasks whose status is `.review` (ready for review, not yet picked up).
+    /// The rawValue stays `"review"` so persisted selections survive.
     case review
+    /// Tasks whose status is `.inReview` (currently being reviewed).
+    case inReview
     /// Active tasks whose status is `.pending`, across every project.
     case pending
     /// Tasks whose status is `.inProgress`, across every project (active rows).
@@ -539,13 +548,13 @@ enum SmartView: String, CaseIterable, Equatable, Hashable {
     /// catch-all lens.
     case all
 
-    /// The sidebar label for this view, from the shared vocabulary. Review reads
-    /// "Review" (it covers both review and in-review).
+    /// The sidebar label for this view, from the shared vocabulary.
     var label: String {
         switch self {
         case .inProgress: return TaskStatus.inProgress.filterLabel
         case .pending: return TaskStatus.pending.filterLabel
-        case .review: return "Review"
+        case .review: return TaskStatus.review.filterLabel
+        case .inReview: return TaskStatus.inReview.filterLabel
         case .blocked: return "Blocked"
         case .failed: return "Failed"
         case .backlog: return TaskStatus.backlogFilterLabel
@@ -559,6 +568,7 @@ enum SmartView: String, CaseIterable, Equatable, Hashable {
         case .inProgress: return TaskStatus.inProgress.symbolName
         case .pending: return TaskStatus.pending.symbolName
         case .review: return TaskStatus.review.symbolName
+        case .inReview: return TaskStatus.inReview.symbolName
         case .blocked: return TaskStatusIndicator.blockedSymbol
         case .failed: return TaskStatusIndicator.failureSymbol
         case .backlog: return TaskStatus.backlogSymbolName
@@ -572,6 +582,7 @@ enum SmartView: String, CaseIterable, Equatable, Hashable {
         case .inProgress: return TaskStatus.inProgress.glanceColor
         case .pending: return TaskStatus.pending.glanceColor
         case .review: return TaskStatus.review.glanceColor
+        case .inReview: return TaskStatus.inReview.glanceColor
         case .blocked: return TaskStatusIndicator.blockedColor
         case .failed: return TaskStatusIndicator.failureColor
         case .backlog: return TaskStatus.backlogGlanceColor
@@ -1104,9 +1115,9 @@ enum BrowserViewModel {
     // MARK: - Smart views (#094)
 
     /// The cross-project rows for a smart view (#094). For
-    /// `.inProgress/.review/.blocked/.failed` it filters over each project's
-    /// `activeRows`; for `.backlog` it collects `backlogRows`. Review combines
-    /// `.review` + `.inReview`. Project order is preserved, and within a project
+    /// status/blocked/failed lenses it filters over each project's `activeRows`;
+    /// `.all` returns every active row; `.backlog` collects `backlogRows`.
+    /// Project order is preserved, and within a project
     /// the parser's row order is preserved. Pure value work — no I/O, no SwiftUI.
     static func rows(in projects: [ProjectTasks], matching view: SmartView) -> [TaskRow] {
         switch view {
@@ -1120,7 +1131,10 @@ enum BrowserViewModel {
                 .filter { $0.task.status == .pending }
         case .review:
             return projects.flatMap { activeRows($0) }
-                .filter { $0.task.status == .review || $0.task.status == .inReview }
+                .filter { $0.task.status == .review }
+        case .inReview:
+            return projects.flatMap { activeRows($0) }
+                .filter { $0.task.status == .inReview }
         case .blocked:
             return projects.flatMap { activeRows($0) }
                 .filter { $0.task.isBlocked }
@@ -1129,6 +1143,21 @@ enum BrowserViewModel {
                 .filter { $0.task.failure != nil }
         case .all:
             return projects.flatMap { activeRows($0) }
+        }
+    }
+
+    /// The smart views the sidebar lists (#102), in `allCases` order: a lens is
+    /// shown only when it has at least one matching row, except `.all` (always
+    /// listed) and the currently selected lens (kept so the selection never
+    /// vanishes from under the user). Pure value work — no I/O, no SwiftUI.
+    static func visibleSmartViews(
+        in projects: [ProjectTasks],
+        selection: SidebarSelection
+    ) -> [SmartView] {
+        SmartView.allCases.filter { view in
+            view == .all
+                || selection == .smart(view)
+                || !rows(in: projects, matching: view).isEmpty
         }
     }
 

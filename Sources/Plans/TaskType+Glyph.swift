@@ -70,7 +70,7 @@ extension TaskStatus {
         case .pending: return "Pending"
         case .elaborated: return "Elaborated"
         case .inProgress: return "In progress"
-        case .review: return "Review"
+        case .review: return "Ready for review"
         case .inReview: return "In review"
         case .completed: return "Completed"
         }

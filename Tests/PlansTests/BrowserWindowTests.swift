@@ -1342,15 +1342,17 @@ final class BrowserWindowTests: XCTestCase {
         XCTAssertEqual(RunMode.delete.activityVerb, "Deleting")
     }
 
-    func testSmartViewReviewCombinesReviewAndInReview() {
+    /// Ready-for-review and in-review are SEPARATE lenses: `.review` holds only
+    /// tasks awaiting review, `.inReview` only tasks currently being reviewed.
+    func testSmartViewReviewAndInReviewAreDistinctLenses() {
         let a = makeProject(
             path: "/a", name: "A",
             activeTasks: [makeTask(id: "001", status: .review),
                           makeTask(id: "002", status: .inReview),
                           makeTask(id: "003", status: .inProgress)]
         )
-        let rows = BrowserViewModel.rows(in: [a], matching: .review)
-        XCTAssertEqual(Set(rows.map(\.id)), ["/a/001", "/a/002"])
+        XCTAssertEqual(BrowserViewModel.rows(in: [a], matching: .review).map(\.id), ["/a/001"])
+        XCTAssertEqual(BrowserViewModel.rows(in: [a], matching: .inReview).map(\.id), ["/a/002"])
     }
 
     func testSmartViewBlockedActiveRowsOnly() {
@@ -1388,11 +1390,16 @@ final class BrowserWindowTests: XCTestCase {
 
     func testSmartViewLabelsAndVocabulary() {
         XCTAssertEqual(SmartView.inProgress.label, TaskStatus.inProgress.filterLabel)
-        XCTAssertEqual(SmartView.review.label, "Review")
+        XCTAssertEqual(SmartView.review.label, "Ready for review")
+        XCTAssertEqual(SmartView.inReview.label, "In review")
         XCTAssertEqual(SmartView.inProgress.symbolName, TaskStatus.inProgress.symbolName)
         XCTAssertEqual(SmartView.review.symbolName, TaskStatus.review.symbolName)
+        XCTAssertEqual(SmartView.inReview.symbolName, TaskStatus.inReview.symbolName)
+        XCTAssertEqual(SmartView.review.color, TaskStatus.review.glanceColor)
+        XCTAssertEqual(SmartView.inReview.color, TaskStatus.inReview.glanceColor)
         XCTAssertEqual(SmartView.blocked.symbolName, TaskStatusIndicator.blockedSymbol)
         XCTAssertEqual(SmartView.failed.symbolName, TaskStatusIndicator.failureSymbol)
+        XCTAssertNotEqual(SmartView.blocked.symbolName, SmartView.failed.symbolName)
         // Non-empty labels/icons across every case (totality guard).
         for view in SmartView.allCases {
             XCTAssertFalse(view.label.isEmpty, "empty label for \(view)")
@@ -1402,12 +1409,44 @@ final class BrowserWindowTests: XCTestCase {
 
     // MARK: - (#102) Status smart-view reorder + Pending + All Plans lenses
 
-    /// Sidebar display order IS `SmartView.allCases` order: Review first, then
-    /// Pending, In progress, Blocked, Failed, Backlog, and All Plans last.
+    /// Sidebar display order IS `SmartView.allCases` order: Ready for review and
+    /// In review first, then Pending, In progress, Blocked, Failed, Backlog, and
+    /// All Plans last.
     func testSmartViewAllCasesOrder() {
         XCTAssertEqual(
             SmartView.allCases,
-            [.review, .pending, .inProgress, .blocked, .failed, .backlog, .all]
+            [.review, .inReview, .pending, .inProgress, .blocked, .failed, .backlog, .all]
+        )
+    }
+
+    /// Status lenses with a zero count are hidden from the sidebar; All Plans is
+    /// always listed. Order follows `allCases`.
+    func testVisibleSmartViewsHidesEmptyLenses() {
+        let a = makeProject(
+            path: "/a", name: "A",
+            activeTasks: [makeTask(id: "001", status: .review),
+                          makeTask(id: "002", status: .inProgress, isBlocked: true)]
+        )
+        XCTAssertEqual(
+            BrowserViewModel.visibleSmartViews(in: [a], selection: .allProjects),
+            [.review, .inProgress, .blocked, .all]
+        )
+        XCTAssertEqual(
+            BrowserViewModel.visibleSmartViews(in: [], selection: .allProjects),
+            [.all]
+        )
+    }
+
+    /// The currently selected lens stays listed even at a zero count, so the
+    /// sidebar selection never vanishes out from under the user.
+    func testVisibleSmartViewsKeepsSelectedEmptyLens() {
+        let a = makeProject(
+            path: "/a", name: "A",
+            activeTasks: [makeTask(id: "001", status: .review)]
+        )
+        XCTAssertEqual(
+            BrowserViewModel.visibleSmartViews(in: [a], selection: .smart(.failed)),
+            [.review, .failed, .all]
         )
     }
 

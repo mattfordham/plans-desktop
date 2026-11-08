@@ -93,9 +93,8 @@ final class TaskStatusGlanceTests: XCTestCase {
 
     // MARK: - TaskStatusIndicator failure resolution (#079)
 
-    /// A failed (but not blocked) task shows the failure symbol + failure color,
-    /// which reuse the SAME `exclamationmark.octagon.fill` + `#cc6666` as blocked
-    /// (failure and blocked are visually identical alarm states).
+    /// A failed (but not blocked) task shows the failure symbol + failure color
+    /// (`xmark.octagon.fill` + the shared `#cc6666` alarm color).
     func testIndicatorFailureSymbolTakesPrecedenceOverStatus() {
         let indicator = TaskStatusIndicator(
             status: .inProgress, isBlocked: false, isFailed: true
@@ -104,12 +103,14 @@ final class TaskStatusGlanceTests: XCTestCase {
         XCTAssertEqual(indicator.color, TaskStatusIndicator.failureColor)
     }
 
-    /// The failure symbol/color reuse the blocked symbol/color literals exactly
-    /// (`exclamationmark.octagon.fill` + `#cc6666`).
-    func testFailureSymbolAndColorReuseBlockedLiterals() {
-        XCTAssertEqual(TaskStatusIndicator.failureSymbol, TaskStatusIndicator.blockedSymbol)
+    /// The failure color reuses the blocked alarm color (`#cc6666`), but the
+    /// failure symbol (`xmark.octagon.fill`) is DISTINCT from blocked's
+    /// (`exclamationmark.octagon.fill`) so the two states can be told apart.
+    func testFailureSymbolDistinctFromBlockedButColorShared() {
+        XCTAssertNotEqual(TaskStatusIndicator.failureSymbol, TaskStatusIndicator.blockedSymbol)
         XCTAssertEqual(TaskStatusIndicator.failureColor, TaskStatusIndicator.blockedColor)
-        XCTAssertEqual(TaskStatusIndicator.failureSymbol, "exclamationmark.octagon.fill")
+        XCTAssertEqual(TaskStatusIndicator.blockedSymbol, "exclamationmark.octagon.fill")
+        XCTAssertEqual(TaskStatusIndicator.failureSymbol, "xmark.octagon.fill")
         XCTAssertEqual(TaskStatusIndicator.failureColor, Color(hex: 0xcc6666))
     }
 
