@@ -574,6 +574,61 @@ final class PlanDetailViewTests: XCTestCase {
         )
     }
 
+    // MARK: - PlanDetailView.canSendDiscussion
+
+    /// A real question can be sent while the conversation is idle.
+    func testCanSendDiscussionWhenIdleWithQuestion() {
+        XCTAssertTrue(PlanDetailView.canSendDiscussion("What does step 3 mean?", isBusy: false))
+    }
+
+    /// A blank question can never be sent.
+    func testCannotSendBlankDiscussion() {
+        XCTAssertFalse(PlanDetailView.canSendDiscussion("  \n ", isBusy: false))
+    }
+
+    /// While a turn is pending the composer cannot send another question.
+    func testCannotSendDiscussionWhileBusy() {
+        XCTAssertFalse(PlanDetailView.canSendDiscussion("Follow-up?", isBusy: true))
+    }
+
+    // MARK: - PlanDetailView.shouldAutoOpenProgress (discussion)
+
+    /// A discussion turn never pops the progress sheet — its reply renders inline.
+    func testDoesNotAutoOpenProgressForDiscussRun() {
+        XCTAssertFalse(PlanDetailView.shouldAutoOpenProgress(onAppearRunning: true, mode: .discuss))
+    }
+
+    /// Any other live run still auto-opens on appear.
+    func testAutoOpensProgressForExecuteRun() {
+        XCTAssertTrue(PlanDetailView.shouldAutoOpenProgress(onAppearRunning: true, mode: .execute))
+    }
+
+    // MARK: - PlanDetailView.discussionScrollTarget
+
+    @MainActor
+    func testDiscussionScrollTargetIsLastTurn() {
+        let thread = DiscussionThread()
+        XCTAssertNil(PlanDetailView.discussionScrollTarget(for: thread.turns))
+        thread.beginTurn(question: "one")
+        thread.apply(.done(costUsd: 0, turns: 1, stopReason: "end_turn"))
+        thread.beginTurn(question: "two")
+        XCTAssertEqual(PlanDetailView.discussionScrollTarget(for: thread.turns), thread.turns[1].id)
+    }
+
+    // MARK: - PlanDetailView.showsConversationPanel
+
+    /// With no turns the detail column is just the plan (composer pinned).
+    func testNoConversationPanelWithoutTurns() {
+        XCTAssertFalse(PlanDetailView.showsConversationPanel(turnCount: 0))
+    }
+
+    /// Once a question has been asked the column splits: plan above, the
+    /// conversation panel (transcript + composer) below.
+    func testConversationPanelShownOnceThereIsATurn() {
+        XCTAssertTrue(PlanDetailView.showsConversationPanel(turnCount: 1))
+        XCTAssertTrue(PlanDetailView.showsConversationPanel(turnCount: 4))
+    }
+
     // MARK: - PlanDetailView.canRetry (#079 — failure section + Retry gating)
 
     /// A healthy task (no failure overlay) never shows the failure section /
@@ -648,5 +703,46 @@ final class PlanDetailViewTests: XCTestCase {
         XCTAssertEqual(ExecutePendingModal.placeholder(taskID: "088", forReview: false),
                        "Add optional guidance for executing plan #088…")
         XCTAssertTrue(ExecutePendingModal.offersDeep(forReview: false))
+    }
+
+    // MARK: - Discussion composer stop control
+
+    /// The trailing composer glyph becomes a stop button only while a turn is
+    /// pending.
+    func testComposerShowsStopOnlyWhileBusy() {
+        XCTAssertTrue(PlanDetailView.composerShowsStop(isBusy: true))
+        XCTAssertFalse(PlanDetailView.composerShowsStop(isBusy: false))
+    }
+
+    // MARK: - MarkdownStyle
+
+    /// The plan style keeps the editorial scale and tinted headings.
+    func testPlanMarkdownStyleKeepsEditorialValues() {
+        let style = MarkdownStyle.plan
+        XCTAssertEqual(style.bodySize, 16)
+        XCTAssertEqual(style.lineSpacing, 6)
+        XCTAssertEqual(style.blockSpacing, 16)
+        XCTAssertEqual(style.listSpacing, 8)
+        XCTAssertTrue(style.tintsHeadings)
+        XCTAssertNil(style.headingSize(forLevel: 1))
+    }
+
+    /// The compact style reads at the system body scale with tighter rhythm
+    /// and plain, only modestly larger headings.
+    func testCompactMarkdownStyleIsSmallerAndPlain() {
+        let style = MarkdownStyle.compact
+        XCTAssertEqual(style.bodySize, 13)
+        XCTAssertLessThan(style.lineSpacing, MarkdownStyle.plan.lineSpacing)
+        XCTAssertLessThan(style.blockSpacing, MarkdownStyle.plan.blockSpacing)
+        XCTAssertLessThan(style.listSpacing, MarkdownStyle.plan.listSpacing)
+        XCTAssertFalse(style.tintsHeadings)
+        for level in 1...4 {
+            let size = try? XCTUnwrap(style.headingSize(forLevel: level))
+            XCTAssertNotNil(size)
+            XCTAssertGreaterThanOrEqual(size ?? 0, style.bodySize)
+            XCTAssertLessThanOrEqual(size ?? 0, style.bodySize + 4)
+        }
+        XCTAssertGreaterThanOrEqual(style.headingSize(forLevel: 1) ?? 0,
+                                    style.headingSize(forLevel: 3) ?? 0)
     }
 }

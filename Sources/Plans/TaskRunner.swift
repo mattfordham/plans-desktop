@@ -16,6 +16,8 @@ private let runnerLog = Logger(subsystem: "com.plans.desktop", category: "TaskRu
 /// - `{"kind":"activity","tool":"Edit","detail":"…"}`
 /// - `{"kind":"text","chunk":"…"}`
 /// - `{"kind":"denied","tool":"mcp__sentry__…"}`
+/// - `{"kind":"session","sessionId":"…"}`
+/// - `{"kind":"reply","text":"…","sessionId":"…"}`
 /// - `{"kind":"done","costUsd":<number>,"turns":<number>,"stopReason":"…"}`
 /// - `{"kind":"error","message":"…"}`
 ///
@@ -38,9 +40,15 @@ enum RunEvent: Codable, Equatable {
     /// not on the allowlist and the SDK refused it. The run continues and still
     /// finishes — this is distinct from `error`, which is terminal.
     case denied(tool: String)
+    /// The Agent SDK session id for this run, emitted once at start. A follow-up
+    /// discussion turn passes it back via `--resume` to continue the session.
+    case session(id: String)
+    /// The agent's clean final answer, emitted on success just before `done`.
+    /// Unlike the `text` chunks it excludes intermediate narration.
+    case reply(text: String, sessionID: String)
 
     private enum CodingKeys: String, CodingKey {
-        case kind, tool, detail, chunk, costUsd, turns, stopReason, message
+        case kind, tool, detail, chunk, costUsd, turns, stopReason, message, sessionId, text
     }
 
     init(from decoder: Decoder) throws {
@@ -66,6 +74,13 @@ enum RunEvent: Codable, Equatable {
             // Reuses the existing `tool` key (task #092).
             let tool = try container.decode(String.self, forKey: .tool)
             self = .denied(tool: tool)
+        case "session":
+            let id = try container.decode(String.self, forKey: .sessionId)
+            self = .session(id: id)
+        case "reply":
+            let text = try container.decode(String.self, forKey: .text)
+            let sessionID = try container.decode(String.self, forKey: .sessionId)
+            self = .reply(text: text, sessionID: sessionID)
         default:
             // Unknown `kind`: throw a clear DecodingError. The caller
             // (`RunEvent.parseLines`) catches per-line decode failures and skips
@@ -100,6 +115,13 @@ enum RunEvent: Codable, Equatable {
         case let .denied(tool):
             try container.encode("denied", forKey: .kind)
             try container.encode(tool, forKey: .tool)
+        case let .session(id):
+            try container.encode("session", forKey: .kind)
+            try container.encode(id, forKey: .sessionId)
+        case let .reply(text, sessionID):
+            try container.encode("reply", forKey: .kind)
+            try container.encode(text, forKey: .text)
+            try container.encode(sessionID, forKey: .sessionId)
         }
     }
 
@@ -269,6 +291,43 @@ struct LoggedEvent: Identifiable, Equatable {
     let event: RunEvent
 }
 
+/// Decides when a spawned run is complete: only once the process has exited
+/// AND its stdout has reached EOF. The exit notification can arrive before the
+/// final stdout bytes are read, so finishing on exit alone drops the tail of
+/// the stream (typically the large `reply` and the `done` line).
+///
+/// Each signal returns the exit status exactly once — on whichever call
+/// completes the pair — and `nil` otherwise. `gracePeriodElapsed()` completes
+/// an exited run whose stdout never closed (a grandchild process can keep the
+/// pipe open).
+struct RunCompletionGate {
+    private var streamDone = false
+    private var exitStatus: Int32?
+    private(set) var isComplete = false
+
+    mutating func streamClosed() -> Int32? {
+        streamDone = true
+        return completeIfReady()
+    }
+
+    mutating func processExited(status: Int32) -> Int32? {
+        exitStatus = status
+        return completeIfReady()
+    }
+
+    mutating func gracePeriodElapsed() -> Int32? {
+        guard !isComplete, let exitStatus else { return nil }
+        isComplete = true
+        return exitStatus
+    }
+
+    private mutating func completeIfReady() -> Int32? {
+        guard !isComplete, streamDone, let exitStatus else { return nil }
+        isComplete = true
+        return exitStatus
+    }
+}
+
 /// Spawns and supervises the bundled Node Agent-SDK process (`run-task.js`) for
 /// a SINGLE task run, decoding its NDJSON progress stream into observable state
 /// the detail-view sheet and card rows render.
@@ -335,6 +394,12 @@ final class TaskRun {
     /// non-keep runs.
     let keep: Bool
 
+    /// The Agent SDK session id a `.discuss` turn resumes, passed to the runner
+    /// as `--resume <id>` so the agent keeps the earlier conversation's context.
+    /// `nil` for a first discussion turn and for every other mode (ignored by
+    /// the argument builder for non-discuss modes).
+    let resume: String?
+
     /// Bounded fallback counter for reconciliation. A finished capture that never
     /// observes a new task id (e.g. the underlying run failed, or plans-cc reused
     /// an id) must not stay pinned forever. Each reconcile pass that fails to find
@@ -375,6 +440,14 @@ final class TaskRun {
     /// The DISTINCT set of denied tool names, for a UI that wants to list which
     /// tools were refused without the per-retry duplication.
     var deniedToolNames: Set<String> { Set(deniedTools) }
+
+    /// The Agent SDK session id reported by the runner (from `session`, then
+    /// refreshed by `reply`). A discussion follow-up resumes this session.
+    private(set) var sessionID: String?
+
+    /// The agent's clean final answer from the `reply` event, or `nil` until one
+    /// arrives (error results never carry one).
+    private(set) var reply: String?
 
     /// Populated from the terminal `done` event: the run's cost and turn count.
     private(set) var summary: (costUsd: Double, turns: Int)?
@@ -423,14 +496,31 @@ final class TaskRun {
     /// `\n` so only complete NDJSON lines are decoded.
     private var buffer = Data()
 
+    /// Tracks process exit + stdout EOF for the current spawn; the run finishes
+    /// only when both have happened (or the grace period lapses after exit).
+    private var completionGate = RunCompletionGate()
+
+    /// Identifies the current spawn so callbacks from an earlier process (one
+    /// that was stopped) can't complete a later run.
+    private var spawnGeneration = 0
+
+    /// How long to wait for stdout EOF after the process exits before finishing
+    /// anyway.
+    var streamCloseGracePeriod: Duration = .seconds(3)
+
     /// Called once when the run terminates (any path), so the coordinator can
     /// drop it from its active map and trigger a store reload.
     private var onFinish: (() -> Void)?
+
+    /// Called with every decoded event after it is applied to this run's own
+    /// state, so an observer (a discussion thread) can mirror the stream.
+    var onEvent: ((RunEvent) -> Void)?
 
     init(taskID: String, mode: RunMode, description: String? = nil,
          projectPath: String? = nil, baselineTaskIDs: Set<String> = [],
          deep: Bool = false,
          keep: Bool = false,
+         resume: String? = nil,
          outcomeLog: RunOutcomeLog = RunOutcomeLog(),
          now: @escaping () -> String = { ISO8601DateFormatter().string(from: Date()) }) {
         self.taskID = taskID
@@ -440,6 +530,7 @@ final class TaskRun {
         self.baselineTaskIDs = baselineTaskIDs
         self.deep = deep
         self.keep = keep
+        self.resume = resume
         self.outcomeLog = outcomeLog
         self.now = now
     }
@@ -459,7 +550,11 @@ final class TaskRun {
         lines = []
         summary = nil
         error = nil
+        sessionID = nil
+        reply = nil
         buffer = Data()
+        completionGate = RunCompletionGate()
+        spawnGeneration += 1
         phase = .launching
         isRunning = true
 
@@ -480,6 +575,7 @@ final class TaskRun {
         let description = self.description
         let deep = self.deep
         let keep = self.keep
+        let resume = self.resume
         _Concurrency.Task { [weak self] in
             // One login-shell lookup yields both node and the login PATH; the
             // PATH becomes the child's so `npx`-launched MCP servers resolve.
@@ -501,7 +597,8 @@ final class TaskRun {
             runnerLog.notice("resolved node: \(nodePath, privacy: .public)")
             self.spawn(nodePath: nodePath, loginPath: loginPath, scriptURL: scriptURL,
                        projectPath: projectPath, taskID: taskID, mode: mode,
-                       description: description, deep: deep, keep: keep)
+                       description: description, deep: deep, keep: keep,
+                       resume: resume)
         }
     }
 
@@ -528,23 +625,14 @@ final class TaskRun {
 
     // MARK: - Spawning
 
-    private func spawn(nodePath: String, loginPath: String?, scriptURL: URL,
-                       projectPath: String, taskID: String, mode: RunMode,
-                       description: String?, deep: Bool, keep: Bool) {
-        let proc = Process()
-        proc.executableURL = URL(fileURLWithPath: nodePath)
-        // Give the child the login-shell PATH instead of the bare launchd one a
-        // Dock-launched app inherits; the Agent SDK copies `process.env` into
-        // the Claude CLI, so this is what stdio MCP servers and hooks see.
-        let environment = TaskRun.buildChildEnvironment(
-            base: ProcessInfo.processInfo.environment,
-            loginPath: loginPath,
-            nodePath: nodePath
-        )
-        proc.environment = environment
-        runnerLog.notice("child PATH (\(loginPath == nil ? "fallback" : "login shell", privacy: .public)): \(environment["PATH"] ?? "", privacy: .public)")
+    /// Assembles the Node runner's argv (script path first) for one run. Pure so
+    /// the argument-shape contract is unit-testable without spawning a process.
+    nonisolated static func arguments(scriptPath: String, projectPath: String,
+                                      taskID: String, mode: RunMode,
+                                      description: String?, deep: Bool, keep: Bool,
+                                      resume: String?) -> [String] {
         var arguments = [
-            scriptURL.path,
+            scriptPath,
             "--project-root", projectPath,
         ]
         // The two arg flags are INDEPENDENT, not either/or. Existing-task modes
@@ -577,27 +665,66 @@ final class TaskRun {
         if keep {
             arguments += ["--keep"]
         }
-        proc.arguments = arguments
+        // `--resume` continues a prior Agent SDK session. Only a discussion is
+        // conversational, so it is dropped for every other mode (the runner
+        // rejects it there).
+        if mode == .discuss, let resume, !resume.isEmpty {
+            arguments += ["--resume", resume]
+        }
+        return arguments
+    }
+
+    private func spawn(nodePath: String, loginPath: String?, scriptURL: URL,
+                       projectPath: String, taskID: String, mode: RunMode,
+                       description: String?, deep: Bool, keep: Bool, resume: String?) {
+        let proc = Process()
+        proc.executableURL = URL(fileURLWithPath: nodePath)
+        // Give the child the login-shell PATH instead of the bare launchd one a
+        // Dock-launched app inherits; the Agent SDK copies `process.env` into
+        // the Claude CLI, so this is what stdio MCP servers and hooks see.
+        let environment = TaskRun.buildChildEnvironment(
+            base: ProcessInfo.processInfo.environment,
+            loginPath: loginPath,
+            nodePath: nodePath
+        )
+        proc.environment = environment
+        runnerLog.notice("child PATH (\(loginPath == nil ? "fallback" : "login shell", privacy: .public)): \(environment["PATH"] ?? "", privacy: .public)")
+        proc.arguments = Self.arguments(
+            scriptPath: scriptURL.path, projectPath: projectPath, taskID: taskID,
+            mode: mode, description: description, deep: deep, keep: keep,
+            resume: resume
+        )
 
         let stdoutPipe = Pipe()
         let stderrPipe = Pipe()
         proc.standardOutput = stdoutPipe
         proc.standardError = stderrPipe
 
-        // Background-queue handler: append bytes to the buffer and decode any
-        // complete lines, hopping each batch to the main actor. The handler is
-        // cleared at EOF rather than in `terminationHandler`: termination can fire
-        // before the last stdout bytes are read, and clearing there would drop
-        // them. Clearing at EOF also stops the handler firing repeatedly with
-        // empty data once the pipe closes.
+        let generation = spawnGeneration
+
+        // Background-queue handler: hop each chunk to the main queue for
+        // decoding, and signal EOF the same way. `DispatchQueue.main.async` is
+        // FIFO, so the EOF signal is processed only after every chunk read
+        // before it has been ingested. Termination can fire before the last
+        // stdout bytes are read, which is why the run waits for EOF (see
+        // `RunCompletionGate`) and why the handler is cleared here, not in
+        // `terminationHandler`. Clearing at EOF also stops the handler firing
+        // repeatedly with empty data once the pipe closes.
         stdoutPipe.fileHandleForReading.readabilityHandler = { [weak self] handle in
             let data = handle.availableData
             guard !data.isEmpty else {
-                handle.readabilityHandler = nil  // EOF: stop the drain.
+                handle.readabilityHandler = nil
+                DispatchQueue.main.async {
+                    MainActor.assumeIsolated {
+                        self?.streamClosed(generation: generation)
+                    }
+                }
                 return
             }
-            _Concurrency.Task { @MainActor in
-                self?.ingest(data)
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    self?.receive(data, generation: generation)
+                }
             }
         }
 
@@ -617,8 +744,10 @@ final class TaskRun {
 
         proc.terminationHandler = { [weak self] terminated in
             let status = terminated.terminationStatus
-            _Concurrency.Task { @MainActor in
-                self?.handleTermination(status: status)
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    self?.processExited(status: status, generation: generation)
+                }
             }
         }
 
@@ -635,6 +764,41 @@ final class TaskRun {
     }
 
     // MARK: - Stream handling (main actor)
+
+    /// Ingests a stdout chunk from the current spawn; chunks from an earlier
+    /// (stopped) process are ignored.
+    private func receive(_ data: Data, generation: Int) {
+        guard generation == spawnGeneration else { return }
+        ingest(data)
+    }
+
+    /// Stdout reached EOF: every byte has been ingested, so the run can finish
+    /// as soon as the process has also exited.
+    private func streamClosed(generation: Int) {
+        guard generation == spawnGeneration, isRunning else { return }
+        if let status = completionGate.streamClosed() {
+            handleTermination(status: status)
+        }
+    }
+
+    /// The process exited. Finishes immediately if stdout already closed;
+    /// otherwise waits for EOF, falling back to finishing after
+    /// `streamCloseGracePeriod` in case a grandchild holds the pipe open.
+    private func processExited(status: Int32, generation: Int) {
+        guard generation == spawnGeneration, isRunning else { return }
+        if let status = completionGate.processExited(status: status) {
+            handleTermination(status: status)
+            return
+        }
+        let grace = streamCloseGracePeriod
+        _Concurrency.Task { [weak self] in
+            try? await _Concurrency.Task.sleep(for: grace)
+            guard let self, generation == self.spawnGeneration, self.isRunning,
+                  let status = self.completionGate.gracePeriodElapsed() else { return }
+            runnerLog.notice("stdout EOF not seen \(grace, privacy: .public) after exit; finishing anyway (task=\(self.taskID, privacy: .public))")
+            self.handleTermination(status: status)
+        }
+    }
 
     /// Appends a stdout chunk and dispatches every complete decoded line.
     private func ingest(_ data: Data) {
@@ -708,9 +872,16 @@ final class TaskRun {
             // UI / durable outcome, but do NOT touch `error` or `summary` — the
             // run is still running/finishing normally.
             deniedTools.append(tool)
+        case let .session(id):
+            sessionID = id
+        case let .reply(text, id):
+            // Informational only: the reply never affects `error` / `summary`.
+            reply = text
+            sessionID = id
         case .activity, .text:
             break
         }
+        onEvent?(event)
     }
 
     #if DEBUG
@@ -735,18 +906,30 @@ final class TaskRun {
     /// Test seam: flips the run into the live `.running` state (`isRunning ==
     /// true`) WITHOUT spawning a `Process`, so the #053 re-key path — which only
     /// fires for a still-running capture — is unit-testable. DEBUG-only.
-    func markRunningForTesting(projectPath: String? = nil) {
+    func markRunningForTesting(projectPath: String? = nil, onFinish: (() -> Void)? = nil) {
         if let projectPath { outcomeProjectPath = projectPath }
+        if let onFinish { self.onFinish = onFinish }
         isRunning = true
         phase = .running
     }
+    /// Test seam: signals the process exit as the `terminationHandler` would.
+    func processExitedForTesting(status: Int32) {
+        processExited(status: status, generation: spawnGeneration)
+    }
+
+    /// Test seam: signals stdout EOF as the readability handler would.
+    func streamClosedForTesting() {
+        streamClosed(generation: spawnGeneration)
+    }
     #endif
 
-    /// Finalizes a run when the process exits. Surfaces a generic error only if
-    /// the process exited nonzero without any `done`/`error` line being seen
-    /// (an unexpected crash); a clean `stop()` or a contract-reported terminal
-    /// event is left untouched.
+    /// Finalizes a run once the process has exited and stdout is drained.
+    /// Surfaces a generic error only if the process exited nonzero without any
+    /// `done`/`error` line being seen (an unexpected crash); a clean `stop()` or
+    /// a contract-reported terminal event is left untouched. A no-op once the
+    /// run has already finished (e.g. via `stop()`).
     private func handleTermination(status: Int32) {
+        guard isRunning else { return }
         // Drain any trailing buffered line that lacked a final newline.
         buffer.append(UInt8(ascii: "\n"))
         for event in RunEvent.parseLines(from: &buffer) {
@@ -769,7 +952,12 @@ final class TaskRun {
         if let error, self.error == nil { self.error = error }
         phase = nil
         isRunning = false
-        writeOutcome()
+        // A discussion turn is read-only Q&A, not a lifecycle action: outcomes
+        // are keyed by (project, task), so recording one would raise or mask the
+        // task's failure badge.
+        if mode != .discuss {
+            writeOutcome()
+        }
         let cb = onFinish
         onFinish = nil
         cb?()
@@ -1024,6 +1212,17 @@ final class TaskRunner {
     /// status and sync that project's plans. Set by the app at injection.
     var onAnyRunFinished: ((_ projectPath: String) -> Void)?
 
+    /// Per-plan discussion threads, keyed by `runKey(projectPath:taskID:)`. Kept
+    /// apart from `runs` so a discuss turn never collides with an execute or
+    /// elaborate run for the same task, and never counts as a running task.
+    private(set) var discussions: [String: DiscussionThread] = [:]
+
+    #if DEBUG
+    /// Test seam: when set, `ask` hands the discuss run and its finish callback
+    /// here instead of spawning a process. DEBUG-only.
+    var discussLauncherForTesting: ((TaskRun, String, @escaping () -> Void) -> Void)?
+    #endif
+
     init() {}
 
     /// The `runs` key for `taskID` in `projectPath`: the path and full id joined
@@ -1222,6 +1421,83 @@ final class TaskRunner {
         for run in runs.values where run.isRunning {
             run.stop()
         }
+        for thread in discussions.values {
+            thread.activeRun?.stop()
+        }
+    }
+
+    // MARK: - Discussion
+
+    /// The discussion thread for `taskID` in `projectPath`, created on first
+    /// access. Stable across plan switches so an in-flight reply still lands.
+    func thread(projectPath: String, taskID: String) -> DiscussionThread {
+        let key = Self.runKey(projectPath: projectPath, taskID: taskID)
+        if let existing = discussions[key] { return existing }
+        let thread = DiscussionThread()
+        discussions[key] = thread
+        return thread
+    }
+
+    /// The existing discussion thread for `taskID` in `projectPath`, or `nil`.
+    /// Never creates one, so views can read it during rendering without
+    /// mutating observable state.
+    func discussion(projectPath: String, taskID: String) -> DiscussionThread? {
+        discussions[Self.runKey(projectPath: projectPath, taskID: taskID)]
+    }
+
+    /// Asks `question` about the plan: appends a pending turn and launches one
+    /// `.discuss` run that resumes the thread's session. The run is held by the
+    /// thread, never in `runs`, and its finish triggers no store reload/sync —
+    /// a discussion is read-only. No-op for a blank question or a busy thread.
+    func ask(projectPath: String, taskID: String, question: String) {
+        let trimmed = question.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        let thread = thread(projectPath: projectPath, taskID: taskID)
+        guard !thread.isBusy else { return }
+
+        let resume = thread.beginTurn(question: trimmed)
+        guard let turnID = thread.turns.last?.id else { return }
+        let taskRun = TaskRun(taskID: taskID, mode: .discuss, description: trimmed,
+                              resume: resume)
+        thread.activeRun = taskRun
+        taskRun.onEvent = { [weak thread, weak taskRun] event in
+            guard let thread, let taskRun, thread.activeRun === taskRun else { return }
+            thread.apply(event)
+        }
+        let onFinish: () -> Void = { [weak thread, weak taskRun] in
+            guard let thread, let taskRun, thread.activeRun === taskRun else { return }
+            thread.completeTurn(id: turnID, error: taskRun.error)
+            thread.activeRun = nil
+        }
+        #if DEBUG
+        if let launcher = discussLauncherForTesting {
+            launcher(taskRun, projectPath, onFinish)
+            return
+        }
+        #endif
+        taskRun.start(projectPath: projectPath, onFinish: onFinish)
+    }
+
+    /// Starts a fresh conversation for `taskID` in `projectPath`, terminating
+    /// any in-flight turn. Its late events and finish are ignored.
+    func resetDiscussion(projectPath: String, taskID: String) {
+        let key = Self.runKey(projectPath: projectPath, taskID: taskID)
+        guard let thread = discussions[key] else { return }
+        let inFlight = thread.activeRun
+        thread.reset()
+        inFlight?.onEvent = nil
+        inFlight?.stop()
+    }
+
+    /// Stops the in-flight turn of the discussion for `taskID` in `projectPath`,
+    /// marking it cancelled while keeping the conversation and its session.
+    /// The stopped run's late events and finish are ignored.
+    func cancelDiscussionTurn(projectPath: String, taskID: String) {
+        guard let thread = discussion(projectPath: projectPath, taskID: taskID) else { return }
+        let inFlight = thread.activeRun
+        thread.cancelPendingTurn()
+        inFlight?.onEvent = nil
+        inFlight?.stop()
     }
 
     /// Drops a finished run for `taskID` in `projectPath` from the map (e.g. when

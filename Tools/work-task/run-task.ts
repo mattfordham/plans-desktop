@@ -50,8 +50,15 @@
  *   {"kind":"activity","tool":"Edit","detail":"…"}
  *   {"kind":"text","chunk":"…"}
  *   {"kind":"denied","tool":"mcp__sentry__…"}
+ *   {"kind":"session","sessionId":"…"}
+ *   {"kind":"reply","text":"…","sessionId":"…"}
  *   {"kind":"done","costUsd":N,"turns":N,"stopReason":"…"}
  *   {"kind":"error","message":"…"}
+ * `session` is emitted once, at the start of a run, with the Agent SDK session
+ * id; `reply` is emitted on a successful result, immediately before `done`, and
+ * carries the agent's clean final answer (the `text` chunks also include
+ * intermediate narration). A `discuss` run can be continued as a follow-up turn
+ * by passing that session id back via `--resume <id>`.
  * The `denied` line is a NON-fatal signal (task #092): a tool call the agent
  * reached for was refused because it wasn't on the allowlist. The run still
  * continues and finishes normally — this is a distinct signal from `error`.
@@ -67,6 +74,11 @@ import * as path from "node:path";
 // $40 so a single autonomous execute run is far less likely to hit the cap
 // mid-task and strand the task at in-progress before it reaches review.
 const MAX_BUDGET_USD = 40.0;
+
+// Per-turn ceiling for a `discuss` run. Discussion is read-only Q&A and each
+// resumed turn re-sends the growing conversation history, so it gets a much
+// lower cap than a full autonomous execute run.
+const DISCUSS_MAX_BUDGET_USD = 5.0;
 
 // Stop reasons that mean the run was cut short by a cap (budget/turn limit)
 // rather than finishing. These truncation reasons are the more actionable cause
@@ -120,6 +132,13 @@ interface Args {
    * non-execute builders.
    */
   keep?: boolean;
+  /**
+   * Optional, `discuss` only. An Agent SDK session id from a previous turn's
+   * `session`/`reply` line; when present the run resumes that session so the
+   * agent keeps the conversation's context, and the follow-up prompt is used
+   * instead of the first-turn `/plan-discuss` prompt.
+   */
+  resume?: string;
 }
 
 /** Emit one NDJSON line on stdout. Never pretty-printed. */
@@ -141,6 +160,7 @@ function parseArgs(argv: string[]): Args | null {
   let deep = false;
   // #078: valueless flag requesting the worktree be kept after execute. Orthogonal to mode.
   let keep = false;
+  let resume: string | undefined;
 
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
@@ -150,6 +170,11 @@ function parseArgs(argv: string[]): Args | null {
       taskId = argv[++i];
     } else if (arg === "--description") {
       description = argv[++i];
+    } else if (arg === "--resume") {
+      resume = argv[++i];
+      if (!resume) {
+        return null;
+      }
     } else if (arg === "--deep") {
       // Valueless flag — do NOT consume the following argv token.
       deep = true;
@@ -181,6 +206,13 @@ function parseArgs(argv: string[]): Args | null {
     return null;
   }
 
+  // Session resume only makes sense for the conversational discuss mode; every
+  // other mode is a one-shot lifecycle action, so reject it rather than
+  // silently ignoring it.
+  if (resume !== undefined && mode !== "discuss") {
+    return null;
+  }
+
   if (
     mode === "capture" ||
     mode === "captureElaborate" ||
@@ -201,7 +233,7 @@ function parseArgs(argv: string[]): Args | null {
     if (!taskId || !description) {
       return null;
     }
-    return { projectRoot, taskId, mode, description, deep, keep };
+    return { projectRoot, taskId, mode, description, deep, keep, resume };
   }
 
   // execute / elaborate / reElaborateReview / delete / backlog / restore operate
@@ -762,6 +794,26 @@ function buildDiscussPrompt(taskId: string, description: string): string {
   ].join("\n");
 }
 
+/**
+ * Build the prompt for a follow-up `discuss` turn, sent into a resumed session.
+ * The session already holds the `/plan-discuss` context from the first turn, so
+ * this carries only the new question plus the same read-only / no-questions
+ * constraints, which are restated every turn so they cannot drift.
+ */
+function buildDiscussFollowUpPrompt(taskId: string, question: string): string {
+  return [
+    `Follow-up question about plans-cc task ${taskId}:`,
+    "",
+    `"""`,
+    question,
+    `"""`,
+    "",
+    "Reminder: answer READ-ONLY. Do NOT apply any changes to the plan file or",
+    "any other file. Work fully autonomously and do NOT ask the user any",
+    "questions — there is no interactive UI to answer them.",
+  ].join("\n");
+}
+
 function buildPrompt(args: Args): string {
   if (args.mode === "capture") {
     return buildCapturePrompt(args.description ?? "");
@@ -803,6 +855,9 @@ function buildPrompt(args: Args): string {
     return buildRestorePrompt(args.taskId ?? "");
   }
   if (args.mode === "discuss") {
+    if (args.resume) {
+      return buildDiscussFollowUpPrompt(args.taskId ?? "", args.description ?? "");
+    }
     return buildDiscussPrompt(args.taskId ?? "", args.description ?? "");
   }
   return buildExecutePrompt(
@@ -934,6 +989,26 @@ const BASE_ALLOWED_TOOLS: string[] = [
 ];
 
 /**
+ * Tool allowlist for `discuss` runs. Discussion is strictly read-only, so it
+ * gets only the Skill tool (to load `plan-discuss`) plus the read-only file
+ * tools. This REPLACES the base allowlist and is NOT extended by the project's
+ * `extraAllowedTools`, so config can never re-enable a write tool for discuss.
+ */
+const DISCUSS_ALLOWED_TOOLS: string[] = ["Skill", "Read", "Glob", "Grep"];
+
+/**
+ * Tools explicitly denied for `discuss` runs. `acceptEdits` would otherwise
+ * auto-approve file edits, so the write-capable tools are hard-blocked rather
+ * than relying on the prompt's read-only instruction.
+ */
+const DISCUSS_DISALLOWED_TOOLS: string[] = [
+  "Write",
+  "Edit",
+  "NotebookEdit",
+  "Bash",
+];
+
+/**
  * Read an OPTIONAL per-project extra-allowed-tools list from
  * `<projectRoot>/.plans/config.json` under the `extraAllowedTools` key (task
  * #092). The value must be an array of strings; anything else is ignored.
@@ -967,7 +1042,7 @@ async function main(): Promise<void> {
   const args = parseArgs(process.argv.slice(2));
   if (!args) {
     emitError(
-      "Missing or invalid arguments. Usage: run-task.js --project-root <abs path> [--mode execute|elaborate|reElaborate|capture|captureElaborate|executeYolo|delete|backlog|restore|discuss] (--task-id <NNN> for execute/elaborate/delete/backlog/restore; --description <text> for capture/captureElaborate/executeYolo; BOTH --task-id <NNN> and --description <text> for reElaborate/discuss)",
+      "Missing or invalid arguments. Usage: run-task.js --project-root <abs path> [--mode execute|elaborate|reElaborate|capture|captureElaborate|executeYolo|delete|backlog|restore|discuss] (--task-id <NNN> for execute/elaborate/delete/backlog/restore; --description <text> for capture/captureElaborate/executeYolo; BOTH --task-id <NNN> and --description <text> for reElaborate/discuss; optional --resume <session id> for discuss only)",
     );
     process.exit(1);
     return;
@@ -978,20 +1053,27 @@ async function main(): Promise<void> {
     // extensions from `.plans/config.json` (`extraAllowedTools`). Config may
     // only EXTEND — the base is always present — and we dedupe so a repeated
     // entry doesn't appear twice.
-    const allowedTools = Array.from(
-      new Set([
-        ...BASE_ALLOWED_TOOLS,
-        ...readExtraAllowedTools(args.projectRoot),
-      ]),
-    );
+    // Discuss is the exception: it uses its own fixed read-only allowlist and
+    // ignores the config extensions entirely.
+    const isDiscuss = args.mode === "discuss";
+    const allowedTools = isDiscuss
+      ? DISCUSS_ALLOWED_TOOLS
+      : Array.from(
+          new Set([
+            ...BASE_ALLOWED_TOOLS,
+            ...readExtraAllowedTools(args.projectRoot),
+          ]),
+        );
 
     const response = query({
       prompt: buildPrompt(args),
       options: {
         cwd: args.projectRoot,
         permissionMode: "acceptEdits",
-        maxBudgetUsd: MAX_BUDGET_USD,
+        maxBudgetUsd: isDiscuss ? DISCUSS_MAX_BUDGET_USD : MAX_BUDGET_USD,
         allowedTools,
+        ...(isDiscuss ? { disallowedTools: DISCUSS_DISALLOWED_TOOLS } : {}),
+        ...(args.resume ? { resume: args.resume } : {}),
       },
     });
 
@@ -1071,6 +1153,17 @@ async function main(): Promise<void> {
             }
           }
 
+          // On success, surface the agent's clean final answer (the `text`
+          // chunks above include narration and preambles). Error results carry
+          // no `result`, so nothing is emitted for them.
+          if (message.subtype === "success") {
+            emit({
+              kind: "reply",
+              text: message.result,
+              sessionId: message.session_id,
+            });
+          }
+
           emit({
             kind: "done",
             costUsd: message.total_cost_usd ?? 0,
@@ -1114,6 +1207,14 @@ async function main(): Promise<void> {
                 (id && toolUseNames.get(id)) || "unknown";
               emit({ kind: "denied", tool: resolvedName });
             }
+          }
+          break;
+        }
+        case "system": {
+          // Only the `init` message is part of our contract: it carries the
+          // session id a follow-up discuss turn passes back via `--resume`.
+          if (message.subtype === "init") {
+            emit({ kind: "session", sessionId: message.session_id });
           }
           break;
         }

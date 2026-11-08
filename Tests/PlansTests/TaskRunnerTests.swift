@@ -212,6 +212,250 @@ final class TaskRunnerTests: XCTestCase {
                        "distinct set, sorted")
     }
 
+    // MARK: - Completion gating (exit + stdout EOF)
+
+    private func tempOutcomeLog() -> RunOutcomeLog {
+        RunOutcomeLog(fileURL: FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString)
+            .appendingPathComponent("run-outcomes.log"))
+    }
+
+    /// The process can exit before its last stdout chunk is read. The run must
+    /// stay live until EOF so that chunk (here, a reply split across reads plus
+    /// the `done`) is still decoded and delivered.
+    @MainActor
+    func testRunWaitsForStdoutEOFAfterProcessExit() {
+        let run = TaskRun(taskID: "049", mode: .discuss, description: "q",
+                          outcomeLog: tempOutcomeLog())
+        var finished = 0
+        var events: [RunEvent] = []
+        run.onEvent = { events.append($0) }
+        run.markRunningForTesting(projectPath: "/proj", onFinish: { finished += 1 })
+
+        run.ingestForTesting(#"{"kind":"session","sessionId":"s1"}"# + "\n" + #"{"kind":"reply","te"#)
+        run.processExitedForTesting(status: 0)
+        XCTAssertTrue(run.isRunning, "exit alone must not finish the run")
+        XCTAssertEqual(finished, 0)
+
+        run.ingestForTesting(#"xt":"The answer","sessionId":"s1"}"# + "\n"
+            + #"{"kind":"done","costUsd":0.1,"turns":2,"stopReason":"end_turn"}"#)
+        run.streamClosedForTesting()
+
+        XCTAssertFalse(run.isRunning)
+        XCTAssertEqual(finished, 1)
+        XCTAssertEqual(run.reply, "The answer")
+        XCTAssertNotNil(run.summary, "unterminated trailing done is drained at completion")
+        XCTAssertTrue(events.contains { if case .reply = $0 { return true } else { return false } })
+    }
+
+    @MainActor
+    func testRunFinishesWhenEOFPrecedesExit() {
+        let run = TaskRun(taskID: "049", mode: .discuss, description: "q",
+                          outcomeLog: tempOutcomeLog())
+        var finished = 0
+        run.markRunningForTesting(projectPath: "/proj", onFinish: { finished += 1 })
+        run.ingestForTesting(#"{"kind":"done","costUsd":0.1,"turns":2}"# + "\n")
+        run.streamClosedForTesting()
+        XCTAssertTrue(run.isRunning)
+        run.processExitedForTesting(status: 0)
+        XCTAssertFalse(run.isRunning)
+        XCTAssertEqual(finished, 1)
+    }
+
+    /// A grandchild can hold stdout open after the runner exits; the run still
+    /// finishes after the grace period rather than hanging forever.
+    @MainActor
+    func testRunFinishesAfterGracePeriodWhenEOFNeverArrives() async throws {
+        let run = TaskRun(taskID: "049", mode: .discuss, description: "q",
+                          outcomeLog: tempOutcomeLog())
+        run.streamCloseGracePeriod = .milliseconds(20)
+        var finished = 0
+        run.markRunningForTesting(projectPath: "/proj", onFinish: { finished += 1 })
+        run.processExitedForTesting(status: 0)
+        XCTAssertTrue(run.isRunning)
+        try await _Concurrency.Task.sleep(for: .milliseconds(300))
+        XCTAssertFalse(run.isRunning)
+        XCTAssertEqual(finished, 1)
+        run.streamClosedForTesting()
+        XCTAssertEqual(finished, 1, "late EOF does not finish twice")
+    }
+
+    @MainActor
+    func testNonzeroExitWithoutTerminalSurfacesErrorOnceGateCompletes() {
+        let run = TaskRun(taskID: "049", mode: .execute, outcomeLog: tempOutcomeLog())
+        run.markRunningForTesting(projectPath: "/proj")
+        run.processExitedForTesting(status: 2)
+        XCTAssertNil(run.error)
+        run.streamClosedForTesting()
+        XCTAssertEqual(run.error, "Work-task process exited unexpectedly (code 2).")
+    }
+
+    /// `stop()` finishes immediately; the stopped process's later exit/EOF must
+    /// not finish (or write an outcome) a second time.
+    @MainActor
+    func testStopFinishesOnceEvenWhenExitAndEOFFollow() throws {
+        let tmp = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString)
+            .appendingPathComponent("run-outcomes.log")
+        let run = TaskRun(taskID: "049", mode: .execute,
+                          outcomeLog: RunOutcomeLog(fileURL: tmp), now: { "t" })
+        var finished = 0
+        run.markRunningForTesting(projectPath: "/proj", onFinish: { finished += 1 })
+        run.stop()
+        XCTAssertEqual(finished, 1)
+        run.processExitedForTesting(status: 15)
+        run.streamClosedForTesting()
+        XCTAssertEqual(finished, 1)
+        let lines = try String(contentsOf: tmp, encoding: .utf8).split(separator: "\n")
+        XCTAssertEqual(lines.count, 1, "exactly one outcome record")
+    }
+
+    // MARK: - Session / reply (discussion)
+
+    func testDecodesSession() throws {
+        let event = try decode(#"{"kind":"session","sessionId":"abc"}"#)
+        XCTAssertEqual(event, .session(id: "abc"))
+    }
+
+    func testDecodesReply() throws {
+        let event = try decode(#"{"kind":"reply","text":"Because it is simpler.","sessionId":"abc"}"#)
+        XCTAssertEqual(event, .reply(text: "Because it is simpler.", sessionID: "abc"))
+    }
+
+    func testSessionAndReplyRoundTripThroughEncodeDecode() throws {
+        for original in [RunEvent.session(id: "s-1"), .reply(text: "answer", sessionID: "s-1")] {
+            let data = try JSONEncoder().encode(original)
+            let decoded = try JSONDecoder().decode(RunEvent.self, from: data)
+            XCTAssertEqual(decoded, original)
+        }
+    }
+
+    func testParseLinesDecodesSessionAndReplyAmongOtherKinds() {
+        let stream = #"{"kind":"session","sessionId":"abc"}"# + "\n"
+            + #"{"kind":"activity","tool":"Read","detail":"plan.md"}"# + "\n"
+            + #"{"kind":"text","chunk":"Let me look."}"# + "\n"
+            + #"{"kind":"reply","text":"Final answer","sessionId":"abc"}"# + "\n"
+            + #"{"kind":"done","costUsd":0.2,"turns":3,"stopReason":"end_turn"}"# + "\n"
+        var buffer = Data(stream.utf8)
+
+        let events = RunEvent.parseLines(from: &buffer)
+
+        XCTAssertEqual(events.count, 5)
+        XCTAssertEqual(events[0], .session(id: "abc"))
+        XCTAssertEqual(events[3], .reply(text: "Final answer", sessionID: "abc"))
+        guard case .done = events[4] else {
+            return XCTFail("expected .done at index 4, got \(events[4])")
+        }
+    }
+
+    @MainActor
+    func testRunExposesSessionIDAndReplyWithoutTouchingErrorOrSummary() {
+        let run = TaskRun(taskID: "099", mode: .discuss, description: "why?")
+        XCTAssertNil(run.sessionID)
+        XCTAssertNil(run.reply)
+
+        run.ingestForTesting(
+            #"{"kind":"session","sessionId":"abc"}"# + "\n"
+            + #"{"kind":"reply","text":"Because.","sessionId":"abc"}"# + "\n"
+        )
+
+        XCTAssertEqual(run.sessionID, "abc")
+        XCTAssertEqual(run.reply, "Because.")
+        XCTAssertNil(run.error)
+        XCTAssertNil(run.summary)
+    }
+
+    @MainActor
+    func testReplySessionIDUpdatesRunSessionID() {
+        let run = TaskRun(taskID: "099", mode: .discuss, description: "why?")
+        run.ingestForTesting(
+            #"{"kind":"session","sessionId":"first"}"# + "\n"
+            + #"{"kind":"reply","text":"ok","sessionId":"second"}"# + "\n"
+        )
+        XCTAssertEqual(run.sessionID, "second")
+    }
+
+    // MARK: - Argument builder
+
+    func testArgumentsForExecute() {
+        let args = TaskRun.arguments(
+            scriptPath: "/b/run-task.js", projectPath: "/proj", taskID: "019",
+            mode: .execute, description: nil, deep: false, keep: true, resume: nil
+        )
+        XCTAssertEqual(args, [
+            "/b/run-task.js", "--project-root", "/proj",
+            "--task-id", "019", "--mode", "execute", "--keep",
+        ])
+    }
+
+    func testArgumentsForDiscussWithoutResume() {
+        let args = TaskRun.arguments(
+            scriptPath: "/b/run-task.js", projectPath: "/proj", taskID: "099",
+            mode: .discuss, description: "why?", deep: false, keep: false, resume: nil
+        )
+        XCTAssertEqual(args, [
+            "/b/run-task.js", "--project-root", "/proj",
+            "--task-id", "099", "--description", "why?", "--mode", "discuss",
+        ])
+    }
+
+    func testArgumentsForDiscussWithResumeAppendResumeAfterMode() {
+        let args = TaskRun.arguments(
+            scriptPath: "/b/run-task.js", projectPath: "/proj", taskID: "099",
+            mode: .discuss, description: "and then?", deep: false, keep: false, resume: "sess-1"
+        )
+        XCTAssertEqual(args, [
+            "/b/run-task.js", "--project-root", "/proj",
+            "--task-id", "099", "--description", "and then?", "--mode", "discuss",
+            "--resume", "sess-1",
+        ])
+    }
+
+    func testArgumentsIgnoreResumeForNonDiscussModes() {
+        for mode in [RunMode.execute, .elaborate, .reElaborate] {
+            let args = TaskRun.arguments(
+                scriptPath: "/s", projectPath: "/p", taskID: "1",
+                mode: mode, description: "d", deep: true, keep: false, resume: "sess-1"
+            )
+            XCTAssertFalse(args.contains("--resume"), "\(mode) must not pass --resume")
+            XCTAssertEqual(args.last, "--deep")
+        }
+    }
+
+    func testArgumentsIgnoreEmptyResume() {
+        let args = TaskRun.arguments(
+            scriptPath: "/s", projectPath: "/p", taskID: "1",
+            mode: .discuss, description: "q", deep: false, keep: false, resume: ""
+        )
+        XCTAssertFalse(args.contains("--resume"))
+    }
+
+    @MainActor
+    func testDiscussRunCarriesResume() {
+        let run = TaskRun(taskID: "099", mode: .discuss, description: "q", resume: "sess-1")
+        XCTAssertEqual(run.resume, "sess-1")
+        XCTAssertNil(TaskRun(taskID: "099", mode: .discuss, description: "q").resume)
+    }
+
+    @MainActor
+    func testFinishWritesNoOutcomeForDiscuss() {
+        let tmp = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString)
+            .appendingPathComponent("run-outcomes.log")
+        let run = TaskRun(
+            taskID: "099", mode: .discuss, description: "q",
+            outcomeLog: RunOutcomeLog(fileURL: tmp), now: { "t" }
+        )
+        run.ingestForTesting(
+            #"{"kind":"error","message":"boom"}"# + "\n"
+        )
+        run.finishForTesting(projectPath: "/proj")
+
+        XCTAssertFalse(FileManager.default.fileExists(atPath: tmp.path),
+                       "a discuss turn must never raise or mask a task failure badge")
+        XCTAssertFalse(run.isRunning)
+    }
+
     func testLoggedEventGetsUniqueIdentityPerWrapper() throws {
         let event = try decode(#"{"kind":"text","chunk":"a"}"#)
         let a = LoggedEvent(event: event)

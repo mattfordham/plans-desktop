@@ -19,6 +19,59 @@ private enum PlanType {
     static let sectionSpacing: CGFloat = 12
 }
 
+/// Sizes and spacing for the shared markdown renderer, so plan bodies and
+/// discussion replies use one renderer at different scales. `.plan` is the
+/// editorial plan-detail scale; `.compact` is a system-body scale for chat-style
+/// replies with plain, only modestly larger headings.
+struct MarkdownStyle: Equatable {
+    var bodySize: CGFloat
+    var lineSpacing: CGFloat
+    var blockSpacing: CGFloat
+    var listSpacing: CGFloat
+    /// Gap between a list marker and its text.
+    var markerSpacing: CGFloat
+    /// Extra space above a sub-heading.
+    var headingTopPadding: CGFloat
+    /// Inner padding of a fenced code block.
+    var codePadding: CGFloat
+    /// Whether headings take the accent/teal tints and the semantic title
+    /// fonts; when false they are primary, semibold, sized by `headingSize`.
+    var tintsHeadings: Bool
+
+    static let plan = MarkdownStyle(
+        bodySize: PlanType.bodySize,
+        lineSpacing: PlanType.lineSpacing,
+        blockSpacing: PlanType.blockSpacing,
+        listSpacing: PlanType.listSpacing,
+        markerSpacing: 10,
+        headingTopPadding: 6,
+        codePadding: 14,
+        tintsHeadings: true
+    )
+
+    static let compact = MarkdownStyle(
+        bodySize: 13,
+        lineSpacing: 3,
+        blockSpacing: 8,
+        listSpacing: 4,
+        markerSpacing: 6,
+        headingTopPadding: 2,
+        codePadding: 10,
+        tintsHeadings: false
+    )
+
+    /// The point size of a plain heading at `level`, or `nil` when the style
+    /// uses the semantic title fonts instead.
+    func headingSize(forLevel level: Int) -> CGFloat? {
+        guard !tintsHeadings else { return nil }
+        switch level {
+        case 1: return bodySize + 3
+        case 2: return bodySize + 2
+        default: return bodySize + 1
+        }
+    }
+}
+
 /// A self-contained renderer for a single plan's detail body (§011). This is the
 /// content surface hosted by the browser window's split-view detail column
 /// (#095, `BrowserWindow.detailColumn`, keyed by `.id(selectedRowID)` so sheet
@@ -101,11 +154,11 @@ struct PlanDetailView: View {
     /// that gates to the elaborated state while this gates to review.
     @State private var showReviewReElaborate = false
 
-    /// The live text of the Discuss footer's question box (#099). Bound to the
-    /// footer `TextField`; normalized by `Self.discussSubmission(_:)` on send
-    /// (empty / whitespace-only never fires a run) and cleared once a question
-    /// is handed off to the runner. NOT persisted — a fresh plan opens empty
-    /// since the detail column re-keys per `selectedRowID`.
+    /// The live text of the discussion composer. Normalized by
+    /// `Self.discussSubmission(_:)` on send (empty / whitespace-only never
+    /// fires) and cleared once the question is asked. Not persisted — a fresh
+    /// plan opens empty since the detail column re-keys per `selectedRowID`;
+    /// the conversation itself lives on the runner's `DiscussionThread`.
     @State private var discussText = ""
 
     /// The resolved row for `rowID` across all projects' active rows, or `nil`
@@ -118,51 +171,37 @@ struct PlanDetailView: View {
     var body: some View {
         Group {
             if let row {
-                ScrollView {
-                    VStack(alignment: .leading, spacing: 28) {
-                        detailHeader(row)
-                        // #079: a PERSISTENT failure section (not a transient
-                        // banner) when the latest run for this task failed. Reuses
-                        // the `errorBanner` visual style and offers a Retry that
-                        // re-runs via the same Execute consent gate.
-                        if let failure = row.task.failure {
-                            failureSection(row, failure: failure)
+                let thread = runner.discussion(projectPath: row.projectPath, taskID: row.task.id)
+                let showsPanel = Self.showsConversationPanel(turnCount: thread?.turns.count ?? 0)
+                // The plan on top; below it the discussion panel — the
+                // transcript (once a question has been asked) and the composer
+                // on one `.bar` surface. With a transcript, both halves take
+                // `maxHeight: .infinity`, so SwiftUI splits the column evenly
+                // without anything measuring itself (#096). The plan ScrollView
+                // and the composer keep their structural identity as the panel
+                // appears, so neither the plan's scroll position nor the
+                // composer's state resets on the first question.
+                VStack(spacing: 0) {
+                    planScrollView(row)
+                        .frame(maxHeight: .infinity)
+                    VStack(spacing: 0) {
+                        if showsPanel, let thread {
+                            Divider()
+                            conversationTranscript(row, thread: thread)
                         }
-                        // Task #092: a non-fatal DENIAL note for a run that reached
-                        // for tools not on the allowlist. Surfaced from the live
-                        // `TaskRun` (the detail body's only run handle) so it shows
-                        // EVEN WHEN the run otherwise finished cleanly — the user
-                        // needs to know the plan may be built on incomplete
-                        // information. Distinct from the red `failureSection`: this
-                        // is a caution (orange), not a failure.
-                        if let run = runner.run(for: row.task.id, in: row.projectPath),
-                           !run.deniedTools.isEmpty {
-                            deniedToolsSection(run)
-                        }
-                        ForEach(Array(row.task.sections.enumerated()), id: \.offset) { _, section in
-                            sectionView(section)
+                        // Shown whenever the plan can be discussed (not
+                        // blocked/backlogged) — including while an
+                        // execute/elaborate run is live, since a discussion is
+                        // read-only and tracked apart from task runs.
+                        if Self.canDiscuss(status: row.task.status,
+                                           isBlocked: row.task.isBlocked,
+                                           isBacklogged: row.task.isBacklogged) {
+                            discussFooter(row, isBusy: thread?.isBusy ?? false,
+                                          showsDivider: !showsPanel)
                         }
                     }
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(28)
-                }
-                .textSelection(.enabled)
-                // #099: the Discuss footer. A natural-height bar pinned to the
-                // bottom of the scrolling plan body via `.safeAreaInset` — it
-                // offers a one-shot, read-only question ABOUT this plan, handed
-                // to the bundled runner in `.discuss` mode (the reply streams
-                // into the existing progress sheet). Shown only when
-                // `canDiscuss` is true (hidden for blocked/backlogged plans) and
-                // only while no run for this task is in flight. CRITICAL (#096):
-                // this is a fixed/natural-height view — it never measures its
-                // own size, so it can't drive a layout loop.
-                .safeAreaInset(edge: .bottom) {
-                    if Self.canDiscuss(status: row.task.status,
-                                       isBlocked: row.task.isBlocked,
-                                       isBacklogged: row.task.isBacklogged),
-                       !runner.isRunning(taskID: row.task.id, in: row.projectPath) {
-                        discussFooter(row)
-                    }
+                    .frame(maxHeight: showsPanel ? .infinity : nil)
+                    .background(.bar)
                 }
             } else {
                 VStack {
@@ -181,7 +220,8 @@ struct PlanDetailView: View {
         .onAppear {
             if let row,
                PlanDetailView.shouldAutoOpenProgress(
-                   onAppearRunning: runner.isRunning(taskID: row.task.id, in: row.projectPath)
+                   onAppearRunning: runner.isRunning(taskID: row.task.id, in: row.projectPath),
+                   mode: runner.run(for: row.task.id, in: row.projectPath)?.mode
                ) {
                 showProgress = true
             }
@@ -502,65 +542,224 @@ struct PlanDetailView: View {
         }
     }
 
-    /// The Discuss footer (#099): a full-width bar pinned to the bottom of the
-    /// plan body for asking a one-shot, read-only question ABOUT this plan. A top
-    /// `Divider`, then an inset `.textBackgroundColor` question field and a
-    /// trailing Send button that hands the question to the bundled runner in
-    /// `.discuss` mode (the reply streams into the existing progress sheet). Send
-    /// is disabled while the box is empty/whitespace-only (gated on
-    /// `discussSubmission`), and `⌘↩` fires it too. Visual tokens — the inset
-    /// rounded `.textBackgroundColor` fill with a faint secondary border — match
-    /// `RunProgressSheet.logList` / `ElaborateModal`. Fixed/natural height only:
-    /// nothing here measures its own size (#096).
-    private func discussFooter(_ row: TaskRow) -> some View {
-        VStack(spacing: 0) {
-            Divider()
-            HStack(spacing: 8) {
-                TextField("Ask about this plan…", text: $discussText)
+    /// The discussion composer, styled like the Claude app's reply box: one
+    /// rounded, filled field with a faint border holding a multi-line question
+    /// and a trailing return glyph that sends it — or, while a turn is pending,
+    /// a stop glyph that cancels it. Return sends (`.onSubmit`).
+    /// The field grows with its text up to six lines via `lineLimit` — its
+    /// height is natural, never measured (#096). Input is disabled while a
+    /// turn is pending. The top divider is dropped when the composer sits
+    /// under the transcript, so the two read as one panel; the enclosing
+    /// panel supplies the `.bar` background.
+    private func discussFooter(_ row: TaskRow, isBusy: Bool, showsDivider: Bool) -> some View {
+        let canSend = Self.canSendDiscussion(discussText, isBusy: isBusy)
+        return VStack(spacing: 0) {
+            if showsDivider {
+                Divider()
+            }
+            HStack(alignment: .bottom, spacing: 8) {
+                TextField("Ask about this plan…", text: $discussText, axis: .vertical)
+                    .lineLimit(1...6)
                     .textFieldStyle(.plain)
-                    .frame(maxWidth: .infinity)
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 6)
-                    .background(
-                        RoundedRectangle(cornerRadius: 6)
-                            .fill(Color(nsColor: .textBackgroundColor))
-                            .overlay(
-                                RoundedRectangle(cornerRadius: 6)
-                                    .strokeBorder(Color.secondary.opacity(0.4), lineWidth: 1)
-                            )
-                    )
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .disabled(isBusy)
                     .onSubmit { submitDiscussion(row) }
 
-                Button {
-                    submitDiscussion(row)
-                } label: {
-                    Label("Send", systemImage: "paperplane.fill")
+                if Self.composerShowsStop(isBusy: isBusy) {
+                    Button {
+                        runner.cancelDiscussionTurn(projectPath: row.projectPath,
+                                                    taskID: row.task.id)
+                    } label: {
+                        Image(systemName: "stop.circle.fill")
+                            .foregroundStyle(.secondary)
+                    }
+                    .buttonStyle(.plain)
+                    .help("Stop")
+                } else {
+                    Button {
+                        submitDiscussion(row)
+                    } label: {
+                        Image(systemName: "return")
+                            .foregroundStyle(.secondary)
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(!canSend)
+                    .opacity(canSend ? 1 : 0.4)
+                    .help("Send")
                 }
-                .keyboardShortcut(.return, modifiers: .command)
-                .disabled(Self.discussSubmission(discussText) == nil)
             }
-            .padding(12)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 10)
+            .background(
+                RoundedRectangle(cornerRadius: 12)
+                    .fill(Color(nsColor: .textBackgroundColor))
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 12)
+                    .strokeBorder(Color.primary.opacity(0.1), lineWidth: 1)
+            )
+            .padding(.horizontal, 16)
+            .padding(.vertical, 12)
         }
-        .background(.bar)
     }
 
-    /// Hands this view's Discuss question off to the bundled runner in `.discuss`
-    /// mode (#099). Guards the same `canDiscuss` gate the footer renders behind
-    /// (so a stale ⌘↩ can't fire for a now-blocked/backlogged plan) and the
-    /// `discussSubmission` trim (empty / whitespace-only never fires). Clears the
-    /// box and raises the progress sheet so the read-only reply streams into the
-    /// existing `RunProgressSheet`. The runner is the sole writer of `.plans/`;
-    /// discuss itself is read-only — it answers the question without touching the
-    /// plan file (enforced in the runner's prompt).
+    /// Asks this view's question in the plan's discussion thread. Guards the
+    /// same `canDiscuss` gate the composer renders behind (so a stale Return
+    /// can't fire for a now-blocked/backlogged plan) and the send predicate
+    /// (blank input or a pending turn never fires). The turn renders inline in
+    /// the transcript — no progress sheet. Discussion is read-only: the runner
+    /// restricts the agent to read tools, so the plan file is never changed.
     private func submitDiscussion(_ row: TaskRow) {
         guard Self.canDiscuss(status: row.task.status,
                               isBlocked: row.task.isBlocked,
                               isBacklogged: row.task.isBacklogged) else { return }
-        guard let text = Self.discussSubmission(discussText) else { return }
-        runner.run(projectPath: row.projectPath, taskID: row.task.id,
-                   mode: .discuss, description: text)
+        let isBusy = runner.discussion(projectPath: row.projectPath, taskID: row.task.id)?.isBusy ?? false
+        guard Self.canSendDiscussion(discussText, isBusy: isBusy),
+              let text = Self.discussSubmission(discussText) else { return }
+        runner.ask(projectPath: row.projectPath, taskID: row.task.id, question: text)
         discussText = ""
-        showProgress = true
+    }
+
+    /// Scrolls the transcript so the newest turn's bottom edge is visible.
+    private func scrollToLatestTurn(_ thread: DiscussionThread, proxy: ScrollViewProxy) {
+        guard let target = Self.discussionScrollTarget(for: thread.turns) else { return }
+        withAnimation { proxy.scrollTo(target, anchor: .bottom) }
+    }
+
+    /// The scrolling plan body: header, failure / denial notes, and the plan's
+    /// sections.
+    private func planScrollView(_ row: TaskRow) -> some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 28) {
+                detailHeader(row)
+                // #079: a PERSISTENT failure section (not a transient
+                // banner) when the latest run for this task failed. Reuses
+                // the `errorBanner` visual style and offers a Retry that
+                // re-runs via the same Execute consent gate.
+                if let failure = row.task.failure {
+                    failureSection(row, failure: failure)
+                }
+                // Task #092: a non-fatal DENIAL note for a run that reached
+                // for tools not on the allowlist. Surfaced from the live
+                // `TaskRun` (the detail body's only run handle) so it shows
+                // EVEN WHEN the run otherwise finished cleanly — the user
+                // needs to know the plan may be built on incomplete
+                // information. Distinct from the red `failureSection`: this
+                // is a caution (orange), not a failure.
+                if let run = runner.run(for: row.task.id, in: row.projectPath),
+                   !run.deniedTools.isEmpty {
+                    deniedToolsSection(run)
+                }
+                ForEach(Array(row.task.sections.enumerated()), id: \.offset) { _, section in
+                    sectionView(section)
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(28)
+        }
+        .textSelection(.enabled)
+    }
+
+    /// The conversation half of the discussion panel: a compact header with a
+    /// close control, then the scrolling transcript — each question as a
+    /// right-aligned neutral bubble, each reply rendered as compact markdown, a
+    /// live "Thinking…" row while a turn is pending, and per-turn errors or a
+    /// "Cancelled" note. Closing drops the thread (and stops any in-flight
+    /// turn), collapsing the panel back to the composer; the next question
+    /// starts a fresh agent session.
+    private func conversationTranscript(_ row: TaskRow, thread: DiscussionThread) -> some View {
+        VStack(spacing: 0) {
+            HStack(alignment: .firstTextBaseline) {
+                Text("Discussion")
+                    .font(.headline)
+                Spacer()
+                Button {
+                    runner.resetDiscussion(projectPath: row.projectPath, taskID: row.task.id)
+                } label: {
+                    Image(systemName: "xmark")
+                        .foregroundStyle(.secondary)
+                }
+                .buttonStyle(.plain)
+                .help("Close conversation")
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 8)
+
+            ScrollViewReader { proxy in
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 20) {
+                        ForEach(thread.turns) { turn in
+                            discussionTurnView(turn)
+                                .id(turn.id)
+                        }
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, 16)
+                    .padding(.bottom, 8)
+                }
+                .textSelection(.enabled)
+                .frame(maxHeight: .infinity)
+                // Keep the newest turn in view as questions are asked and
+                // replies land. Scrolls by id only — nothing is measured.
+                .onAppear { scrollToLatestTurn(thread, proxy: proxy) }
+                .onChange(of: thread.turns.count) { scrollToLatestTurn(thread, proxy: proxy) }
+                .onChange(of: thread.turns.last?.reply) { scrollToLatestTurn(thread, proxy: proxy) }
+                .onChange(of: thread.turns.last?.isPending) { scrollToLatestTurn(thread, proxy: proxy) }
+            }
+        }
+    }
+
+    private func discussionTurnView(_ turn: DiscussionTurn) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                Spacer(minLength: 60)
+                Text(turn.question)
+                    .font(.system(size: MarkdownStyle.compact.bodySize))
+                    .foregroundStyle(.primary)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 8)
+                    .background(
+                        RoundedRectangle(cornerRadius: 12)
+                            .fill(Color.primary.opacity(0.12))
+                    )
+            }
+
+            if let reply = turn.reply {
+                markdownBlockView(reply, style: .compact)
+            }
+
+            if turn.isCancelled {
+                Text("Cancelled")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+            }
+
+            if turn.isPending {
+                HStack(alignment: .firstTextBaseline, spacing: 6) {
+                    ProgressView().controlSize(.small)
+                    Text("Thinking…")
+                        .foregroundStyle(.secondary)
+                    if let activity = turn.activity {
+                        Text(activity)
+                            .foregroundStyle(.tertiary)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                    }
+                }
+                .font(.callout)
+            }
+
+            if let error = turn.error {
+                Text(error)
+                    .font(.callout)
+                    .foregroundStyle(.white)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(8)
+                    .background(Color.red.opacity(0.85))
+                    .clipShape(RoundedRectangle(cornerRadius: 6))
+            }
+        }
     }
 
     /// The PERSISTENT run-failure section (#079), shown only when `row.task`
@@ -774,7 +973,7 @@ struct PlanDetailView: View {
 
     /// Pure predicate for the "Discuss" footer's availability (#099). Unlike the
     /// lifecycle actions (Elaborate / Execute / Refine), discussion is a
-    /// read-only, one-shot question ABOUT a plan — so it is offered at EVERY
+    /// a read-only conversation ABOUT a plan — so it is offered at EVERY
     /// status, including an undecodable `nil` status: the footer shows whenever
     /// there is a real plan to ask about, independent of lifecycle state.
     /// Only the two cross-cutting guards hide it — a BLOCKED plan (nothing to ask
@@ -894,8 +1093,34 @@ struct PlanDetailView: View {
     /// deliberate re-entry path. `onAppearRunning` is `runner.isRunning(taskID:in:)`
     /// evaluated in `.onAppear`; this returns it unchanged, encoding the rule as a
     /// pure, testable decision.
-    static func shouldAutoOpenProgress(onAppearRunning: Bool) -> Bool {
-        onAppearRunning
+    /// A `.discuss` run never auto-opens the sheet: discussion replies render
+    /// inline in the detail column.
+    static func shouldAutoOpenProgress(onAppearRunning: Bool, mode: RunMode? = nil) -> Bool {
+        onAppearRunning && mode != .discuss
+    }
+
+    /// Whether the composer may send `text`: a non-blank question while no
+    /// discussion turn is pending.
+    static func canSendDiscussion(_ text: String, isBusy: Bool) -> Bool {
+        !isBusy && discussSubmission(text) != nil
+    }
+
+    /// Whether the composer's trailing control is a stop button (cancelling the
+    /// pending turn) rather than send.
+    static func composerShowsStop(isBusy: Bool) -> Bool {
+        isBusy
+    }
+
+    /// Whether the detail column splits into plan (top) and conversation panel
+    /// (bottom). Only once a question has been asked; until then the column is
+    /// just the plan with the composer pinned beneath it.
+    static func showsConversationPanel(turnCount: Int) -> Bool {
+        turnCount > 0
+    }
+
+    /// The turn the transcript scrolls to as the conversation grows: the newest.
+    static func discussionScrollTarget(for turns: [DiscussionTurn]) -> UUID? {
+        turns.last?.id
     }
 
     /// Resolves the on-disk markdown file for a task, so the read-only
@@ -949,38 +1174,38 @@ struct PlanDetailView: View {
     /// inline markdown within each block's text is still applied via
     /// `markdownParagraph(_:)`. Purely presentational — performs no writes.
     @ViewBuilder
-    private func markdownBlockView(_ body: String) -> some View {
-        VStack(alignment: .leading, spacing: PlanType.blockSpacing) {
+    private func markdownBlockView(_ body: String, style: MarkdownStyle = .plan) -> some View {
+        VStack(alignment: .leading, spacing: style.blockSpacing) {
             ForEach(Array(MarkdownBlockRenderer.parse(body).enumerated()), id: \.offset) { _, block in
-                renderBlock(block)
+                renderBlock(block, style: style)
             }
         }
     }
 
     /// Renders a single parsed `MarkdownBlock` with restrained, readable styling.
     @ViewBuilder
-    private func renderBlock(_ block: MarkdownBlock) -> some View {
+    private func renderBlock(_ block: MarkdownBlock, style: MarkdownStyle) -> some View {
         switch block {
         case let .paragraph(text):
-            markdownParagraph(text)
-                .lineSpacing(PlanType.lineSpacing)
+            markdownParagraph(text, style: style)
+                .lineSpacing(style.lineSpacing)
                 .fixedSize(horizontal: false, vertical: true)
 
         case let .heading(level, text):
             Text(text)
-                .font(headingFont(forLevel: level))
-                .foregroundStyle(headingColor(forLevel: level))
-                .padding(.top, 6)
+                .font(headingFont(forLevel: level, style: style))
+                .foregroundStyle(headingColor(forLevel: level, style: style))
+                .padding(.top, style.headingTopPadding)
 
         case let .bulletList(items):
-            VStack(alignment: .leading, spacing: PlanType.listSpacing) {
+            VStack(alignment: .leading, spacing: style.listSpacing) {
                 ForEach(Array(items.enumerated()), id: \.offset) { _, item in
-                    HStack(alignment: .firstTextBaseline, spacing: 10) {
+                    HStack(alignment: .firstTextBaseline, spacing: style.markerSpacing) {
                         Text("•")
-                            .font(.system(size: PlanType.bodySize))
+                            .font(.system(size: style.bodySize))
                             .foregroundStyle(.secondary)
-                        markdownParagraph(item)
-                            .lineSpacing(PlanType.lineSpacing)
+                        markdownParagraph(item, style: style)
+                            .lineSpacing(style.lineSpacing)
                             .fixedSize(horizontal: false, vertical: true)
                     }
                     .padding(.leading, 4)
@@ -988,15 +1213,15 @@ struct PlanDetailView: View {
             }
 
         case let .numberedList(items):
-            VStack(alignment: .leading, spacing: PlanType.listSpacing) {
+            VStack(alignment: .leading, spacing: style.listSpacing) {
                 ForEach(Array(items.enumerated()), id: \.offset) { index, item in
-                    HStack(alignment: .firstTextBaseline, spacing: 10) {
+                    HStack(alignment: .firstTextBaseline, spacing: style.markerSpacing) {
                         Text("\(index + 1).")
-                            .font(.system(size: PlanType.bodySize))
+                            .font(.system(size: style.bodySize))
                             .monospacedDigit()
                             .foregroundStyle(.secondary)
-                        markdownParagraph(item)
-                            .lineSpacing(PlanType.lineSpacing)
+                        markdownParagraph(item, style: style)
+                            .lineSpacing(style.lineSpacing)
                             .fixedSize(horizontal: false, vertical: true)
                     }
                     .padding(.leading, 4)
@@ -1005,11 +1230,11 @@ struct PlanDetailView: View {
 
         case let .codeBlock(language, code):
             Text(CodeHighlighter.highlight(code, language: language))
-                .font(.system(size: PlanType.bodySize - 1, design: .monospaced))
-                .lineSpacing(PlanType.lineSpacing - 1)
+                .font(.system(size: style.bodySize - 1, design: .monospaced))
+                .lineSpacing(style.lineSpacing - 1)
                 .textSelection(.enabled)
                 .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(14)
+                .padding(style.codePadding)
                 .background(
                     RoundedRectangle(cornerRadius: 8)
                         .fill(Color(nsColor: .textBackgroundColor))
@@ -1024,9 +1249,9 @@ struct PlanDetailView: View {
                 RoundedRectangle(cornerRadius: 2)
                     .fill(Color.accentColor.opacity(0.65))
                     .frame(width: 3)
-                markdownParagraph(text)
+                markdownParagraph(text, style: style)
                     .foregroundStyle(.secondary)
-                    .lineSpacing(PlanType.lineSpacing)
+                    .lineSpacing(style.lineSpacing)
                     .fixedSize(horizontal: false, vertical: true)
                     .frame(maxWidth: .infinity, alignment: .leading)
             }
@@ -1041,7 +1266,10 @@ struct PlanDetailView: View {
 
     /// The emphasized font for a sub-heading, scaling down with nesting depth:
     /// level 1/2 read as section-ish, level 3+ as a smaller bold subhead.
-    private func headingFont(forLevel level: Int) -> Font {
+    private func headingFont(forLevel level: Int, style: MarkdownStyle) -> Font {
+        if let size = style.headingSize(forLevel: level) {
+            return .system(size: size, weight: .semibold)
+        }
         switch level {
         case 1: return .largeTitle.bold()
         case 2: return .title.bold()
@@ -1052,7 +1280,8 @@ struct PlanDetailView: View {
     /// Tints sub-headings by depth so the hierarchy reads through color as well
     /// as size: the biggest headings take the accent, the next level a cooler
     /// teal, and deeper levels settle to primary so it never becomes a rainbow.
-    private func headingColor(forLevel level: Int) -> Color {
+    private func headingColor(forLevel level: Int, style: MarkdownStyle) -> Color {
+        guard style.tintsHeadings else { return .primary }
         switch level {
         case 1: return .accentColor
         case 2: return .teal
@@ -1063,25 +1292,25 @@ struct PlanDetailView: View {
     /// Renders a single paragraph as markdown, tolerating parse failures by
     /// falling back to plain text. Uses an options value that does not throw on
     /// the default markdown grammar; the whole parse is wrapped in `try?`.
-    private func markdownParagraph(_ paragraph: String) -> Text {
+    private func markdownParagraph(_ paragraph: String, style: MarkdownStyle = .plan) -> Text {
         let options = AttributedString.MarkdownParsingOptions(
             interpretedSyntax: .inlineOnlyPreservingWhitespace
         )
         if var attributed = try? AttributedString(markdown: paragraph, options: options) {
-            attributed.font = .system(size: PlanType.bodySize)
-            styleInlineCode(&attributed)
+            attributed.font = .system(size: style.bodySize)
+            styleInlineCode(&attributed, size: style.bodySize)
             return Text(attributed)
         }
-        return Text(paragraph).font(.system(size: PlanType.bodySize))
+        return Text(paragraph).font(.system(size: style.bodySize))
     }
 
     /// Gives inline `` `code` `` runs a monospaced font and a subtle tinted
     /// "chip" foreground so they stand apart from surrounding prose. Detected via
     /// the `.code` inline presentation intent the markdown parser assigns.
-    private func styleInlineCode(_ attributed: inout AttributedString) {
+    private func styleInlineCode(_ attributed: inout AttributedString, size: CGFloat) {
         for run in attributed.runs {
             guard let intent = run.inlinePresentationIntent, intent.contains(.code) else { continue }
-            attributed[run.range].font = .system(size: PlanType.bodySize, design: .monospaced)
+            attributed[run.range].font = .system(size: size, design: .monospaced)
             attributed[run.range].foregroundColor = .accentColor
         }
     }
@@ -1324,8 +1553,11 @@ struct RunProgressSheet: View {
                     .font(.system(.caption, design: .monospaced))
                     .foregroundStyle(.secondary)
             }
-        case .done, .error:
-            // Rendered out-of-band as the summary row / error banner.
+        case .done, .error, .reply:
+            // Rendered out-of-band as the summary row / error banner; a reply's
+            // text has already streamed in as `text` chunks.
+            EmptyView()
+        case .session:
             EmptyView()
         }
     }
