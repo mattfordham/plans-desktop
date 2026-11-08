@@ -108,6 +108,10 @@ struct BrowserWindow: View {
             // window's `defaultSize` (PlansApp, `defaultWindowWidth`) opens with
             // every column at its ideal width.
             .frame(minWidth: Self.windowMinWidth, minHeight: Self.windowMinHeight)
+            // #104: reflect the sidebar selection in the window titlebar — a
+            // single project shows its name; All projects / a smart view keep
+            // the default "Plans" scene title.
+            .navigationTitle(BrowserViewModel.windowTitle(for: store.browserSelection, in: store.projects))
             // §004 drill-down handoff (#094): when the menu bar sets a target
             // project before opening this window, SELECT that project's task list
             // in the sidebar — the ONLY drill-down effect (#096 removed the old
@@ -1312,5 +1316,18 @@ enum BrowserViewModel {
     ) -> SidebarSelection {
         guard case .project(let path) = selection else { return selection }
         return projects.contains { $0.projectPath == path } ? selection : .allProjects
+    }
+
+    /// The window titlebar text for a sidebar selection (#104): a live
+    /// `.project(path)` shows that project's `projectName` (already titleized at
+    /// parse time — used verbatim); `.allProjects` and `.smart` keep the default
+    /// "Plans". A stale `.project` path resolves to `.allProjects` via `resolve`,
+    /// so it too falls back to "Plans". Pure value work — no I/O, no SwiftUI.
+    static func windowTitle(
+        for selection: SidebarSelection,
+        in projects: [ProjectTasks]
+    ) -> String {
+        guard case .project(let path) = resolve(selection, in: projects) else { return "Plans" }
+        return projects.first { $0.projectPath == path }?.projectName ?? "Plans"
     }
 }
