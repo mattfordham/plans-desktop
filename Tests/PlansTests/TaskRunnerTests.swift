@@ -2248,4 +2248,104 @@ final class TaskRunnerTests: XCTestCase {
     // run under is covered by the `TaskRun` identity test above — calling
     // `capture(...)` is deliberately avoided so this test surface stays pure
     // (no `Process` spawn, no flakiness).
+
+    // MARK: - Project-wide discuss (#110)
+
+    /// A `.discuss` run with an EMPTY `taskID` (the whole-project discuss case)
+    /// OMITS `--task-id` entirely — the id-bearing flag is only emitted for a
+    /// real, non-empty id — while still carrying the free-text `--description`
+    /// question and `--mode discuss`.
+    func testArgumentsForProjectDiscussOmitsTaskID() {
+        let args = TaskRun.arguments(
+            scriptPath: "/b/run-task.js", projectPath: "/proj", taskID: "",
+            mode: .discuss, description: "why?", deep: false, keep: false, resume: nil
+        )
+        XCTAssertEqual(args, [
+            "/b/run-task.js", "--project-root", "/proj",
+            "--description", "why?", "--mode", "discuss",
+        ])
+        XCTAssertFalse(args.contains("--task-id"), "empty id must omit --task-id")
+    }
+
+    /// Focused companion to `testArgumentsForDiscussWithoutResume`: a NON-empty
+    /// id still emits `--task-id <id>` (the empty-id guard only suppresses the
+    /// flag when the id is actually blank).
+    func testArgumentsForProjectDiscussEmitsTaskIDWhenIDNonEmpty() {
+        let args = TaskRun.arguments(
+            scriptPath: "/b/run-task.js", projectPath: "/proj", taskID: "099",
+            mode: .discuss, description: "why?", deep: false, keep: false, resume: nil
+        )
+        XCTAssertTrue(args.contains("--task-id"))
+        let idx = args.firstIndex(of: "--task-id")
+        XCTAssertEqual(idx.map { args[args.index(after: $0)] }, "099")
+    }
+
+    private final class ProjectDiscussLaunchRecorder {
+        var runs: [TaskRun] = []
+        var paths: [String] = []
+        var finishers: [() -> Void] = []
+    }
+
+    @MainActor
+    private func makeProjectDiscussRunner() -> (TaskRunner, ProjectDiscussLaunchRecorder) {
+        let runner = TaskRunner()
+        let recorder = ProjectDiscussLaunchRecorder()
+        runner.discussLauncherForTesting = { run, path, onFinish in
+            recorder.runs.append(run)
+            recorder.paths.append(path)
+            recorder.finishers.append(onFinish)
+        }
+        return (runner, recorder)
+    }
+
+    /// `askProject(projectPath:question:)` creates a project-scoped
+    /// `DiscussionThread` resolvable via the read-only `projectThread(projectPath:)`
+    /// accessor, launches a `.discuss` run with an EMPTY `taskID` carrying the
+    /// question as `description`, and holds the run OFF `runs`.
+    @MainActor
+    func testAskProjectLaunchesProjectScopedDiscussRunOutsideRuns() {
+        let (runner, recorder) = makeProjectDiscussRunner()
+        runner.askProject(projectPath: "/p", question: "  How is this organised?  ")
+
+        let thread = runner.projectThread(projectPath: "/p")
+        XCTAssertNotNil(thread)
+        XCTAssertEqual(thread?.turns.map(\.question), ["How is this organised?"])
+        XCTAssertEqual(thread?.isBusy, true)
+
+        XCTAssertEqual(recorder.runs.count, 1)
+        let run = recorder.runs[0]
+        XCTAssertEqual(run.mode, .discuss)
+        XCTAssertEqual(run.taskID, "", "a project discuss run carries an empty task id")
+        XCTAssertEqual(run.description, "How is this organised?")
+        XCTAssertEqual(recorder.paths, ["/p"])
+
+        XCTAssertTrue(runner.runs.isEmpty, "a discuss run never enters runs")
+    }
+
+    /// The project-scoped thread is DISTINCT from a per-task thread for the same
+    /// project (keyed on an empty id vs a real id), and `projectThread` never
+    /// resolves a per-task thread (and vice versa).
+    @MainActor
+    func testProjectThreadIsDistinctFromPerTaskThread() {
+        let (runner, _) = makeProjectDiscussRunner()
+        runner.askProject(projectPath: "/p", question: "project question")
+        let taskThread = runner.thread(projectPath: "/p", taskID: "099")
+
+        let projectThread = runner.projectThread(projectPath: "/p")
+        XCTAssertNotNil(projectThread)
+        XCTAssertFalse(projectThread === taskThread,
+                       "project thread and per-task thread are separate conversations")
+        // The project thread holds the project question; the per-task thread is
+        // untouched (no turns), confirming they are keyed apart.
+        XCTAssertEqual(projectThread?.turns.map(\.question), ["project question"])
+        XCTAssertTrue(taskThread.turns.isEmpty)
+    }
+
+    /// `projectThread(projectPath:)` is read-only: it never creates a thread.
+    @MainActor
+    func testProjectThreadLookupDoesNotCreateThread() {
+        let runner = TaskRunner()
+        XCTAssertNil(runner.projectThread(projectPath: "/p"))
+        XCTAssertTrue(runner.discussions.isEmpty)
+    }
 }

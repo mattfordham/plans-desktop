@@ -233,11 +233,23 @@ function parseArgs(argv: string[]): Args | null {
     return { projectRoot, mode, description, deep, keep };
   }
 
-  if (mode === "reElaborate" || mode === "discuss") {
-    // reElaborate and discuss operate on an EXISTING task AND carry free-text:
-    // reElaborate's refinement guidance, discuss's question. Both REQUIRE a task
-    // id and a description (#099: a discuss with no question is meaningless).
+  if (mode === "reElaborate") {
+    // reElaborate operates on an EXISTING task AND carries free-text refinement
+    // guidance, so it REQUIRES both a task id and a description.
     if (!taskId || !description) {
+      return null;
+    }
+    return { projectRoot, taskId, mode, description, deep, keep, resume };
+  }
+
+  if (mode === "discuss") {
+    // discuss carries a free-text question and REQUIRES a description (#099: a
+    // discuss with no question is meaningless). Its task id is OPTIONAL (#110):
+    // when present the discussion is scoped to that single task's plan; when
+    // absent it is a WHOLE-PROJECT / whole-backlog discussion. A discuss with a
+    // description but no `--task-id` therefore parses successfully, carrying an
+    // undefined taskId through to the prompt builders.
+    if (!description) {
       return null;
     }
     return { projectRoot, taskId, mode, description, deep, keep, resume };
@@ -767,34 +779,50 @@ function buildRestorePrompt(taskId: string): string {
 
 /**
  * Build the prompt for a `discuss` run (#099). This drives the `plan-discuss`
- * skill to ANSWER a free-text question about an existing task's plan. Unlike the
- * lifecycle modes, discuss is strictly READ-ONLY here: `plan-discuss` can apply
- * changes to the plan on request, but this hand-off MUST NOT — it answers the
- * question and nothing more, leaving the plan file untouched. The user's question
- * is folded in as a `"""`-delimited block (mirroring the other guidance-bearing
- * builders). Like the other hand-offs it is unattended, so the agent must work
- * fully autonomously and never ask the user anything.
+ * skill to ANSWER a free-text question. Unlike the lifecycle modes, discuss is
+ * strictly READ-ONLY here: `plan-discuss` can apply changes to a plan on request,
+ * but this hand-off MUST NOT — it answers the question and nothing more, leaving
+ * every plan file untouched. The user's question is folded in as a `"""`-delimited
+ * block (mirroring the other guidance-bearing builders). Like the other hand-offs
+ * it is unattended, so the agent must work fully autonomously and never ask the
+ * user anything.
+ *
+ * #110: the task id is now OPTIONAL. When `taskId` is non-empty the discussion is
+ * scoped to that single task's plan (`/plan-discuss <id>`, the original #099
+ * behaviour). When `taskId` is empty it is a WHOLE-PROJECT discussion: a bare
+ * `/plan-discuss` (whole-backlog mode) with the copy reworded to talk about the
+ * project's backlog / plans rather than one specific plan — the same strict
+ * read-only and no-questions constraints apply in both forms.
  */
 function buildDiscussPrompt(taskId: string, description: string): string {
+  const scoped = taskId.length > 0;
   return [
-    `Use the \`plan-discuss\` skill to answer a question about the plans-cc task`,
-    `with id ${taskId}:`,
+    scoped
+      ? `Use the \`plan-discuss\` skill to answer a question about the plans-cc task`
+      : `Use the \`plan-discuss\` skill to answer a question about this project's`,
+    scoped ? `with id ${taskId}:` : `plans-cc backlog (all of its plans, across every status):`,
     "",
-    `/plan-discuss ${taskId}`,
+    scoped ? `/plan-discuss ${taskId}` : `/plan-discuss`,
     "",
-    `The user has asked the following question about this plan — answer it:`,
+    scoped
+      ? `The user has asked the following question about this plan — answer it:`
+      : `The user has asked the following question about this project's backlog — answer it:`,
     "",
     `"""`,
     description,
     `"""`,
     "",
     "Requirements:",
-    "1. Answer the question about the plan READ-ONLY. Do NOT apply any changes to",
-    "   the plan file. `plan-discuss` can apply changes to a plan on request, but",
-    "   it must NOT here — this is a question-answering pass only. Leave the task",
+    scoped
+      ? "1. Answer the question about the plan READ-ONLY. Do NOT apply any changes to"
+      : "1. Answer the question about the backlog READ-ONLY. Do NOT apply any changes to",
+    "   any plan file. `plan-discuss` can apply changes to a plan on request, but",
+    "   it must NOT here — this is a question-answering pass only. Leave every task",
     "   file exactly as it is.",
     "2. Work fully autonomously. Do NOT ask the user any questions — there is no",
-    "   interactive UI to answer them. Research the codebase and the plan as",
+    scoped
+      ? "   interactive UI to answer them. Research the codebase and the plan as"
+      : "   interactive UI to answer them. Research the codebase and the plans as",
     "   needed to answer accurately.",
     "",
     "Work autonomously to completion. Do not ask for confirmation.",
@@ -806,16 +834,23 @@ function buildDiscussPrompt(taskId: string, description: string): string {
  * The session already holds the `/plan-discuss` context from the first turn, so
  * this carries only the new question plus the same read-only / no-questions
  * constraints, which are restated every turn so they cannot drift.
+ *
+ * #110: mirrors buildDiscussPrompt's optional scoping. When `taskId` is non-empty
+ * the follow-up is framed as being about that single task; when empty it is a
+ * whole-project / backlog follow-up — the identical read-only + no-questions
+ * reminders apply either way.
  */
 function buildDiscussFollowUpPrompt(taskId: string, question: string): string {
   return [
-    `Follow-up question about plans-cc task ${taskId}:`,
+    taskId.length > 0
+      ? `Follow-up question about plans-cc task ${taskId}:`
+      : `Follow-up question about this project's plans-cc backlog:`,
     "",
     `"""`,
     question,
     `"""`,
     "",
-    "Reminder: answer READ-ONLY. Do NOT apply any changes to the plan file or",
+    "Reminder: answer READ-ONLY. Do NOT apply any changes to any plan file or",
     "any other file. Work fully autonomously and do NOT ask the user any",
     "questions — there is no interactive UI to answer them.",
   ].join("\n");
@@ -1094,7 +1129,7 @@ async function main(): Promise<void> {
   const args = parseArgs(process.argv.slice(2));
   if (!args) {
     emitError(
-      "Missing or invalid arguments. Usage: run-task.js --project-root <abs path> [--mode execute|elaborate|reElaborate|capture|captureElaborate|executeYolo|delete|backlog|restore|discuss] (--task-id <NNN> for execute/elaborate/delete/backlog/restore; --description <text> for capture/captureElaborate/executeYolo; BOTH --task-id <NNN> and --description <text> for reElaborate/discuss; optional --resume <session id> for discuss only)",
+      "Missing or invalid arguments. Usage: run-task.js --project-root <abs path> [--mode execute|elaborate|reElaborate|capture|captureElaborate|executeYolo|delete|backlog|restore|discuss] (--task-id <NNN> for execute/elaborate/delete/backlog/restore; --description <text> for capture/captureElaborate/executeYolo; BOTH --task-id <NNN> and --description <text> for reElaborate; --description <text> for discuss with --task-id OPTIONAL (omit it for a whole-project discussion); optional --resume <session id> for discuss only)",
     );
     process.exit(1);
     return;

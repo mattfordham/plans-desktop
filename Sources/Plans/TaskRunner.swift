@@ -666,7 +666,11 @@ final class TaskRun {
         // omits the flag when none was supplied. The two flag sets are centralized
         // in `RunMode.usesTaskID` / `RunMode.usesDescription` so the arg-shape
         // contract is unit-testable without spawning a process.
-        if mode.usesTaskID {
+        // The empty-id guard (#110): a whole-project discuss has no task, so it
+        // passes an EMPTY `taskID` and must OMIT `--task-id` entirely. Every
+        // existing call site threads a real, non-empty id, so this changes
+        // nothing for them — only the project-discuss case is affected.
+        if mode.usesTaskID, !taskID.isEmpty {
             arguments += ["--task-id", taskID]
         }
         if mode.usesDescription, let description, !description.isEmpty {
@@ -1472,14 +1476,53 @@ final class TaskRunner {
         discussions[Self.runKey(projectPath: projectPath, taskID: taskID)]
     }
 
+    /// The whole-project discussion thread for `projectPath`, or `nil` (#110).
+    /// Keyed on an EMPTY task id, so it is distinct from every per-task thread
+    /// for the same project. Read-only: never creates one, mirroring
+    /// `discussion(projectPath:taskID:)`.
+    func projectThread(projectPath: String) -> DiscussionThread? {
+        discussions[Self.runKey(projectPath: projectPath, taskID: "")]
+    }
+
+    /// The whole-project discussion thread for `projectPath`, created on first
+    /// access (#110). Keyed on an EMPTY task id, mirroring
+    /// `thread(projectPath:taskID:)` — the project analogue it defers to.
+    func projectThreadOrCreate(projectPath: String) -> DiscussionThread {
+        thread(projectPath: projectPath, taskID: "")
+    }
+
     /// Asks `question` about the plan: appends a pending turn and launches one
     /// `.discuss` run that resumes the thread's session. The run is held by the
     /// thread, never in `runs`, and its finish triggers no store reload/sync —
     /// a discussion is read-only. No-op for a blank question or a busy thread.
     func ask(projectPath: String, taskID: String, question: String) {
+        let thread = thread(projectPath: projectPath, taskID: taskID)
+        launchDiscuss(thread: thread, projectPath: projectPath, taskID: taskID,
+                      question: question)
+    }
+
+    /// Asks `question` about the WHOLE project (no task), launching a `.discuss`
+    /// run with an EMPTY task id (#110). The project-scoped analogue of `ask`:
+    /// it resolves/creates the project thread (keyed on an empty id) and reuses
+    /// the exact same launch plumbing, so the run is held by the thread, never
+    /// enters `runs`, and triggers no store reload. No-op for a blank question
+    /// or a busy thread.
+    func askProject(projectPath: String, question: String) {
+        let thread = projectThreadOrCreate(projectPath: projectPath)
+        launchDiscuss(thread: thread, projectPath: projectPath, taskID: "",
+                      question: question)
+    }
+
+    /// Shared body of `ask` / `askProject`: trims the question, begins a turn on
+    /// `thread`, and launches a `.discuss` `TaskRun` for `taskID` (the real id
+    /// for a per-task ask, or EMPTY for a project ask) resuming the thread's
+    /// session. The run is held on `thread.activeRun`, never in `runs`, and the
+    /// `discussLauncherForTesting` seam is honored. No-op for a blank question or
+    /// a busy thread.
+    private func launchDiscuss(thread: DiscussionThread, projectPath: String,
+                               taskID: String, question: String) {
         let trimmed = question.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
-        let thread = thread(projectPath: projectPath, taskID: taskID)
         guard !thread.isBusy else { return }
 
         let resume = thread.beginTurn(question: trimmed)

@@ -227,6 +227,12 @@ struct TaskListView: View {
     /// "All". Reset per project by the caller's `.id(projectPath)`.
     @State private var typeFilter: TaskType? = nil
 
+    /// #110: whether the whole-project "Discuss" sheet is presented. Raised by the
+    /// single-project header's "Discuss" button; the sheet hosts the project-wide
+    /// conversation (`ProjectDiscussionView`). Single-project only — the
+    /// cross-project smart-view list (`project == nil`) never shows the button.
+    @State private var showProjectDiscussion = false
+
     /// The rows after the single-project type filter (a no-op for smart views,
     /// which never show the filter).
     private var visibleRows: [TaskRow] {
@@ -293,6 +299,18 @@ struct TaskListView: View {
                 .fixedSize()
                 .help("Capture a new plan in \(project.projectName)")
             }
+            // #110: the whole-project "Discuss" affordance, beside "New Plan".
+            // Opens the project-wide conversation sheet (`ProjectDiscussionView`)
+            // for this project's `.plans/`. Single-project only — the smart-view
+            // list has `project == nil` and never reaches this header.
+            Button {
+                showProjectDiscussion = true
+            } label: {
+                Label("Discuss", systemImage: "bubble.left.and.bubble.right")
+                    .labelStyle(.titleAndIcon)
+            }
+            .fixedSize()
+            .help("Discuss this project's plans")
             Spacer(minLength: 8)
             // The same persisted `store.showBacklog` the window toolbar toggles.
             Toggle(isOn: $store.showBacklog) {
@@ -310,6 +328,14 @@ struct TaskListView: View {
         }
         .padding(.horizontal, ProjectCard.rowColumns.cardHorizontalPadding)
         .padding(.vertical, 8)
+        // #110: the whole-project discussion sheet, presented from the header's
+        // "Discuss" button. `project` is already unwrapped here, so the sheet's
+        // path/name are supplied directly; closing it only dismisses — the
+        // conversation persists on the runner's thread.
+        .sheet(isPresented: $showProjectDiscussion) {
+            ProjectDiscussionView(projectPath: project.projectPath,
+                                  projectName: project.projectName)
+        }
     }
 
     /// The sort + group control bar: two `Menu`s mirroring the `ProjectViewMode`
