@@ -42,22 +42,45 @@ struct RegistryWriter {
         return formatter
     }
 
-    /// Upserts `path` into the registry: if an entry with the same `path`
-    /// already exists, its `lastSeen` is refreshed in place (preserving order);
-    /// otherwise a new entry is appended. `path` is used verbatim — no
-    /// canonicalization or deduplication beyond exact-path matching, mirroring
-    /// `RegistryReader`. The full registry is then written back atomically.
+    /// Upserts `path` into the registry: if an entry resolving to the same
+    /// canonical (realpath) path already exists, its `lastSeen` is refreshed in
+    /// place (preserving order and the existing entry's stored spelling);
+    /// otherwise a new entry is appended. Matching is by canonical path so a
+    /// case-variant of an already-registered directory refreshes the existing
+    /// entry rather than appending a duplicate — mirroring `RegistryReader`'s
+    /// canonical dedupe. The full registry is then written back atomically.
     func upsertProject(path: String, now: Date = Date()) throws {
         let lastSeen = Self.makeLastSeenFormatter().string(from: now)
         var projects = loadProjects()
 
-        if let index = projects.firstIndex(where: { $0.path == path }) {
-            projects[index] = RegistryProject(path: path, lastSeen: lastSeen)
+        let canonical = Self.realpath(path)
+        if let index = projects.firstIndex(
+            where: { Self.realpath($0.path) == canonical }
+        ) {
+            // Refresh in place: keep the existing stored path spelling, update
+            // only lastSeen.
+            projects[index] = RegistryProject(
+                path: projects[index].path,
+                lastSeen: lastSeen
+            )
         } else {
             projects.append(RegistryProject(path: path, lastSeen: lastSeen))
         }
 
         try write(Registry(version: 1, projects: projects))
+    }
+
+    /// `realpath(3)`, degrading to a standardized absolute path when the path
+    /// cannot be resolved. Mirrors `RegistryReader.realpath`: `Darwin.realpath`
+    /// resolves symlinks and canonicalizes case to the real on-disk spelling;
+    /// for paths that do not exist on disk the fallback standardizes the string
+    /// so identical strings canonicalize identically.
+    private static func realpath(_ path: String) -> String {
+        if let resolved = Darwin.realpath(path, nil) {
+            defer { free(resolved) }
+            return String(cString: resolved)
+        }
+        return URL(fileURLWithPath: path).standardizedFileURL.path
     }
 
     /// Loads the existing registry's projects. Tolerant: a missing file, empty

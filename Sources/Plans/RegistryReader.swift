@@ -56,17 +56,59 @@ struct RegistryReader {
     }
 
     /// Returns the live projects: `loadRegistry()` filtered to entries whose
-    /// `<path>/.plans` directory exists on disk. Mirrors `readProjects` in
-    /// plans-cc `lib/registry.js` (filter by `hasPlansDir`): a missing or
-    /// non-existent `.plans` directory drops the entry. Paths are passed through
-    /// verbatim — no canonicalization, no deduplication — so duplicate or
-    /// non-canonical paths survive unchanged when their `.plans/` exists.
+    /// `<path>/.plans` directory exists on disk, then deduplicated by canonical
+    /// (realpath) path. Mirrors `readProjects` in plans-cc `lib/registry.js`
+    /// (filter by `hasPlansDir`): a missing or non-existent `.plans` directory
+    /// drops the entry.
+    ///
+    /// On case-insensitive macOS volumes the registry can hold the same folder
+    /// twice with paths differing only by case; `fileExists` is case-insensitive
+    /// there, so both would survive the prune and the project would appear
+    /// twice. To prevent that, surviving entries are collapsed by canonical
+    /// path: one entry per `realpath`, keeping the most-recent `lastSeen` and
+    /// emitting the real on-disk spelling, while preserving the first-seen order
+    /// of canonical paths.
     func readProjects() -> [RegistryProject] {
-        loadRegistry().filter { project in
+        let live = loadRegistry().filter { project in
             let plansPath = URL(fileURLWithPath: project.path)
                 .appendingPathComponent(".plans")
                 .path
             return fileManager.fileExists(atPath: plansPath)
         }
+
+        var order: [String] = []
+        var byCanonical: [String: RegistryProject] = [:]
+        for project in live {
+            let canonical = Self.realpath(project.path)
+            // Emit the real on-disk spelling, not the stored (case-variant) one.
+            let normalized = RegistryProject(
+                path: canonical,
+                lastSeen: project.lastSeen
+            )
+            if let existing = byCanonical[canonical] {
+                // Prefer the more-recent lastSeen. ISO-8601 UTC strings of equal
+                // length sort lexically in timestamp order, so string compare
+                // avoids a dependency on date parsing here.
+                if normalized.lastSeen > existing.lastSeen {
+                    byCanonical[canonical] = normalized
+                }
+            } else {
+                byCanonical[canonical] = normalized
+                order.append(canonical)
+            }
+        }
+        return order.compactMap { byCanonical[$0] }
+    }
+
+    /// `realpath(3)`, degrading to a standardized absolute path when the path
+    /// cannot be resolved. `Darwin.realpath` resolves symlinks and canonicalizes
+    /// case to the real on-disk spelling — the Swift equivalent of plans-cc's
+    /// `fs.realpathSync.native`.
+    private static func realpath(_ path: String) -> String {
+        if let resolved = Darwin.realpath(path, nil) {
+            defer { free(resolved) }
+            return String(cString: resolved)
+        }
+        return URL(fileURLWithPath: path).standardizedFileURL.path
     }
 }

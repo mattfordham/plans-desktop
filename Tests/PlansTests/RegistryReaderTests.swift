@@ -73,7 +73,9 @@ final class RegistryReaderTests: XCTestCase {
         let reader = try makeReader(json: json)
 
         let projects = reader.readProjects()
-        XCTAssertEqual(projects.map(\.path), [pathA, pathB])
+        // readProjects emits the realpath-canonical spelling (symlinks resolved,
+        // case normalized); loadRegistry still returns the raw stored paths.
+        XCTAssertEqual(projects.map(\.path), [canonical(pathA), canonical(pathB)])
         XCTAssertEqual(reader.loadRegistry().count, 2)
     }
 
@@ -122,7 +124,7 @@ final class RegistryReaderTests: XCTestCase {
         """
         let reader = try makeReader(json: json)
         XCTAssertEqual(reader.loadRegistry().map(\.path), [path])
-        XCTAssertEqual(reader.readProjects().map(\.path), [path])
+        XCTAssertEqual(reader.readProjects().map(\.path), [canonical(path)])
     }
 
     // MARK: - Live-prune (readProjects)
@@ -143,10 +145,10 @@ final class RegistryReaderTests: XCTestCase {
 
         // loadRegistry keeps both (pre-prune); readProjects drops the stale one.
         XCTAssertEqual(reader.loadRegistry().count, 2)
-        XCTAssertEqual(reader.readProjects().map(\.path), [livePath])
+        XCTAssertEqual(reader.readProjects().map(\.path), [canonical(livePath)])
     }
 
-    func testDuplicatePathsBothPreservedWhenPlansDirExists() throws {
+    func testDuplicatePathsDeduplicatedToSingleEntry() throws {
         let path = try makeProjectDir(name: "dup", withPlansDir: true)
         let json = """
         {
@@ -159,7 +161,57 @@ final class RegistryReaderTests: XCTestCase {
         """
         let reader = try makeReader(json: json)
 
-        // No dedupe: both duplicate entries survive prune verbatim.
-        XCTAssertEqual(reader.readProjects().map(\.path), [path, path])
+        // Exact-duplicate path entries collapse to a single canonical entry
+        // carrying the more-recent lastSeen.
+        let projects = reader.readProjects()
+        XCTAssertEqual(projects.count, 1)
+        XCTAssertEqual(projects.first?.path, canonical(path))
+        XCTAssertEqual(projects.first?.lastSeen, "2026-06-04T14:42:00Z")
+    }
+
+    /// `realpath(3)` for the test's expectations — resolves symlinks (e.g. the
+    /// macOS `/var` -> `/private/var` link under the temp dir) and canonicalizes
+    /// case to the real on-disk spelling, matching the reader's own helper.
+    private func canonical(_ path: String) -> String {
+        guard let resolved = Darwin.realpath(path, nil) else { return path }
+        defer { free(resolved) }
+        return String(cString: resolved)
+    }
+
+    func testCaseVariantPathsDeduplicatedToCanonicalSpelling() throws {
+        // One on-disk dir, referenced by two registry entries whose paths
+        // differ only by case. On a case-insensitive macOS volume both resolve
+        // to the same dir, so the `.plans/`-exists prune keeps both — the
+        // reader must collapse them to a single canonical entry.
+        let realPath = try makeProjectDir(name: "CaseDup", withPlansDir: true)
+
+        // Build a case-variant of the project dir's last component.
+        let realURL = URL(fileURLWithPath: realPath)
+        let variantPath = realURL
+            .deletingLastPathComponent()
+            .appendingPathComponent(realURL.lastPathComponent.uppercased())
+            .path
+        // Precondition: the variant must actually differ from the real spelling,
+        // otherwise this test would silently not exercise case-variance.
+        XCTAssertNotEqual(variantPath, realPath)
+
+        let json = """
+        {
+          "version": 1,
+          "projects": [
+            { "path": "\(variantPath)", "lastSeen": "2026-06-04T14:41:00Z" },
+            { "path": "\(realPath)", "lastSeen": "2026-06-04T14:42:00Z" }
+          ]
+        }
+        """
+        let reader = try makeReader(json: json)
+
+        let projects = reader.readProjects()
+        XCTAssertEqual(projects.count, 1)
+        // Emits the realpath-canonical, real on-disk spelling (not the
+        // case-variant, and with symlinks resolved).
+        XCTAssertEqual(projects.first?.path, canonical(realPath))
+        // Keeps the more-recent lastSeen.
+        XCTAssertEqual(projects.first?.lastSeen, "2026-06-04T14:42:00Z")
     }
 }

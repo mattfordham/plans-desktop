@@ -107,6 +107,29 @@ final class RegistryWriterTests: XCTestCase {
         XCTAssertEqual(registry.projects.map(\.path), ["/Users/test/alpha"])
     }
 
+    func testUpsertCaseVariantOfSameDirKeepsSingleEntry() throws {
+        // Create a real on-disk directory so both case-variants canonicalize
+        // (via realpath) to the same real path on a case-insensitive volume.
+        let realDir = tempDir.appendingPathComponent("ProjectDir")
+        try FileManager.default.createDirectory(
+            at: realDir,
+            withIntermediateDirectories: true
+        )
+        let realPath = realDir.path
+        let variantPath = realDir
+            .deletingLastPathComponent()
+            .appendingPathComponent(realDir.lastPathComponent.uppercased())
+            .path
+        XCTAssertNotEqual(variantPath, realPath)
+
+        let writer = makeWriter()
+        try writer.upsertProject(path: realPath)
+        try writer.upsertProject(path: variantPath)
+
+        let registry = try readBack()
+        XCTAssertEqual(registry.projects.count, 1)
+    }
+
     func testUpsertAppendsNewPathPreservingExisting() throws {
         let writer = makeWriter()
         try writer.upsertProject(path: "/Users/test/alpha")
