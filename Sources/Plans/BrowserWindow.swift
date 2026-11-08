@@ -282,14 +282,7 @@ struct BrowserWindow: View {
 
             Section("Projects") {
                 ForEach(sidebarProjects, id: \.projectPath) { project in
-                    Label(
-                        project.projectName,
-                        systemImage: BrowserViewModel.sidebarGlyph(
-                            starred: store.starredProjectPaths.contains(project.projectPath)
-                        )
-                    )
-                    .lineLimit(1)
-                    .tag(SidebarSelection.project(project.projectPath))
+                    projectRow(project)
                 }
                 // Drag-reorder the Projects list. It writes the SAME manual order
                 // the "All projects" card stack uses, so a move here reorders the
@@ -327,6 +320,33 @@ struct BrowserWindow: View {
                     .foregroundStyle(.secondary)
             }
         }
+    }
+
+    /// One sidebar project row: the project glyph (starred vs. folder) + name +
+    /// a trailing count of its ACTIVE tasks (suppressed at zero), mirroring
+    /// `smartViewRow`'s compact-count layout exactly. A plain trailing `Text`
+    /// count needs no measured width, so this introduces no `GeometryReader` or
+    /// `.frame(idealWidth:)` sentinel (avoiding the ProjectStackView #063
+    /// layout-loop hazard).
+    @ViewBuilder
+    private func projectRow(_ project: ProjectTasks) -> some View {
+        let count = BrowserViewModel.activeCount(project)
+        HStack {
+            Label(
+                project.projectName,
+                systemImage: BrowserViewModel.sidebarGlyph(
+                    starred: store.starredProjectPaths.contains(project.projectPath)
+                )
+            )
+            .lineLimit(1)
+            Spacer(minLength: 4)
+            if count > 0 {
+                Text("\(count)")
+                    .font(.caption.monospacedDigit())
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .tag(SidebarSelection.project(project.projectPath))
     }
 
     // MARK: - Content column (#094)
@@ -860,6 +880,16 @@ enum BrowserViewModel {
         TaskStatus.glanceOrder.map { status in
             (status, project.counts[status] ?? 0)
         }
+    }
+
+    /// The count of ACTIVE (outstanding) tasks for ONE project — the SINGLE
+    /// SOURCE OF TRUTH for the trailing count badge on a sidebar project row,
+    /// mirroring `smartViewRow`'s compact count. By construction this excludes
+    /// completed tasks and backlogged tasks (`ProjectTasks.activeTasks` already
+    /// drops both), so the badge only ever reflects outstanding work. Does no
+    /// I/O or SwiftUI work.
+    static func activeCount(_ project: ProjectTasks) -> Int {
+        project.activeTasks.count
     }
 
     /// The backlogged (deferred) plan rows for ONE project's card (#077).
