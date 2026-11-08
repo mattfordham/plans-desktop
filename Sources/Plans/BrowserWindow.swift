@@ -546,13 +546,16 @@ struct TaskRow: Identifiable {
 ///
 /// `CaseIterable`/`Equatable`/pure value code so it is `Sendable`-clean and
 /// directly unit-testable without a view.
-/// `CaseIterable` order below IS the sidebar display order (#102): Ready for
-/// review and In review first (separate lenses, using the same star/eye
-/// vocabulary as task rows), then Pending, In progress, Blocked, Failed,
-/// Backlog, and the All Plans lens last. The sidebar hides zero-count lenses
+/// `CaseIterable` order below IS the sidebar display order (#111): the All Plans
+/// lens first, then Ready for review and In review (separate lenses, using the
+/// same star/eye vocabulary as task rows), then Pending, In progress, Blocked,
+/// Failed, Backlog. The sidebar hides zero-count lenses
 /// (see `BrowserViewModel.visibleSmartViews`). `.pending` surfaces active tasks awaiting elaboration; `.all` surfaces
 /// every active (non-completed) task across every project.
 enum SmartView: String, CaseIterable, Equatable, Hashable {
+    /// Every active (non-completed) task across every project — the "All Plans"
+    /// catch-all lens.
+    case all
     /// Tasks whose status is `.review` (ready for review, not yet picked up).
     /// The rawValue stays `"review"` so persisted selections survive.
     case review
@@ -568,9 +571,6 @@ enum SmartView: String, CaseIterable, Equatable, Hashable {
     case failed
     /// Backlogged (deferred) tasks, across every project.
     case backlog
-    /// Every active (non-completed) task across every project — the "All Plans"
-    /// catch-all lens.
-    case all
 
     /// The sidebar label for this view, from the shared vocabulary.
     var label: String {
@@ -1182,7 +1182,7 @@ enum BrowserViewModel {
 
     /// The smart views the sidebar lists (#102), in `allCases` order: a lens is
     /// shown only when it has at least one matching row, except `.all` (always
-    /// listed) and the currently selected lens (kept so the selection never
+    /// listed first) and the currently selected lens (kept so the selection never
     /// vanishes from under the user). Pure value work — no I/O, no SwiftUI.
     static func visibleSmartViews(
         in projects: [ProjectTasks],

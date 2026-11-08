@@ -1460,13 +1460,13 @@ final class BrowserWindowTests: XCTestCase {
 
     // MARK: - (#102) Status smart-view reorder + Pending + All Plans lenses
 
-    /// Sidebar display order IS `SmartView.allCases` order: Ready for review and
-    /// In review first, then Pending, In progress, Blocked, Failed, Backlog, and
-    /// All Plans last.
+    /// Sidebar display order IS `SmartView.allCases` order: All Plans first, then
+    /// Ready for review and In review, then Pending, In progress, Blocked, Failed,
+    /// Backlog.
     func testSmartViewAllCasesOrder() {
         XCTAssertEqual(
             SmartView.allCases,
-            [.review, .inReview, .pending, .inProgress, .blocked, .failed, .backlog, .all]
+            [.all, .review, .inReview, .pending, .inProgress, .blocked, .failed, .backlog]
         )
     }
 
@@ -1480,7 +1480,7 @@ final class BrowserWindowTests: XCTestCase {
         )
         XCTAssertEqual(
             BrowserViewModel.visibleSmartViews(in: [a], selection: .allProjects),
-            [.review, .inProgress, .blocked, .all]
+            [.all, .review, .inProgress, .blocked]
         )
         XCTAssertEqual(
             BrowserViewModel.visibleSmartViews(in: [], selection: .allProjects),
@@ -1497,7 +1497,7 @@ final class BrowserWindowTests: XCTestCase {
         )
         XCTAssertEqual(
             BrowserViewModel.visibleSmartViews(in: [a], selection: .smart(.failed)),
-            [.review, .failed, .all]
+            [.all, .review, .failed]
         )
     }
 
