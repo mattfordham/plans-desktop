@@ -879,6 +879,37 @@ final class BrowserWindowTests: XCTestCase {
         XCTAssertNil(visibleSelection(nil, .allProjects, mixedStatusFixture()))
     }
 
+    // MARK: - windowTitle (#104: project name in the window titlebar)
+
+    /// A live `.project(path)` selection titles the window with that project's
+    /// `projectName` (already titleized at parse time — used verbatim).
+    func testWindowTitleForLiveProjectReturnsProjectName() {
+        let projects = [
+            makeProject(path: "/proj1", name: "Proj One"),
+            makeProject(path: "/proj2", name: "Proj Two"),
+        ]
+        XCTAssertEqual(BrowserViewModel.windowTitle(for: .project("/proj2"), in: projects), "Proj Two")
+    }
+
+    /// `.allProjects` keeps the default "Plans" title.
+    func testWindowTitleForAllProjectsIsPlans() {
+        let projects = [makeProject(path: "/proj1", name: "Proj One")]
+        XCTAssertEqual(BrowserViewModel.windowTitle(for: .allProjects, in: projects), "Plans")
+    }
+
+    /// A smart view keeps the default "Plans" title.
+    func testWindowTitleForSmartViewIsPlans() {
+        let projects = [makeProject(path: "/proj1", name: "Proj One")]
+        XCTAssertEqual(BrowserViewModel.windowTitle(for: .smart(.inProgress), in: projects), "Plans")
+    }
+
+    /// A stale `.project(path)` whose path is no longer among the live projects
+    /// falls back (via `resolve`) to "Plans".
+    func testWindowTitleForStaleProjectFallsBackToPlans() {
+        let projects = [makeProject(path: "/proj1", name: "Proj One")]
+        XCTAssertEqual(BrowserViewModel.windowTitle(for: .project("/gone"), in: projects), "Plans")
+    }
+
     // MARK: - How checklist parsing (read-only render support)
 
     func testHowStepsParsesDoneAndNotDoneAndStripsPrefix() {
