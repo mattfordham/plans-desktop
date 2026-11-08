@@ -305,10 +305,15 @@ struct PlanDetailView: View {
                 .labelStyle(.titleAndIcon)
                 .padding(.bottom, 4)
 
+            // Capped (not `fixedSize`) so a long title can't force the pinned
+            // banner, and with it the detail column, taller than the window.
+            // The tooltip carries the full title when it truncates.
             Text(row.title ?? "(untitled)")
                 .font(.title)
                 .fontWeight(.semibold)
-                .fixedSize(horizontal: false, vertical: true)
+                .lineLimit(Self.titleLineLimit)
+                .truncationMode(.tail)
+                .help(row.title ?? "")
                 .textSelection(.enabled)
                 .padding(.bottom, 10)
 
@@ -714,9 +719,9 @@ struct PlanDetailView: View {
     /// (`progressDrawerTitle`), a live spinner while the run runs, a Stop button
     /// while running, and a chevron disclosure reflecting the `showProgress`
     /// expanded state — tapping the row (or the chevron) toggles expansion. When
-    /// expanded it shows the shared `RunLogContents` (error banner, auto-scrolling
-    /// log, denial note, cost/turns summary). The log scrolls within a capped
-    /// band; nothing measures its own size (#096). Collapsing only hides the body
+    /// expanded, `expandedRunLog` shows the shared `RunLogContents` (error banner,
+    /// auto-scrolling log, denial note, cost/turns summary) at the top of the
+    /// scrolling body. Collapsing only hides the log
     /// — it never stops the run; Stop ends it. Once the run has ENDED the header
     /// shows a "Done" button in place of Stop — the finished-run dismissal that
     /// replaces the old sheet's Done: it drops the finished run, reloads the store
@@ -724,42 +729,54 @@ struct PlanDetailView: View {
     /// dismissed by drawer interaction.
     ///
     /// Wired into `planScrollView` directly after the `progressPanel` block, gated
-    /// by `showsProgressDrawer(hasRun:)`. It is passed the resolved `TaskRow`;
-    /// a `nil` run renders the header with an empty log body.
-    @ViewBuilder
+    /// by `showsProgressDrawer(hasRun:)`. It is passed the resolved `TaskRow`.
+    ///
+    /// Only the header row lives in the pinned banner. The expanded log is
+    /// rendered separately by `expandedRunLog` at the top of the scrolling body,
+    /// so expanding it never grows the banner's height.
     private func progressDrawer(_ row: TaskRow) -> some View {
         let run = runner.run(for: row.task.id, in: row.projectPath)
-        VStack(spacing: 0) {
-            if showProgress {
-                // Expanded: the log runs edge-to-edge and scrolls UNDER a
-                // translucent header bar floating over its top edge. The log's
-                // top inset is a fixed constant (never a measured header height
-                // fed back into layout — #096).
-                ZStack(alignment: .top) {
-                    RunLogContents(run: run,
-                                   edgeToEdge: true,
-                                   horizontalPadding: Self.drawerGutter,
-                                   topPadding: Self.drawerLogTopInset)
-                        .frame(maxHeight: 360)
-                    progressDrawerHeader(row, run: run)
-                        .background(.bar)
-                        .overlay(alignment: .bottom) { Divider() }
-                }
-            } else {
-                progressDrawerHeader(row, run: run)
-            }
+        return VStack(spacing: 0) {
+            progressDrawerHeader(row, run: run)
             Divider()
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    /// The expanded run log, shown full-bleed as the first thing in the
+    /// scrolling body while the drawer is expanded. Capped at a fixed height so
+    /// it scrolls within its own band (auto-scrolling to the newest line);
+    /// nothing measures its own size (#096). A trailing Divider seams it off
+    /// from the plan sections below.
+    private func expandedRunLog(_ row: TaskRow) -> some View {
+        VStack(spacing: 0) {
+            RunLogContents(run: runner.run(for: row.task.id, in: row.projectPath),
+                           edgeToEdge: true,
+                           horizontalPadding: Self.drawerGutter,
+                           topPadding: Self.drawerLogTopInset)
+                .frame(maxHeight: 360)
+            Divider()
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    /// Pure predicate for whether the expanded run log renders in the body:
+    /// there must be a run to show AND the drawer must be expanded.
+    static func showsExpandedRunLog(hasRun: Bool, isExpanded: Bool) -> Bool {
+        hasRun && isExpanded
     }
 
     /// Horizontal gutter for the drawer header and edge-to-edge log — matches
     /// the detail header's 28pt padding so everything lines up on one edge.
     private static let drawerGutter: CGFloat = 28
 
-    /// Fixed top inset for the expanded log so its first line clears the
-    /// floating header bar. A constant, not a measured height (#096).
-    private static let drawerLogTopInset: CGFloat = 52
+    /// Fixed top inset for the expanded log. It sits directly below the pinned
+    /// header (no overlay to clear), so a small constant is enough; never a
+    /// measured height (#096).
+    static let drawerLogTopInset: CGFloat = 12
+
+    /// Maximum lines for the pinned header's title before it truncates.
+    static let titleLineLimit = 3
 
     /// The drawer's disclosure header: chevron + title + spinner, with Stop
     /// (live run) or Done (finished run) trailing. The whole row toggles
@@ -810,8 +827,8 @@ struct PlanDetailView: View {
     }
 
     /// A PINNED top banner (header + full-bleed rule + in-progress progress
-    /// panel + #107 run-log drawer) above a scrolling plan body (failure /
-    /// denial notes and the plan's sections). #106: only the body scrolls; the
+    /// panel + #107 run-log drawer header row) above a scrolling plan body (the
+    /// expanded run log, failure / denial notes and the plan's sections). #106: only the body scrolls; the
     /// banner stays fixed at the top of the detail column.
     private func planScrollView(_ row: TaskRow) -> some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -848,35 +865,53 @@ struct PlanDetailView: View {
                 }
             }
             .background(.bar)
+            // Sized ahead of the ScrollView: the banner keeps its natural
+            // height when there is room and the scrolling body absorbs any
+            // squeeze. When the window is shorter still, the banner itself can
+            // compress (its title is line-limited, nothing in it is
+            // `fixedSize` vertically), so it never forces a minimum column
+            // height taller than the window.
+            .layoutPriority(1)
 
             ScrollView {
-                VStack(alignment: .leading, spacing: 28) {
-                    // #079: a PERSISTENT failure section (not a transient
-                    // banner) when the latest run for this task failed. Reuses
-                    // the `errorBanner` visual style and offers a Retry that
-                    // re-runs via the same Execute consent gate.
-                    if let failure = row.task.failure {
-                        failureSection(row, failure: failure)
+                VStack(alignment: .leading, spacing: 0) {
+                    // The expanded run log leads the scrolling body, full-bleed
+                    // (outside the padded reading-width column), so expanding it
+                    // never grows the pinned banner.
+                    if Self.showsExpandedRunLog(
+                        hasRun: runner.run(for: row.task.id, in: row.projectPath) != nil,
+                        isExpanded: showProgress) {
+                        expandedRunLog(row)
                     }
-                    // Task #092: a non-fatal DENIAL note for a run that reached
-                    // for tools not on the allowlist. Surfaced from the live
-                    // `TaskRun` (the detail body's only run handle) so it shows
-                    // EVEN WHEN the run otherwise finished cleanly — the user
-                    // needs to know the plan may be built on incomplete
-                    // information. Distinct from the red `failureSection`: this
-                    // is a caution (orange), not a failure.
-                    if let run = runner.run(for: row.task.id, in: row.projectPath),
-                       !run.deniedTools.isEmpty {
-                        deniedToolsSection(run)
+                    VStack(alignment: .leading, spacing: 28) {
+                        // #079: a PERSISTENT failure section (not a transient
+                        // banner) when the latest run for this task failed. Reuses
+                        // the `errorBanner` visual style and offers a Retry that
+                        // re-runs via the same Execute consent gate.
+                        if let failure = row.task.failure {
+                            failureSection(row, failure: failure)
+                        }
+                        // Task #092: a non-fatal DENIAL note for a run that reached
+                        // for tools not on the allowlist. Surfaced from the live
+                        // `TaskRun` (the detail body's only run handle) so it shows
+                        // EVEN WHEN the run otherwise finished cleanly — the user
+                        // needs to know the plan may be built on incomplete
+                        // information. Distinct from the red `failureSection`: this
+                        // is a caution (orange), not a failure.
+                        if let run = runner.run(for: row.task.id, in: row.projectPath),
+                           !run.deniedTools.isEmpty {
+                            deniedToolsSection(run)
+                        }
+                        ForEach(Array(row.task.sections.enumerated()), id: \.offset) { _, section in
+                            sectionView(section)
+                        }
                     }
-                    ForEach(Array(row.task.sections.enumerated()), id: \.offset) { _, section in
-                        sectionView(section)
-                    }
+                    .frame(maxWidth: PlanType.readingWidth, alignment: .leading)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(28)
                 }
-                .frame(maxWidth: PlanType.readingWidth, alignment: .leading)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(28)
             }
+            .frame(minHeight: 0)
             .textSelection(.enabled)
         }
     }

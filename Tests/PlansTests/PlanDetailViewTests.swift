@@ -820,6 +820,35 @@ final class PlanDetailViewTests: XCTestCase {
         )
     }
 
+    // MARK: - Pinned banner sizing (the banner must never pin the column's min height)
+
+    /// The pinned header's title is capped to a few lines instead of growing to
+    /// its full wrapped height, so a long title can't inflate the banner's
+    /// minimum height past the window.
+    @MainActor
+    func testTitleLineLimitIsAFewLines() {
+        XCTAssertEqual(PlanDetailView.titleLineLimit, 3)
+    }
+
+    /// The expanded run log renders in the scrolling body only when there is a
+    /// run AND the drawer is expanded; the pinned banner carries just the
+    /// drawer's header row.
+    @MainActor
+    func testShowsExpandedRunLogOnlyWhenRunPresentAndExpanded() {
+        XCTAssertTrue(PlanDetailView.showsExpandedRunLog(hasRun: true, isExpanded: true))
+        XCTAssertFalse(PlanDetailView.showsExpandedRunLog(hasRun: true, isExpanded: false))
+        XCTAssertFalse(PlanDetailView.showsExpandedRunLog(hasRun: false, isExpanded: true))
+        XCTAssertFalse(PlanDetailView.showsExpandedRunLog(hasRun: false, isExpanded: false))
+    }
+
+    /// The log sits directly under the pinned header (not under a floating
+    /// overlay), so it only needs a small fixed top inset.
+    @MainActor
+    func testDrawerLogTopInsetIsSmallFixedConstant() {
+        XCTAssertLessThanOrEqual(PlanDetailView.drawerLogTopInset, 16)
+        XCTAssertGreaterThan(PlanDetailView.drawerLogTopInset, 0)
+    }
+
     // MARK: - PlanDetailView.progressDrawerStartsExpanded (#107 — initial expanded state)
 
     /// The drawer auto-expands on appear under the SAME rule the sheet used to
