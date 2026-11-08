@@ -330,8 +330,7 @@ struct TaskListView: View {
         .padding(.vertical, 8)
         // #110: the whole-project discussion sheet, presented from the header's
         // "Discuss" button. `project` is already unwrapped here, so the sheet's
-        // path/name are supplied directly; closing it only dismisses — the
-        // conversation persists on the runner's thread.
+        // path/name are supplied directly; closing it ends the conversation.
         .sheet(isPresented: $showProjectDiscussion) {
             ProjectDiscussionView(projectPath: project.projectPath,
                                   projectName: project.projectName)

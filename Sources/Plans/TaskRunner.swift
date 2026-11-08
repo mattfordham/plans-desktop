@@ -1559,6 +1559,13 @@ final class TaskRunner {
         inFlight?.stop()
     }
 
+    /// Ends the whole-project conversation for `projectPath` (#110): stops any
+    /// in-flight turn and drops the thread, so the next one starts empty.
+    func endProjectDiscussion(projectPath: String) {
+        resetDiscussion(projectPath: projectPath, taskID: "")
+        discussions[Self.runKey(projectPath: projectPath, taskID: "")] = nil
+    }
+
     /// Stops the in-flight turn of the discussion for `taskID` in `projectPath`,
     /// marking it cancelled while keeping the conversation and its session.
     /// The stopped run's late events and finish are ignored.

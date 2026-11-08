@@ -1,3 +1,4 @@
+import SwiftUI
 import XCTest
 @testable import Plans
 
@@ -2296,6 +2297,50 @@ final class TaskRunnerTests: XCTestCase {
             recorder.finishers.append(onFinish)
         }
         return (runner, recorder)
+    }
+
+    /// A long whole-project reply must scroll inside the sheet rather than grow
+    /// the sheet to the reply's full height.
+    @MainActor
+    func testProjectDiscussionSheetHeightIsCappedForLongReply() {
+        let (runner, _) = makeProjectDiscussRunner()
+        runner.askProject(projectPath: "/p", question: "What should I do next?")
+        let longReply = Array(repeating: "A paragraph of discussion about the backlog.", count: 200)
+            .joined(separator: "\n\n")
+        runner.projectThread(projectPath: "/p")?.apply(.reply(text: longReply, sessionID: "s"))
+
+        let host = NSHostingView(
+            rootView: ProjectDiscussionView(projectPath: "/p", projectName: "P").environment(runner)
+        )
+
+        XCTAssertLessThanOrEqual(host.fittingSize.height, ProjectDiscussionView.maxSheetHeight)
+    }
+
+    /// Closing the sheet ends the conversation: the thread is gone, so reopening
+    /// starts empty, and a turn still in flight is stopped.
+    @MainActor
+    func testEndProjectDiscussionDropsThreadAndStopsInFlightTurn() {
+        let (runner, recorder) = makeProjectDiscussRunner()
+        runner.askProject(projectPath: "/p", question: "q")
+        recorder.runs[0].markRunningForTesting(projectPath: "/p")
+
+        runner.endProjectDiscussion(projectPath: "/p")
+
+        XCTAssertNil(runner.projectThread(projectPath: "/p"))
+        XCTAssertFalse(recorder.runs[0].isRunning)
+    }
+
+    /// Ending the whole-project conversation must not touch per-plan discussions.
+    @MainActor
+    func testEndProjectDiscussionLeavesPerTaskThreadIntact() {
+        let (runner, _) = makeProjectDiscussRunner()
+        runner.askProject(projectPath: "/p", question: "project question")
+        runner.ask(projectPath: "/p", taskID: "7", question: "task question")
+
+        runner.endProjectDiscussion(projectPath: "/p")
+
+        XCTAssertEqual(runner.discussion(projectPath: "/p", taskID: "7")?.turns.map(\.question),
+                       ["task question"])
     }
 
     /// `askProject(projectPath:question:)` creates a project-scoped

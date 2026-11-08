@@ -11,17 +11,18 @@ import SwiftUI
 ///
 /// It is purely presentational: like `PlanDetailView`, it only READS the thread
 /// off the runner and asks questions through it; the runner restricts the agent
-/// to read tools, so no `.plans/` file is ever written. The conversation lives on
-/// the runner's `DiscussionThread`, NOT on this view, so closing the sheet merely
-/// dismisses it — an in-flight turn keeps running and the transcript is intact if
-/// the sheet is reopened (it deliberately does NOT reset the thread). This mirrors
-/// `PlanDetailView`'s "closing the detail doesn't stop the run" philosophy.
+/// to read tools, so no `.plans/` file is ever written. The conversation is
+/// ephemeral: closing the sheet, by any route, stops an in-flight turn and discards
+/// the thread, so reopening always starts empty.
 ///
 /// Like the detail column's transcript, nothing here measures its own size (#096):
 /// the transcript uses a `ScrollViewReader` + `.frame(maxHeight: .infinity)` and
-/// scrolls by id only. The sheet's fixed `.frame(minWidth:minHeight:)` is a
-/// window size, not self-measurement.
+/// scrolls by id only. The sheet's fixed `.frame(minWidth:minHeight:maxHeight:)`
+/// is a window size, not self-measurement.
 struct ProjectDiscussionView: View {
+    /// The tallest the sheet may grow; longer conversations scroll in the transcript.
+    static let maxSheetHeight: CGFloat = 640
+
     /// The project whose whole-project thread this sheet discusses. The thread is
     /// keyed on an empty task id for this path (`runner.projectThread`).
     let projectPath: String
@@ -29,8 +30,7 @@ struct ProjectDiscussionView: View {
     /// The project's display name, titling the conversation.
     let projectName: String
 
-    /// Dismisses the sheet. Dismissal does NOT stop an in-flight turn or reset the
-    /// thread — the conversation persists on the runner if reopened.
+    /// Dismisses the sheet; `.onDisappear` then ends the conversation.
     @Environment(\.dismiss) private var dismiss
 
     /// The shared run coordinator, which owns the project `DiscussionThread` and
@@ -53,13 +53,12 @@ struct ProjectDiscussionView: View {
             Divider()
             composer(isBusy: isBusy)
         }
-        .frame(minWidth: 520, minHeight: 480)
+        .frame(minWidth: 520, minHeight: 480, maxHeight: Self.maxSheetHeight)
+        .onDisappear { runner.endProjectDiscussion(projectPath: projectPath) }
     }
 
-    /// The sheet header: the conversation title plus a Done button that dismisses
-    /// the sheet. Closing does NOT stop an in-flight turn — the thread lives on the
-    /// runner — so Done only dismisses (mirrors `PlanDetailView`'s "closing the
-    /// detail doesn't stop the run" philosophy).
+    /// The sheet header: the conversation title plus a Done button that closes the
+    /// sheet, which ends the conversation.
     private var header: some View {
         HStack(alignment: .firstTextBaseline) {
             Text("Discuss \(projectName)")
