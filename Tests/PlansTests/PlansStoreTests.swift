@@ -16,6 +16,14 @@ final class PlansStoreTests: XCTestCase {
             at: tempDir,
             withIntermediateDirectories: true
         )
+        // `RegistryReader.readProjects()` emits realpath-canonical paths, and the
+        // macOS temp dir sits behind the `/var` -> `/private/var` symlink. Root
+        // every fixture at the same spelling so path-keyed stubs and expectations
+        // match what the store reports. Uses `realpath(3)` directly because
+        // `URL.resolvingSymlinksInPath()` can strip the `/private` prefix.
+        let resolved = try XCTUnwrap(Darwin.realpath(tempDir.path, nil))
+        defer { free(resolved) }
+        tempDir = URL(fileURLWithPath: String(cString: resolved), isDirectory: true)
     }
 
     override func tearDownWithError() throws {
@@ -2747,7 +2755,11 @@ final class PlansStoreTests: XCTestCase {
         let projectDir: URL
     }
 
-    private func makeMigrateFixture() throws -> MigrateFixture {
+    /// `registeredAs` maps the project's canonical dir to the spellings written
+    /// into the registry; by default the registry holds just the canonical path.
+    private func makeMigrateFixture(
+        registeredAs registryPaths: ((URL) throws -> [String])? = nil
+    ) throws -> MigrateFixture {
         let projectDir = try makeProjectDir(name: "alpha")
         try writeTaskFile(
             projectDir: projectDir,
@@ -2755,7 +2767,9 @@ final class PlansStoreTests: XCTestCase {
             text: "# First\n\n**Status:** pending",
             in: "pending"
         )
-        let reader = try makeReader(projectPaths: [projectDir.path])
+        let reader = try makeReader(
+            projectPaths: try registryPaths?(projectDir) ?? [projectDir.path]
+        )
         let clock = TestClock()
         let recorder = MigrateRecorder()
         let store = PlansStore(
@@ -2838,6 +2852,71 @@ final class PlansStoreTests: XCTestCase {
         XCTAssertEqual(fixture.store.lastGitPassQueriedPathsForTesting, [fixture.path],
                        "a finished migrate forces a mode re-query")
         XCTAssertEqual(fixture.recorder.calls, [fixture.path])
+    }
+
+    /// Creates `<tempDir>/<name>` as a symlink to `target` and returns its path:
+    /// a registry spelling that `readProjects()` rewrites to its realpath, the
+    /// same way it rewrites a case variant, but on any volume.
+    private func makeSymlink(name: String, to target: URL) throws -> String {
+        let link = tempDir.appendingPathComponent(name)
+        try FileManager.default.createSymbolicLink(at: link, withDestinationURL: target)
+        return link.path
+    }
+
+    /// Runs `body` after a reload taken mid-migrate, with `.plans` moved aside.
+    private func afterReloadDuringMigrate(
+        _ fixture: MigrateFixture,
+        _ body: () -> Void
+    ) throws {
+        let gate = DispatchSemaphore(value: 0)
+        fixture.recorder.gate = gate
+        markLocal(fixture)
+        let finished = expectation(description: "migrate finished")
+        XCTAssertTrue(fixture.store.convertToTrackedPlans(projectPath: fixture.path) { _ in
+            finished.fulfill()
+        })
+        defer {
+            gate.signal()
+            wait(for: [finished], timeout: 5)
+        }
+
+        try FileManager.default.removeItem(at: fixture.projectDir.appendingPathComponent(".plans"))
+        fixture.clock.advance(60)
+        fixture.store.reload()
+        body()
+    }
+
+    func testPausedProjectWithNonCanonicalRegistrySpellingStaysListed() throws {
+        let fixture = try makeMigrateFixture(registeredAs: { dir in
+            [try self.makeSymlink(name: "alpha-link", to: dir)]
+        })
+
+        try afterReloadDuringMigrate(fixture) {
+            XCTAssertEqual(fixture.store.projects.map(\.projectPath), [fixture.path])
+            XCTAssertEqual(fixture.store.projects.first?.tasks.map(\.id), ["001"])
+        }
+    }
+
+    func testOtherProjectWithNonCanonicalRegistrySpellingStaysListedDuringMigrate() throws {
+        var betaPath = ""
+        let fixture = try makeMigrateFixture(registeredAs: { dir in
+            let beta = try self.makeProjectDir(name: "beta")
+            betaPath = beta.path
+            return [dir.path, try self.makeSymlink(name: "beta-link", to: beta)]
+        })
+
+        try afterReloadDuringMigrate(fixture) {
+            XCTAssertEqual(fixture.store.projects.map(\.projectPath), [fixture.path, betaPath])
+        }
+    }
+
+    func testDuplicateRegistryEntriesStayCollapsedDuringMigrate() throws {
+        let fixture = try makeMigrateFixture(registeredAs: { dir in [dir.path, dir.path] })
+        XCTAssertEqual(fixture.store.projects.map(\.projectPath), [fixture.path])
+
+        try afterReloadDuringMigrate(fixture) {
+            XCTAssertEqual(fixture.store.projects.map(\.projectPath), [fixture.path])
+        }
     }
 
     func testConvertErrorIsReportedAndNotRetried() throws {

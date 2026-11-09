@@ -68,12 +68,16 @@ struct RegistryReader {
     /// path: one entry per `realpath`, keeping the most-recent `lastSeen` and
     /// emitting the real on-disk spelling, while preserving the first-seen order
     /// of canonical paths.
-    func readProjects() -> [RegistryProject] {
+    ///
+    /// `retainedPaths` are canonical paths kept even while their `.plans` is
+    /// missing, for a migrate that briefly moves it aside.
+    func readProjects(retaining retainedPaths: Set<String> = []) -> [RegistryProject] {
         let live = loadRegistry().filter { project in
             let plansPath = URL(fileURLWithPath: project.path)
                 .appendingPathComponent(".plans")
                 .path
             return fileManager.fileExists(atPath: plansPath)
+                || retainedPaths.contains(Self.realpath(project.path))
         }
 
         var order: [String] = []

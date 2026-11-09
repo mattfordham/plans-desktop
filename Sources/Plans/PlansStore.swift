@@ -764,13 +764,7 @@ final class PlansStore {
         // The registry only lists projects whose `.plans` exists, which a
         // migrate briefly moves aside; keep paused projects listed so their
         // card (and its per-path state) doesn't drop out mid-migrate.
-        var entries = registryReader.readProjects()
-        if !pausedPaths.isEmpty {
-            let live = Set(entries.map(\.path))
-            entries = registryReader.loadRegistry().filter {
-                live.contains($0.path) || pausedPaths.contains($0.path)
-            }
-        }
+        let entries = registryReader.readProjects(retaining: pausedPaths)
 
         let projects = entries.map { project -> ProjectTasks in
             // A migrate has `.plans` moved aside for a paused path: keep the
