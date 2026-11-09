@@ -2,74 +2,15 @@ import XCTest
 import SwiftUI
 @testable import Plans
 
-/// Tests for `AsyncMarkdownParser`, the pure helper that lets the detail view
-/// parse a section body OFF the main thread and decide whether a completed
-/// parse is still the newest one before applying it. The parse itself must
-/// produce exactly the same `[MarkdownBlock]` as `MarkdownBlockRenderer.parse`
-/// (it delegates), and the generation guard is modelled as a pure function so
-/// the newest-wins / stale-drop behaviour can be tested without any SwiftUI.
-final class AsyncMarkdownParserTests: XCTestCase {
+/// Tests for `MarkdownPreparer`, which builds a section body's finished render
+/// model, and `PreparedMarkdownCache`, which keeps it.
+final class MarkdownPreparerTests: XCTestCase {
 
-    // MARK: - parse delegation
-
-    /// A representative body containing a paragraph, a bullet list, and a
-    /// fenced code block must parse identically to `MarkdownBlockRenderer`.
-    func testParseMatchesMarkdownBlockRenderer() {
-        let body = """
-        This is an intro paragraph with **bold** text.
-
-        - first bullet
-        - second bullet
-
-        ```swift
-        let x = 1
-        print(x)
-        ```
-        """
-
-        let expected = MarkdownBlockRenderer.parse(body)
-        let actual = AsyncMarkdownParser.parse(body)
-
-        XCTAssertEqual(actual, expected)
-        // Sanity: the fixture really does exercise all three block kinds.
-        XCTAssertTrue(expected.contains(where: {
-            if case .paragraph = $0 { return true } else { return false }
-        }))
-        XCTAssertTrue(expected.contains(where: {
-            if case .bulletList = $0 { return true } else { return false }
-        }))
-        XCTAssertTrue(expected.contains(where: {
-            if case .codeBlock = $0 { return true } else { return false }
-        }))
-    }
-
-    // MARK: - generation / newest-wins guard
-
-    /// A completed parse whose generation matches the current generation is
-    /// applied.
-    func testShouldApplyWhenGenerationMatchesCurrent() {
-        XCTAssertTrue(AsyncMarkdownParser.shouldApply(completed: 3, current: 3))
-    }
-
-    /// A stale result (an older generation finishing AFTER a newer parse has
-    /// already been kicked off) is dropped.
-    func testShouldNotApplyStaleResult() {
-        // Generation 1 finishes late; current has already advanced to 2.
-        XCTAssertFalse(AsyncMarkdownParser.shouldApply(completed: 1, current: 2))
-    }
-
-    /// A result from a generation newer than the current one should never
-    /// happen with a monotonic counter, but is likewise not applied — only an
-    /// exact match wins.
-    func testShouldNotApplyFutureResult() {
-        XCTAssertFalse(AsyncMarkdownParser.shouldApply(completed: 5, current: 4))
-    }
-
-    // MARK: - prepare (#113: off-main render model)
+    // MARK: - prepare
 
     /// The single prepared inline text of a one-paragraph body.
     private func preparedParagraph(_ body: String, style: MarkdownStyle) throws -> AttributedString {
-        let blocks = AsyncMarkdownParser.prepare(body, style: style)
+        let blocks = MarkdownPreparer.prepare(body, style: style)
         guard blocks.count == 1, case let .paragraph(text) = blocks[0] else {
             XCTFail("expected exactly one paragraph, got \(blocks)")
             throw XCTSkip("unexpected block shape")
@@ -127,9 +68,9 @@ final class AsyncMarkdownParserTests: XCTestCase {
         """
 
         let inline: (String) -> AttributedString = {
-            AsyncMarkdownParser.prepareInline($0, bodySize: MarkdownStyle.plan.bodySize)
+            MarkdownPreparer.prepareInline($0, bodySize: MarkdownStyle.plan.bodySize)
         }
-        XCTAssertEqual(AsyncMarkdownParser.prepare(body, style: .plan), [
+        XCTAssertEqual(MarkdownPreparer.prepare(body, style: .plan), [
             .heading(level: 1, text: "Title"),
             .bulletList([inline("one"), inline("two")]),
             .numberedList([inline("first")]),
@@ -138,37 +79,31 @@ final class AsyncMarkdownParserTests: XCTestCase {
         ])
     }
 
-    /// Preparation runs on a detached task in production; its output must not
-    /// depend on which thread built it.
-    func testPrepareOffMainMatchesInlineResult() async {
-        let body = "para with `code`\n\n- item **bold**\n\n```js\nconst a = 1\n```"
-        let expected = AsyncMarkdownParser.prepare(body, style: .plan)
-        let detached = await _Concurrency.Task.detached(priority: .userInitiated) {
-            AsyncMarkdownParser.prepare(body, style: .plan)
-        }.value
-        XCTAssertEqual(detached, expected)
-    }
-
-    // MARK: - placeholder
-
-    /// A body within the cap is shown whole.
-    func testPlaceholderLeavesShortBodyUnchanged() {
-        XCTAssertEqual(AsyncMarkdownParser.placeholder(for: "short body"), "short body")
-    }
-
-    /// A long body is cut to the cap, so the first frame's text layout does not
-    /// grow with the size of the plan.
-    func testPlaceholderCapsLongBody() {
-        let body = String(repeating: "abcde ", count: 5_000)
-        let placeholder = AsyncMarkdownParser.placeholder(for: body)
-        XCTAssertEqual(placeholder.count, AsyncMarkdownParser.placeholderCharacterLimit)
-        XCTAssertTrue(body.hasPrefix(placeholder))
-    }
-
     // MARK: - PreparedMarkdownCache
 
     private func blocks(_ text: String) -> [PreparedMarkdownBlock] {
         [.heading(level: 1, text: text)]
+    }
+
+    /// The first request for a body returns its finished blocks straight away,
+    /// so a section never has an intermediate state to shift out of.
+    @MainActor
+    func testPreparedBlocksReturnsFinishedBlocksOnFirstRequest() {
+        let cache = PreparedMarkdownCache(capacity: 4)
+        let body = "para with `code`\n\n- item"
+
+        XCTAssertEqual(cache.preparedBlocks(forBody: body, style: .plan),
+                       MarkdownPreparer.prepare(body, style: .plan))
+        XCTAssertEqual(cache.count, 1)
+    }
+
+    /// A later request is served from the cache rather than prepared again.
+    @MainActor
+    func testPreparedBlocksReusesCachedEntry() {
+        let cache = PreparedMarkdownCache(capacity: 4)
+        cache.store(blocks("cached"), forBody: "a", style: .plan)
+
+        XCTAssertEqual(cache.preparedBlocks(forBody: "a", style: .plan), blocks("cached"))
     }
 
     @MainActor

@@ -911,7 +911,9 @@ struct PlanDetailView: View {
                     .padding(28)
                 }
             }
-            .frame(minHeight: 0)
+            // Both bounds are explicit so the enclosing stack can learn this
+            // view's flexibility without measuring the whole plan's text.
+            .frame(minHeight: 0, maxHeight: .infinity)
             .textSelection(.enabled)
         }
     }
@@ -1503,89 +1505,29 @@ struct PlanDetailView: View {
     /// `.equatable()` lets a parent re-evaluation (every store poll, every run
     /// update) skip this subtree when the body and style are unchanged.
     private func markdownBlockView(_ body: String, style: MarkdownStyle = .plan) -> some View {
-        AsyncMarkdownBlockView(bodyText: body, style: style)
+        PreparedMarkdownBlockView(bodyText: body, style: style)
             .equatable()
     }
 
-    /// A SwiftUI "suspense boundary" for a section body (#113). A body that has
-    /// been prepared before renders straight from `PreparedMarkdownCache` with
-    /// no placeholder. Otherwise a short placeholder shows at once while
-    /// `AsyncMarkdownParser.prepare` builds the finished blocks off the main
-    /// thread, and this view only wraps the results.
-    ///
-    /// `.task(id: bodyText)` re-runs ONLY when `bodyText` actually changes, so
-    /// an idle poll republishing identical content neither clears nor
-    /// re-prepares a loaded body. `loaded` records which body its blocks belong
-    /// to, so a changed body falls back to the cache or placeholder without
-    /// anything having to reset it. A monotonic `generation` counter +
-    /// `AsyncMarkdownParser.shouldApply` drops stale background completions.
-    private struct AsyncMarkdownBlockView: View, Equatable {
-        private struct Loaded {
-            let source: String
-            let blocks: [PreparedMarkdownBlock]
-        }
-
+    /// A section body rendered from `PreparedMarkdownCache`. The final content
+    /// is there on the first frame: a loading placeholder made the section's
+    /// height jump when the real text replaced it, and preparing a whole plan
+    /// costs only a few milliseconds, once per body.
+    private struct PreparedMarkdownBlockView: View, Equatable {
         let bodyText: String
         let style: MarkdownStyle
-
-        @State private var loaded: Loaded? = nil
-        @State private var generation = 0
 
         nonisolated static func == (lhs: Self, rhs: Self) -> Bool {
             lhs.bodyText == rhs.bodyText && lhs.style == rhs.style
         }
 
-        private var loadedBlocks: [PreparedMarkdownBlock]? {
-            loaded?.source == bodyText ? loaded?.blocks : nil
-        }
-
         var body: some View {
-            let blocks = loadedBlocks
-                ?? PreparedMarkdownCache.shared.blocks(forBody: bodyText, style: style)
+            let blocks = PreparedMarkdownCache.shared.preparedBlocks(forBody: bodyText, style: style)
             VStack(alignment: .leading, spacing: style.blockSpacing) {
-                if let blocks {
-                    ForEach(Array(blocks.enumerated()), id: \.offset) { _, block in
-                        renderBlock(block)
-                    }
-                } else {
-                    // Plain, secondary text in the same outer container.
-                    Text(AsyncMarkdownParser.placeholder(for: bodyText))
-                        .font(.system(size: style.bodySize))
-                        .foregroundStyle(.secondary)
-                        .lineSpacing(style.lineSpacing)
-                        .fixedSize(horizontal: false, vertical: true)
-                        .frame(maxWidth: .infinity, alignment: .leading)
+                ForEach(Array(blocks.enumerated()), id: \.offset) { _, block in
+                    renderBlock(block)
                 }
             }
-            .task(id: bodyText) {
-                await load()
-            }
-        }
-
-        private func load() async {
-            let source = bodyText
-            let renderStyle = style
-            guard loaded?.source != source else { return }
-            // Pin a cached result in `loaded` so a later eviction can't drop
-            // this on-screen section back to its placeholder.
-            if let cached = PreparedMarkdownCache.shared.blocks(forBody: source, style: renderStyle) {
-                loaded = Loaded(source: source, blocks: cached)
-                return
-            }
-            generation += 1
-            let captured = generation
-            // NB: this module declares its own `struct Task` (TaskParser.swift),
-            // which shadows Swift's concurrency `Task`; fully-qualify it.
-            let prepared = await _Concurrency.Task.detached(priority: .userInitiated) {
-                AsyncMarkdownParser.prepare(source, style: renderStyle)
-            }.value
-            // Cached even if this view has moved on: the work is already done,
-            // and quickly clicking back to this plan should benefit from it.
-            PreparedMarkdownCache.shared.store(prepared, forBody: source, style: renderStyle)
-            guard !_Concurrency.Task.isCancelled,
-                  AsyncMarkdownParser.shouldApply(completed: captured, current: generation)
-            else { return }
-            loaded = Loaded(source: source, blocks: prepared)
         }
 
         /// Renders a single prepared block with restrained, readable styling.
