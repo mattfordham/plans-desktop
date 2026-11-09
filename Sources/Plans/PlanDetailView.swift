@@ -1501,11 +1501,75 @@ struct PlanDetailView: View {
     /// order. Block structure is recovered by the pure `MarkdownBlockRenderer`;
     /// inline markdown within each block's text is still applied via
     /// `markdownParagraph(_:)`. Purely presentational — performs no writes.
+    ///
+    /// #113: parsing + per-block rendering (`CodeHighlighter.highlight`,
+    /// per-paragraph `AttributedString(markdown:)`) is expensive and used to run
+    /// SYNCHRONOUSLY in the view body on every selection and every 5s poll,
+    /// causing visible lag when switching projects/plans. The actual work now
+    /// lives in `AsyncMarkdownBlockView`, which parses off the main thread and
+    /// fills in once ready; this method just wires it up with the shared
+    /// `renderBlock(_:style:)` so visual output stays identical once loaded.
     @ViewBuilder
     private func markdownBlockView(_ body: String, style: MarkdownStyle = .plan) -> some View {
-        VStack(alignment: .leading, spacing: style.blockSpacing) {
-            ForEach(Array(MarkdownBlockRenderer.parse(body).enumerated()), id: \.offset) { _, block in
-                renderBlock(block, style: style)
+        AsyncMarkdownBlockView(bodyText: body, style: style) { block in
+            renderBlock(block, style: style)
+        }
+    }
+
+    /// A SwiftUI "suspense boundary" for a section body: it shows a lightweight
+    /// placeholder immediately, parses the markdown OFF the main thread, then
+    /// swaps in the fully-rendered blocks once ready — so switching plans/projects
+    /// is instant instead of blocking the main thread on parse + highlight (#113).
+    ///
+    /// Block structure is parsed via `AsyncMarkdownParser.parse` (a pure function
+    /// safe to run on a detached task). Each parsed block is rendered by the
+    /// parent's private `renderBlock(_:style:)`, passed in as `renderBlock`, so
+    /// the loaded output is byte-identical to the former synchronous path.
+    ///
+    /// `.task(id: body)` re-runs ONLY when `body` actually changes — an idle poll
+    /// that republishes identical content does not clear or re-parse already-loaded
+    /// blocks. A monotonic `generation` counter + `AsyncMarkdownParser.shouldApply`
+    /// drops stale background completions (newest-wins).
+    private struct AsyncMarkdownBlockView<BlockView: View>: View {
+        let bodyText: String
+        let style: MarkdownStyle
+        @ViewBuilder let renderBlock: (MarkdownBlock) -> BlockView
+
+        @State private var blocks: [MarkdownBlock]? = nil
+        @State private var generation = 0
+
+        var body: some View {
+            VStack(alignment: .leading, spacing: style.blockSpacing) {
+                if let blocks {
+                    ForEach(Array(blocks.enumerated()), id: \.offset) { _, block in
+                        renderBlock(block)
+                    }
+                } else {
+                    // Placeholder: plain, secondary body text in the same outer
+                    // container so layout doesn't jump when the parsed blocks land.
+                    Text(bodyText)
+                        .font(.system(size: style.bodySize))
+                        .foregroundStyle(.secondary)
+                        .lineSpacing(style.lineSpacing)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+            }
+            .task(id: bodyText) {
+                // A new body: show the placeholder again while we re-parse.
+                blocks = nil
+                generation += 1
+                let captured = generation
+                let source = bodyText
+                // NB: this module declares its own `struct Task` (TaskParser.swift),
+                // which shadows Swift's concurrency `Task`; fully-qualify it.
+                let parsed = await _Concurrency.Task.detached(priority: .userInitiated) {
+                    AsyncMarkdownParser.parse(source)
+                }.value
+                guard !_Concurrency.Task.isCancelled,
+                      AsyncMarkdownParser.shouldApply(completed: captured, current: generation)
+                else { return }
+                blocks = parsed
             }
         }
     }
