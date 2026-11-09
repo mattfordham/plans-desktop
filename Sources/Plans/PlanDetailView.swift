@@ -26,7 +26,7 @@ private enum PlanType {
 /// discussion replies use one renderer at different scales. `.plan` is the
 /// editorial plan-detail scale; `.compact` is a system-body scale for chat-style
 /// replies with plain, only modestly larger headings.
-struct MarkdownStyle: Equatable {
+struct MarkdownStyle: Hashable {
     var bodySize: CGFloat
     var lineSpacing: CGFloat
     var blockSpacing: CGFloat
@@ -1498,56 +1498,58 @@ struct PlanDetailView: View {
 
     /// Renders a section body as block-level markdown: paragraphs, bullet /
     /// numbered lists, fenced code, blockquotes, and sub-headings, in document
-    /// order. Block structure is recovered by the pure `MarkdownBlockRenderer`;
-    /// inline markdown within each block's text is still applied via
-    /// `markdownParagraph(_:)`. Purely presentational — performs no writes.
+    /// order. Purely presentational — performs no writes.
     ///
-    /// #113: parsing + per-block rendering (`CodeHighlighter.highlight`,
-    /// per-paragraph `AttributedString(markdown:)`) is expensive and used to run
-    /// SYNCHRONOUSLY in the view body on every selection and every 5s poll,
-    /// causing visible lag when switching projects/plans. The actual work now
-    /// lives in `AsyncMarkdownBlockView`, which parses off the main thread and
-    /// fills in once ready; this method just wires it up with the shared
-    /// `renderBlock(_:style:)` so visual output stays identical once loaded.
-    @ViewBuilder
+    /// `.equatable()` lets a parent re-evaluation (every store poll, every run
+    /// update) skip this subtree when the body and style are unchanged.
     private func markdownBlockView(_ body: String, style: MarkdownStyle = .plan) -> some View {
-        AsyncMarkdownBlockView(bodyText: body, style: style) { block in
-            renderBlock(block, style: style)
-        }
+        AsyncMarkdownBlockView(bodyText: body, style: style)
+            .equatable()
     }
 
-    /// A SwiftUI "suspense boundary" for a section body: it shows a lightweight
-    /// placeholder immediately, parses the markdown OFF the main thread, then
-    /// swaps in the fully-rendered blocks once ready — so switching plans/projects
-    /// is instant instead of blocking the main thread on parse + highlight (#113).
+    /// A SwiftUI "suspense boundary" for a section body (#113). A body that has
+    /// been prepared before renders straight from `PreparedMarkdownCache` with
+    /// no placeholder. Otherwise a short placeholder shows at once while
+    /// `AsyncMarkdownParser.prepare` builds the finished blocks off the main
+    /// thread, and this view only wraps the results.
     ///
-    /// Block structure is parsed via `AsyncMarkdownParser.parse` (a pure function
-    /// safe to run on a detached task). Each parsed block is rendered by the
-    /// parent's private `renderBlock(_:style:)`, passed in as `renderBlock`, so
-    /// the loaded output is byte-identical to the former synchronous path.
-    ///
-    /// `.task(id: body)` re-runs ONLY when `body` actually changes — an idle poll
-    /// that republishes identical content does not clear or re-parse already-loaded
-    /// blocks. A monotonic `generation` counter + `AsyncMarkdownParser.shouldApply`
-    /// drops stale background completions (newest-wins).
-    private struct AsyncMarkdownBlockView<BlockView: View>: View {
+    /// `.task(id: bodyText)` re-runs ONLY when `bodyText` actually changes, so
+    /// an idle poll republishing identical content neither clears nor
+    /// re-prepares a loaded body. `loaded` records which body its blocks belong
+    /// to, so a changed body falls back to the cache or placeholder without
+    /// anything having to reset it. A monotonic `generation` counter +
+    /// `AsyncMarkdownParser.shouldApply` drops stale background completions.
+    private struct AsyncMarkdownBlockView: View, Equatable {
+        private struct Loaded {
+            let source: String
+            let blocks: [PreparedMarkdownBlock]
+        }
+
         let bodyText: String
         let style: MarkdownStyle
-        @ViewBuilder let renderBlock: (MarkdownBlock) -> BlockView
 
-        @State private var blocks: [MarkdownBlock]? = nil
+        @State private var loaded: Loaded? = nil
         @State private var generation = 0
 
+        nonisolated static func == (lhs: Self, rhs: Self) -> Bool {
+            lhs.bodyText == rhs.bodyText && lhs.style == rhs.style
+        }
+
+        private var loadedBlocks: [PreparedMarkdownBlock]? {
+            loaded?.source == bodyText ? loaded?.blocks : nil
+        }
+
         var body: some View {
+            let blocks = loadedBlocks
+                ?? PreparedMarkdownCache.shared.blocks(forBody: bodyText, style: style)
             VStack(alignment: .leading, spacing: style.blockSpacing) {
                 if let blocks {
                     ForEach(Array(blocks.enumerated()), id: \.offset) { _, block in
                         renderBlock(block)
                     }
                 } else {
-                    // Placeholder: plain, secondary body text in the same outer
-                    // container so layout doesn't jump when the parsed blocks land.
-                    Text(bodyText)
+                    // Plain, secondary text in the same outer container.
+                    Text(AsyncMarkdownParser.placeholder(for: bodyText))
                         .font(.system(size: style.bodySize))
                         .foregroundStyle(.secondary)
                         .lineSpacing(style.lineSpacing)
@@ -1556,154 +1558,141 @@ struct PlanDetailView: View {
                 }
             }
             .task(id: bodyText) {
-                // A new body: show the placeholder again while we re-parse.
-                blocks = nil
-                generation += 1
-                let captured = generation
-                let source = bodyText
-                // NB: this module declares its own `struct Task` (TaskParser.swift),
-                // which shadows Swift's concurrency `Task`; fully-qualify it.
-                let parsed = await _Concurrency.Task.detached(priority: .userInitiated) {
-                    AsyncMarkdownParser.parse(source)
-                }.value
-                guard !_Concurrency.Task.isCancelled,
-                      AsyncMarkdownParser.shouldApply(completed: captured, current: generation)
-                else { return }
-                blocks = parsed
+                await load()
             }
         }
-    }
 
-    /// Renders a single parsed `MarkdownBlock` with restrained, readable styling.
-    @ViewBuilder
-    private func renderBlock(_ block: MarkdownBlock, style: MarkdownStyle) -> some View {
-        switch block {
-        case let .paragraph(text):
-            markdownParagraph(text, style: style)
-                .lineSpacing(style.lineSpacing)
-                .fixedSize(horizontal: false, vertical: true)
-
-        case let .heading(level, text):
-            Text(text)
-                .font(headingFont(forLevel: level, style: style))
-                .foregroundStyle(headingColor(forLevel: level, style: style))
-                .padding(.top, style.headingTopPadding)
-
-        case let .bulletList(items):
-            VStack(alignment: .leading, spacing: style.listSpacing) {
-                ForEach(Array(items.enumerated()), id: \.offset) { _, item in
-                    HStack(alignment: .firstTextBaseline, spacing: style.markerSpacing) {
-                        Text("•")
-                            .font(.system(size: style.bodySize))
-                            .foregroundStyle(.secondary)
-                        markdownParagraph(item, style: style)
-                            .lineSpacing(style.lineSpacing)
-                            .fixedSize(horizontal: false, vertical: true)
-                    }
-                    .padding(.leading, 4)
-                }
+        private func load() async {
+            let source = bodyText
+            let renderStyle = style
+            guard loaded?.source != source else { return }
+            // Pin a cached result in `loaded` so a later eviction can't drop
+            // this on-screen section back to its placeholder.
+            if let cached = PreparedMarkdownCache.shared.blocks(forBody: source, style: renderStyle) {
+                loaded = Loaded(source: source, blocks: cached)
+                return
             }
+            generation += 1
+            let captured = generation
+            // NB: this module declares its own `struct Task` (TaskParser.swift),
+            // which shadows Swift's concurrency `Task`; fully-qualify it.
+            let prepared = await _Concurrency.Task.detached(priority: .userInitiated) {
+                AsyncMarkdownParser.prepare(source, style: renderStyle)
+            }.value
+            // Cached even if this view has moved on: the work is already done,
+            // and quickly clicking back to this plan should benefit from it.
+            PreparedMarkdownCache.shared.store(prepared, forBody: source, style: renderStyle)
+            guard !_Concurrency.Task.isCancelled,
+                  AsyncMarkdownParser.shouldApply(completed: captured, current: generation)
+            else { return }
+            loaded = Loaded(source: source, blocks: prepared)
+        }
 
-        case let .numberedList(items):
-            VStack(alignment: .leading, spacing: style.listSpacing) {
-                ForEach(Array(items.enumerated()), id: \.offset) { index, item in
-                    HStack(alignment: .firstTextBaseline, spacing: style.markerSpacing) {
-                        Text("\(index + 1).")
-                            .font(.system(size: style.bodySize))
-                            .monospacedDigit()
-                            .foregroundStyle(.secondary)
-                        markdownParagraph(item, style: style)
-                            .lineSpacing(style.lineSpacing)
-                            .fixedSize(horizontal: false, vertical: true)
-                    }
-                    .padding(.leading, 4)
-                }
-            }
-
-        case let .codeBlock(language, code):
-            Text(CodeHighlighter.highlight(code, language: language))
-                .font(.system(size: style.bodySize - 1, design: .monospaced))
-                .lineSpacing(style.lineSpacing - 1)
-                .textSelection(.enabled)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(style.codePadding)
-                .background(
-                    RoundedRectangle(cornerRadius: 8)
-                        .fill(Color(nsColor: .textBackgroundColor))
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 8)
-                                .strokeBorder(Color.primary.opacity(0.08), lineWidth: 1)
-                        )
-                )
-
-        case let .blockquote(text):
-            HStack(spacing: 12) {
-                RoundedRectangle(cornerRadius: 2)
-                    .fill(Color.accentColor.opacity(0.65))
-                    .frame(width: 3)
-                markdownParagraph(text, style: style)
-                    .foregroundStyle(.secondary)
+        /// Renders a single prepared block with restrained, readable styling.
+        @ViewBuilder
+        private func renderBlock(_ block: PreparedMarkdownBlock) -> some View {
+            switch block {
+            case let .paragraph(text):
+                Text(text)
                     .lineSpacing(style.lineSpacing)
                     .fixedSize(horizontal: false, vertical: true)
+
+            case let .heading(level, text):
+                Text(text)
+                    .font(headingFont(forLevel: level))
+                    .foregroundStyle(headingColor(forLevel: level))
+                    .padding(.top, style.headingTopPadding)
+
+            case let .bulletList(items):
+                VStack(alignment: .leading, spacing: style.listSpacing) {
+                    ForEach(Array(items.enumerated()), id: \.offset) { _, item in
+                        HStack(alignment: .firstTextBaseline, spacing: style.markerSpacing) {
+                            Text("•")
+                                .font(.system(size: style.bodySize))
+                                .foregroundStyle(.secondary)
+                            Text(item)
+                                .lineSpacing(style.lineSpacing)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                        .padding(.leading, 4)
+                    }
+                }
+
+            case let .numberedList(items):
+                VStack(alignment: .leading, spacing: style.listSpacing) {
+                    ForEach(Array(items.enumerated()), id: \.offset) { index, item in
+                        HStack(alignment: .firstTextBaseline, spacing: style.markerSpacing) {
+                            Text("\(index + 1).")
+                                .font(.system(size: style.bodySize))
+                                .monospacedDigit()
+                                .foregroundStyle(.secondary)
+                            Text(item)
+                                .lineSpacing(style.lineSpacing)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                        .padding(.leading, 4)
+                    }
+                }
+
+            case let .codeBlock(highlighted):
+                Text(highlighted)
+                    .font(.system(size: style.bodySize - 1, design: .monospaced))
+                    .lineSpacing(style.lineSpacing - 1)
+                    .textSelection(.enabled)
                     .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(style.codePadding)
+                    .background(
+                        RoundedRectangle(cornerRadius: 8)
+                            .fill(Color(nsColor: .textBackgroundColor))
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 8)
+                                    .strokeBorder(Color.primary.opacity(0.08), lineWidth: 1)
+                            )
+                    )
+
+            case let .blockquote(text):
+                HStack(spacing: 12) {
+                    RoundedRectangle(cornerRadius: 2)
+                        .fill(Color.accentColor.opacity(0.65))
+                        .frame(width: 3)
+                    Text(text)
+                        .foregroundStyle(.secondary)
+                        .lineSpacing(style.lineSpacing)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                .padding(.vertical, 10)
+                .padding(.horizontal, 12)
+                .background(
+                    RoundedRectangle(cornerRadius: 8)
+                        .fill(Color.accentColor.opacity(0.06))
+                )
             }
-            .padding(.vertical, 10)
-            .padding(.horizontal, 12)
-            .background(
-                RoundedRectangle(cornerRadius: 8)
-                    .fill(Color.accentColor.opacity(0.06))
-            )
         }
-    }
 
-    /// The emphasized font for a sub-heading, scaling down with nesting depth:
-    /// level 1/2 read as section-ish, level 3+ as a smaller bold subhead.
-    private func headingFont(forLevel level: Int, style: MarkdownStyle) -> Font {
-        if let size = style.headingSize(forLevel: level) {
-            return .system(size: size, weight: .semibold)
+        /// The emphasized font for a sub-heading, scaling down with nesting depth:
+        /// level 1/2 read as section-ish, level 3+ as a smaller bold subhead.
+        private func headingFont(forLevel level: Int) -> Font {
+            if let size = style.headingSize(forLevel: level) {
+                return .system(size: size, weight: .semibold)
+            }
+            switch level {
+            case 1: return .largeTitle.bold()
+            case 2: return .title.bold()
+            default: return .title2.bold()
+            }
         }
-        switch level {
-        case 1: return .largeTitle.bold()
-        case 2: return .title.bold()
-        default: return .title2.bold()
-        }
-    }
 
-    /// Tints sub-headings by depth so the hierarchy reads through color as well
-    /// as size: the biggest headings take the accent, the next level a cooler
-    /// teal, and deeper levels settle to primary so it never becomes a rainbow.
-    private func headingColor(forLevel level: Int, style: MarkdownStyle) -> Color {
-        guard style.tintsHeadings else { return .primary }
-        switch level {
-        case 1: return .accentColor
-        case 2: return .teal
-        default: return .primary
-        }
-    }
-
-    /// Renders a single paragraph as markdown, tolerating parse failures by
-    /// falling back to plain text. Uses an options value that does not throw on
-    /// the default markdown grammar; the whole parse is wrapped in `try?`.
-    private func markdownParagraph(_ paragraph: String, style: MarkdownStyle = .plan) -> Text {
-        let options = AttributedString.MarkdownParsingOptions(
-            interpretedSyntax: .inlineOnlyPreservingWhitespace
-        )
-        if var attributed = try? AttributedString(markdown: paragraph, options: options) {
-            attributed.font = .system(size: style.bodySize)
-            styleInlineCode(&attributed, size: style.bodySize)
-            return Text(attributed)
-        }
-        return Text(paragraph).font(.system(size: style.bodySize))
-    }
-
-    /// Gives inline `` `code` `` runs a monospaced font and a subtle tinted
-    /// "chip" foreground so they stand apart from surrounding prose. Detected via
-    /// the `.code` inline presentation intent the markdown parser assigns.
-    private func styleInlineCode(_ attributed: inout AttributedString, size: CGFloat) {
-        for run in attributed.runs {
-            guard let intent = run.inlinePresentationIntent, intent.contains(.code) else { continue }
-            attributed[run.range].font = .system(size: size, design: .monospaced)
-            attributed[run.range].foregroundColor = .accentColor
+        /// Tints sub-headings by depth so the hierarchy reads through color as well
+        /// as size: the biggest headings take the accent, the next level a cooler
+        /// teal, and deeper levels settle to primary so it never becomes a rainbow.
+        private func headingColor(forLevel level: Int) -> Color {
+            guard style.tintsHeadings else { return .primary }
+            switch level {
+            case 1: return .accentColor
+            case 2: return .teal
+            default: return .primary
+            }
         }
     }
 
