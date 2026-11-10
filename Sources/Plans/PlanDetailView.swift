@@ -1320,27 +1320,34 @@ struct PlanDetailView: View {
     }
 
     /// Pure predicate for the "Apply changes" discuss control's availability
-    /// (#114), gated to `pending` / `elaborated` ONLY and withheld on blocked /
-    /// backlogged plans.
+    /// (#114, widened in #115): permitted for the active and pre-execution
+    /// statuses — `pending` / `elaborated` / `in-progress` / `review` /
+    /// `in-review` — and withheld on blocked / backlogged plans.
     ///
-    /// This mirrors `canBacklog`'s SAFETY reasoning. A read-only discuss turn can
-    /// happen at any status, but an *applying* turn is write-capable — it can edit
-    /// and commit the plan file — so it must never be reachable from an
-    /// `in-progress` / `in-review` task (where it could disturb active work) or a
-    /// `completed` one (where there is nothing to re-shape). Restricting it to the
-    /// two quiescent, pre-execution statuses means no single in-app action can
-    /// touch a live or finished plan.
+    /// A read-only discuss turn can happen at any status; the *applying* turn is
+    /// write-capable — it can edit and commit the plan file. But that applying
+    /// turn is a deliberate, explicit second control routing through
+    /// `plan-discuss`, scoped to the single selected plan, so permitting it on an
+    /// active plan lets the user reshape work in flight rather than being an
+    /// accidental in-app write. That is exactly the point of discussion-driven
+    /// edits, so an in-progress / review / in-review plan is allowed.
     ///
-    /// `nil` is excluded because an undecodable status is not known to be safe.
-    /// Unlike `canBacklog`, a `blocked` plan is withheld too: applying edits is a
-    /// write action, so it follows the work gates rather than the deferral ones.
-    /// A `backlogged` plan is withheld as well — parked plans offer Restore and
-    /// read-only actions only.
+    /// Only `completed` is withheld by status — a finished plan has nothing to
+    /// re-shape, and reopening is the path. `nil` is excluded too because an
+    /// undecodable status is not known to be safe. A `blocked` plan is withheld
+    /// (applying edits is a write action, so it follows the work gates rather
+    /// than the deferral ones), and a `backlogged` plan is withheld as well —
+    /// parked plans offer Restore and read-only actions only.
     static func canApplyViaDiscussion(status: TaskStatus?, isBlocked: Bool,
                                       isBacklogged: Bool) -> Bool {
         guard !isBacklogged else { return false }
         guard !isBlocked else { return false }
-        return status == .pending || status == .elaborated
+        switch status {
+        case .pending, .elaborated, .inProgress, .review, .inReview:
+            return true
+        case .completed, nil:
+            return false
+        }
     }
 
     /// Pure predicate for the "Restore" action's availability (#077 follow-up).
