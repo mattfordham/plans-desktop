@@ -407,6 +407,16 @@ final class TaskRun {
     /// non-keep runs.
     let keep: Bool
 
+    /// Whether this per-plan discuss turn may APPLY the agreed change (#114).
+    /// Maps directly to the valueless `--apply` process flag and is meaningful
+    /// ONLY with `mode == .discuss`: when true, `arguments` appends `--apply` so
+    /// the runner swaps its read-only discuss prompt + allowlist for a
+    /// write-capable pair, letting the agent edit THIS plan's file via
+    /// `plan-discuss` on request. Composes ORTHOGONALLY with `mode` — it is not a
+    /// new `RunMode`; it rides alongside the discuss mode. Defaults false so every
+    /// existing discuss call site stays byte-for-byte read-only.
+    let apply: Bool
+
     /// The Agent SDK session id a `.discuss` turn resumes, passed to the runner
     /// as `--resume <id>` so the agent keeps the earlier conversation's context.
     /// `nil` for a first discussion turn and for every other mode (ignored by
@@ -543,6 +553,7 @@ final class TaskRun {
          deep: Bool = false,
          keep: Bool = false,
          resume: String? = nil,
+         apply: Bool = false,
          outcomeLog: RunOutcomeLog = RunOutcomeLog(),
          now: @escaping () -> String = { ISO8601DateFormatter().string(from: Date()) }) {
         self.taskID = taskID
@@ -553,6 +564,7 @@ final class TaskRun {
         self.deep = deep
         self.keep = keep
         self.resume = resume
+        self.apply = apply
         self.outcomeLog = outcomeLog
         self.now = now
     }
@@ -598,6 +610,7 @@ final class TaskRun {
         let deep = self.deep
         let keep = self.keep
         let resume = self.resume
+        let apply = self.apply
         _Concurrency.Task { [weak self] in
             // One login-shell lookup yields both node and the login PATH; the
             // PATH becomes the child's so `npx`-launched MCP servers resolve.
@@ -620,7 +633,7 @@ final class TaskRun {
             self.spawn(nodePath: nodePath, loginPath: loginPath, scriptURL: scriptURL,
                        projectPath: projectPath, taskID: taskID, mode: mode,
                        description: description, deep: deep, keep: keep,
-                       resume: resume)
+                       resume: resume, apply: apply)
         }
     }
 
@@ -652,7 +665,7 @@ final class TaskRun {
     nonisolated static func arguments(scriptPath: String, projectPath: String,
                                       taskID: String, mode: RunMode,
                                       description: String?, deep: Bool, keep: Bool,
-                                      resume: String?) -> [String] {
+                                      resume: String?, apply: Bool = false) -> [String] {
         var arguments = [
             scriptPath,
             "--project-root", projectPath,
@@ -691,6 +704,17 @@ final class TaskRun {
         if keep {
             arguments += ["--keep"]
         }
+        // `--apply` (#114) is a valueless flag, ORTHOGONAL to the
+        // task-id/description split above and meaningful ONLY with
+        // `--mode discuss`: it opts a per-plan discuss turn OUT of its default
+        // read-only posture, permitting the agent to apply the agreed change to
+        // this plan's file via `plan-discuss`. The DEFAULT discuss path (apply
+        // false) stays byte-for-byte read-only. Appended AFTER `--mode`
+        // (alongside `--deep`/`--keep`) and BEFORE `--resume` so the argument
+        // order stays stable/predictable.
+        if mode == .discuss, apply {
+            arguments += ["--apply"]
+        }
         // `--resume` continues a prior Agent SDK session. Only a discussion is
         // conversational, so it is dropped for every other mode (the runner
         // rejects it there).
@@ -702,7 +726,8 @@ final class TaskRun {
 
     private func spawn(nodePath: String, loginPath: String?, scriptURL: URL,
                        projectPath: String, taskID: String, mode: RunMode,
-                       description: String?, deep: Bool, keep: Bool, resume: String?) {
+                       description: String?, deep: Bool, keep: Bool, resume: String?,
+                       apply: Bool) {
         let proc = Process()
         proc.executableURL = URL(fileURLWithPath: nodePath)
         // Give the child the login-shell PATH instead of the bare launchd one a
@@ -718,7 +743,7 @@ final class TaskRun {
         proc.arguments = Self.arguments(
             scriptPath: scriptURL.path, projectPath: projectPath, taskID: taskID,
             mode: mode, description: description, deep: deep, keep: keep,
-            resume: resume
+            resume: resume, apply: apply
         )
 
         let stdoutPipe = Pipe()
@@ -1493,12 +1518,20 @@ final class TaskRunner {
 
     /// Asks `question` about the plan: appends a pending turn and launches one
     /// `.discuss` run that resumes the thread's session. The run is held by the
-    /// thread, never in `runs`, and its finish triggers no store reload/sync —
-    /// a discussion is read-only. No-op for a blank question or a busy thread.
-    func ask(projectPath: String, taskID: String, question: String) {
+    /// thread, never in `runs`.
+    ///
+    /// By default (`apply: false`) the turn is READ-ONLY: the agent is restricted
+    /// to read tools, the plan file is never changed, and the turn's finish
+    /// triggers NO store reload — `onApplied` is ignored. When `apply: true` (#114)
+    /// the turn is write-capable (the `--apply` flag reaches the process) and, on a
+    /// clean finish, `onApplied` is invoked so the caller can reload the store to
+    /// pick up any edits the agent wrote. No-op for a blank question or a busy
+    /// thread.
+    func ask(projectPath: String, taskID: String, question: String,
+             apply: Bool = false, onApplied: (() -> Void)? = nil) {
         let thread = thread(projectPath: projectPath, taskID: taskID)
         launchDiscuss(thread: thread, projectPath: projectPath, taskID: taskID,
-                      question: question)
+                      question: question, apply: apply, onApplied: onApplied)
     }
 
     /// Asks `question` about the WHOLE project (no task), launching a `.discuss`
@@ -1519,8 +1552,17 @@ final class TaskRunner {
     /// session. The run is held on `thread.activeRun`, never in `runs`, and the
     /// `discussLauncherForTesting` seam is honored. No-op for a blank question or
     /// a busy thread.
+    ///
+    /// `apply` (#114) flows straight into the `TaskRun`, so `apply: true` makes
+    /// the discuss run write-capable (`--apply`). On a clean finish of an applying
+    /// turn (`apply: true` and `taskRun.error == nil`) `onApplied` is invoked so
+    /// the caller can reconcile the store with any edits the agent wrote. A plain
+    /// read-only turn (`apply: false`) never touches `onApplied` — its finish is
+    /// reload-free, exactly as before.
     private func launchDiscuss(thread: DiscussionThread, projectPath: String,
-                               taskID: String, question: String) {
+                               taskID: String, question: String,
+                               apply: Bool = false,
+                               onApplied: (() -> Void)? = nil) {
         let trimmed = question.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
         guard !thread.isBusy else { return }
@@ -1528,7 +1570,7 @@ final class TaskRunner {
         let resume = thread.beginTurn(question: trimmed)
         guard let turnID = thread.turns.last?.id else { return }
         let taskRun = TaskRun(taskID: taskID, mode: .discuss, description: trimmed,
-                              resume: resume)
+                              resume: resume, apply: apply)
         thread.activeRun = taskRun
         taskRun.onEvent = { [weak thread, weak taskRun] event in
             guard let thread, let taskRun, thread.activeRun === taskRun else { return }
@@ -1536,8 +1578,12 @@ final class TaskRunner {
         }
         let onFinish: () -> Void = { [weak thread, weak taskRun] in
             guard let thread, let taskRun, thread.activeRun === taskRun else { return }
-            thread.completeTurn(id: turnID, error: taskRun.error)
+            let error = taskRun.error
+            thread.completeTurn(id: turnID, error: error)
             thread.activeRun = nil
+            if apply, error == nil {
+                onApplied?()
+            }
         }
         #if DEBUG
         if let launcher = discussLauncherForTesting {

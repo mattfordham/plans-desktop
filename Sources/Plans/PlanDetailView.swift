@@ -604,6 +604,12 @@ struct PlanDetailView: View {
     /// panel supplies the `.bar` background.
     private func discussFooter(_ row: TaskRow, isBusy: Bool, showsDivider: Bool) -> some View {
         let canSend = Self.canSendDiscussion(discussText, isBusy: isBusy)
+        // #114: the opt-in Apply affordance. Gated to the same quiescent,
+        // pre-execution statuses as Backlog so a write-capable turn can never fire
+        // for an in-progress / in-review / completed / blocked / backlogged plan.
+        let canApply = Self.canApplyViaDiscussion(status: row.task.status,
+                                                  isBlocked: row.task.isBlocked,
+                                                  isBacklogged: row.task.isBacklogged)
         return VStack(spacing: 0) {
             if showsDivider {
                 Divider()
@@ -615,6 +621,22 @@ struct PlanDetailView: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .disabled(isBusy)
                     .onSubmit { submitDiscussion(row) }
+
+                // #114: Apply changes — a SECOND, deliberate send that routes
+                // through the write-capable apply path. Rendered only when the plan
+                // is eligible (`canApply`); the default Send stays read-only Q&A.
+                if canApply, !Self.composerShowsStop(isBusy: isBusy) {
+                    Button {
+                        submitApplyDiscussion(row)
+                    } label: {
+                        Image(systemName: "square.and.pencil")
+                            .foregroundStyle(.secondary)
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(!canSend)
+                    .opacity(canSend ? 1 : 0.4)
+                    .help("Apply changes to this plan")
+                }
 
                 if Self.composerShowsStop(isBusy: isBusy) {
                     Button {
@@ -668,6 +690,25 @@ struct PlanDetailView: View {
         guard Self.canSendDiscussion(discussText, isBusy: isBusy),
               let text = Self.discussSubmission(discussText) else { return }
         runner.ask(projectPath: row.projectPath, taskID: row.task.id, question: text)
+        discussText = ""
+    }
+
+    /// #114: the APPLYING variant of `submitDiscussion`. Routes the same question
+    /// through the write-capable apply path (`apply: true`) and reloads the store
+    /// once the turn finishes cleanly, so edits the agent wrote show up. Guarded by
+    /// the same `canApplyViaDiscussion` gate the Apply control renders behind (so a
+    /// stale Return/click can't fire for a now-ineligible plan), plus the usual
+    /// blank-input / busy guard. Unlike `submitDiscussion`, this deliberately opts
+    /// into mutation — it is only reachable from the explicit Apply control.
+    private func submitApplyDiscussion(_ row: TaskRow) {
+        guard Self.canApplyViaDiscussion(status: row.task.status,
+                                         isBlocked: row.task.isBlocked,
+                                         isBacklogged: row.task.isBacklogged) else { return }
+        let isBusy = runner.discussion(projectPath: row.projectPath, taskID: row.task.id)?.isBusy ?? false
+        guard Self.canSendDiscussion(discussText, isBusy: isBusy),
+              let text = Self.discussSubmission(discussText) else { return }
+        runner.ask(projectPath: row.projectPath, taskID: row.task.id, question: text,
+                   apply: true, onApplied: { [store] in store.reload() })
         discussText = ""
     }
 
@@ -1276,6 +1317,30 @@ struct PlanDetailView: View {
     /// following `canDelete`'s reasoning rather than `canWork`'s.
     static func canBacklog(status: TaskStatus?, isBlocked: Bool) -> Bool {
         status == .pending || status == .elaborated
+    }
+
+    /// Pure predicate for the "Apply changes" discuss control's availability
+    /// (#114), gated to `pending` / `elaborated` ONLY and withheld on blocked /
+    /// backlogged plans.
+    ///
+    /// This mirrors `canBacklog`'s SAFETY reasoning. A read-only discuss turn can
+    /// happen at any status, but an *applying* turn is write-capable — it can edit
+    /// and commit the plan file — so it must never be reachable from an
+    /// `in-progress` / `in-review` task (where it could disturb active work) or a
+    /// `completed` one (where there is nothing to re-shape). Restricting it to the
+    /// two quiescent, pre-execution statuses means no single in-app action can
+    /// touch a live or finished plan.
+    ///
+    /// `nil` is excluded because an undecodable status is not known to be safe.
+    /// Unlike `canBacklog`, a `blocked` plan is withheld too: applying edits is a
+    /// write action, so it follows the work gates rather than the deferral ones.
+    /// A `backlogged` plan is withheld as well — parked plans offer Restore and
+    /// read-only actions only.
+    static func canApplyViaDiscussion(status: TaskStatus?, isBlocked: Bool,
+                                      isBacklogged: Bool) -> Bool {
+        guard !isBacklogged else { return false }
+        guard !isBlocked else { return false }
+        return status == .pending || status == .elaborated
     }
 
     /// Pure predicate for the "Restore" action's availability (#077 follow-up).

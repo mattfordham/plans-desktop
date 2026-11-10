@@ -554,6 +554,62 @@ final class PlanDetailViewTests: XCTestCase {
         }
     }
 
+    // MARK: - PlanDetailView.canApplyViaDiscussion (#114 — apply-changes gating)
+
+    /// Applying edits via discussion is gated to `pending` / `elaborated` ONLY,
+    /// mirroring `canBacklog`'s SAFETY reasoning: an applying turn is write-capable
+    /// and can commit changes to the plan file, so it must never be reachable from
+    /// an in-progress / in-review / completed plan where a single in-app action
+    /// could disturb active or finished work. Those statuses — and an undecodable
+    /// `nil` status, which is not known to be safe — are withheld.
+    @MainActor
+    func testCanApplyViaDiscussionOnlyForPendingAndElaborated() {
+        XCTAssertTrue(PlanDetailView.canApplyViaDiscussion(status: .pending,
+                                                           isBlocked: false,
+                                                           isBacklogged: false))
+        XCTAssertTrue(PlanDetailView.canApplyViaDiscussion(status: .elaborated,
+                                                           isBlocked: false,
+                                                           isBacklogged: false))
+
+        for status in [TaskStatus.inProgress, .review, .inReview, .completed] {
+            XCTAssertFalse(
+                PlanDetailView.canApplyViaDiscussion(status: status,
+                                                     isBlocked: false,
+                                                     isBacklogged: false),
+                "Apply-via-discussion must stay hidden for \(status.rawValue) — "
+                    + "its applying turn could disturb active or finished work"
+            )
+        }
+        XCTAssertFalse(PlanDetailView.canApplyViaDiscussion(status: nil,
+                                                            isBlocked: false,
+                                                            isBacklogged: false))
+    }
+
+    /// A blocked plan never offers the Apply control: unlike Backlog (where being
+    /// blocked is a reason to park), applying edits to a blocked plan is withheld,
+    /// matching the other write-capable gates.
+    @MainActor
+    func testCanApplyViaDiscussionFalseWhenBlocked() {
+        XCTAssertFalse(PlanDetailView.canApplyViaDiscussion(status: .pending,
+                                                            isBlocked: true,
+                                                            isBacklogged: false))
+        XCTAssertFalse(PlanDetailView.canApplyViaDiscussion(status: .elaborated,
+                                                            isBlocked: true,
+                                                            isBacklogged: false))
+    }
+
+    /// A backlogged plan never offers the Apply control: parked plans get Restore
+    /// and read-only actions only, never a write-capable discuss turn.
+    @MainActor
+    func testCanApplyViaDiscussionFalseWhenBacklogged() {
+        XCTAssertFalse(PlanDetailView.canApplyViaDiscussion(status: .pending,
+                                                            isBlocked: false,
+                                                            isBacklogged: true))
+        XCTAssertFalse(PlanDetailView.canApplyViaDiscussion(status: .elaborated,
+                                                            isBlocked: false,
+                                                            isBacklogged: true))
+    }
+
     // MARK: - PlanDetailView.discussSubmission (#099 — submit-enable/trim)
 
     /// An empty question yields `nil`, so the send button stays disabled.

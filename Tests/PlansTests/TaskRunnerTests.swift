@@ -400,6 +400,52 @@ final class TaskRunnerTests: XCTestCase {
         ])
     }
 
+    func testArgumentsForDiscussWithApplyEmitsApplyAfterMode() {
+        let args = TaskRun.arguments(
+            scriptPath: "/b/run-task.js", projectPath: "/proj", taskID: "099",
+            mode: .discuss, description: "apply it", deep: false, keep: false,
+            resume: nil, apply: true
+        )
+        XCTAssertEqual(args, [
+            "/b/run-task.js", "--project-root", "/proj",
+            "--task-id", "099", "--description", "apply it", "--mode", "discuss",
+            "--apply",
+        ])
+    }
+
+    func testArgumentsForDiscussWithApplyAndResumeEmitsApplyBeforeResume() {
+        let args = TaskRun.arguments(
+            scriptPath: "/b/run-task.js", projectPath: "/proj", taskID: "099",
+            mode: .discuss, description: "apply it", deep: false, keep: false,
+            resume: "sess-1", apply: true
+        )
+        XCTAssertEqual(args, [
+            "/b/run-task.js", "--project-root", "/proj",
+            "--task-id", "099", "--description", "apply it", "--mode", "discuss",
+            "--apply", "--resume", "sess-1",
+        ])
+    }
+
+    func testArgumentsForDiscussWithoutApplyOmitsApply() {
+        let args = TaskRun.arguments(
+            scriptPath: "/b/run-task.js", projectPath: "/proj", taskID: "099",
+            mode: .discuss, description: "why?", deep: false, keep: false,
+            resume: nil, apply: false
+        )
+        XCTAssertFalse(args.contains("--apply"), "default discuss must omit --apply")
+    }
+
+    func testArgumentsIgnoreApplyForNonDiscussModes() {
+        for mode in [RunMode.execute, .elaborate, .reElaborate] {
+            let args = TaskRun.arguments(
+                scriptPath: "/s", projectPath: "/p", taskID: "1",
+                mode: mode, description: "d", deep: false, keep: false,
+                resume: nil, apply: true
+            )
+            XCTAssertFalse(args.contains("--apply"), "\(mode) must not pass --apply")
+        }
+    }
+
     func testArgumentsForDiscussWithResumeAppendResumeAfterMode() {
         let args = TaskRun.arguments(
             scriptPath: "/b/run-task.js", projectPath: "/proj", taskID: "099",

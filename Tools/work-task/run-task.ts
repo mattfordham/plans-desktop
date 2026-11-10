@@ -146,6 +146,16 @@ interface Args {
    * instead of the first-turn `/plan-discuss` prompt.
    */
   resume?: string;
+  /**
+   * Optional (#114), `discuss` only — and only meaningful for a PER-PLAN
+   * discuss (a non-empty task id). When true this per-plan discuss turn is
+   * APPLY-enabled: the runner swaps its read-only discuss prompt for one that
+   * PERMITS applying the agreed change to this plan's file via `plan-discuss`,
+   * and swaps the read-only allowlist for a write-capable one. The DEFAULT
+   * discuss path (apply undefined/false) stays byte-for-byte read-only.
+   * Orthogonal to `mode`; ignored outside discuss.
+   */
+  apply?: boolean;
 }
 
 /** Emit one NDJSON line on stdout. Never pretty-printed. */
@@ -167,6 +177,9 @@ function parseArgs(argv: string[]): Args | null {
   let deep = false;
   // #078: valueless flag requesting the worktree be kept after execute. Orthogonal to mode.
   let keep = false;
+  // #114: valueless flag opting a per-plan discuss turn OUT of read-only, so it may
+  // apply the agreed change. Only meaningful alongside `--mode discuss`.
+  let apply = false;
   let resume: string | undefined;
 
   for (let i = 0; i < argv.length; i++) {
@@ -188,6 +201,9 @@ function parseArgs(argv: string[]): Args | null {
     } else if (arg === "--keep") {
       // Valueless flag — do NOT consume the following argv token.
       keep = true;
+    } else if (arg === "--apply") {
+      // Valueless flag — do NOT consume the following argv token.
+      apply = true;
     } else if (arg === "--mode") {
       const value = argv[++i];
       if (
@@ -252,7 +268,7 @@ function parseArgs(argv: string[]): Args | null {
     if (!description) {
       return null;
     }
-    return { projectRoot, taskId, mode, description, deep, keep, resume };
+    return { projectRoot, taskId, mode, description, deep, keep, resume, apply };
   }
 
   // execute / elaborate / reElaborateReview / delete / backlog / restore operate
@@ -856,6 +872,66 @@ function buildDiscussFollowUpPrompt(taskId: string, question: string): string {
   ].join("\n");
 }
 
+/**
+ * APPLY-enabled variant of `buildDiscussPrompt` (#114). Used for a PER-PLAN
+ * discuss turn launched with `--apply`: instead of forbidding edits, it tells
+ * the agent it MAY apply the agreed change to THIS plan's file via
+ * `plan-discuss` when the user's message asks for it. Everything else matches
+ * the read-only prompt — the run is still unattended, so the agent works fully
+ * autonomously and asks no questions.
+ *
+ * Scoped to a single task only: the apply feature is per-plan, so `taskId` is
+ * always non-empty here (the whole-project/backlog discuss never applies).
+ */
+function buildApplyDiscussPrompt(taskId: string, description: string): string {
+  return [
+    `Use the \`plan-discuss\` skill to discuss the plans-cc task with id ${taskId}:`,
+    "",
+    `/plan-discuss ${taskId}`,
+    "",
+    `The user has sent the following message about this plan — respond to it:`,
+    "",
+    `"""`,
+    description,
+    `"""`,
+    "",
+    "Requirements:",
+    "1. If (and only if) the user's message asks you to change this plan, you MAY",
+    "   apply the agreed change to THIS plan's file via `plan-discuss`. If the",
+    "   message is only a question, answer it and leave the plan file untouched —",
+    "   do not make edits that were not requested. Only ever touch this single",
+    `   plan's file (task ${taskId}); never any other task's file.`,
+    "2. Work fully autonomously. Do NOT ask the user any questions — there is no",
+    "   interactive UI to answer them. Research the codebase and the plan as",
+    "   needed, then apply the change or answer as appropriate.",
+    "",
+    "Work autonomously to completion. Do not ask for confirmation.",
+  ].join("\n");
+}
+
+/**
+ * APPLY-enabled variant of `buildDiscussFollowUpPrompt` (#114), sent into a
+ * resumed session for a per-plan apply discuss. The session already holds the
+ * `/plan-discuss` context; this carries the new message plus the same
+ * may-apply / no-questions constraints, restated every turn so they can't
+ * drift. Per-plan only, so `taskId` is always non-empty.
+ */
+function buildApplyDiscussFollowUpPrompt(taskId: string, question: string): string {
+  return [
+    `Follow-up message about plans-cc task ${taskId}:`,
+    "",
+    `"""`,
+    question,
+    `"""`,
+    "",
+    "Reminder: if the message asks you to change this plan, you MAY apply the",
+    `agreed change to THIS plan's file (task ${taskId}) via \`plan-discuss\`;`,
+    "otherwise just answer and leave the plan untouched. Never touch any other",
+    "task's file. Work fully autonomously and do NOT ask the user any questions —",
+    "there is no interactive UI to answer them.",
+  ].join("\n");
+}
+
 function buildPrompt(args: Args): string {
   if (args.mode === "capture") {
     return buildCapturePrompt(args.description ?? "");
@@ -897,6 +973,15 @@ function buildPrompt(args: Args): string {
     return buildRestorePrompt(args.taskId ?? "");
   }
   if (args.mode === "discuss") {
+    // #114: an apply-enabled per-plan discuss swaps the read-only prompt for one
+    // that PERMITS applying the agreed change, honoring the same resume/first-turn
+    // split as the read-only branch. The default (non-apply) discuss is unchanged.
+    if (args.apply) {
+      if (args.resume) {
+        return buildApplyDiscussFollowUpPrompt(args.taskId ?? "", args.description ?? "");
+      }
+      return buildApplyDiscussPrompt(args.taskId ?? "", args.description ?? "");
+    }
     if (args.resume) {
       return buildDiscussFollowUpPrompt(args.taskId ?? "", args.description ?? "");
     }
@@ -1142,15 +1227,22 @@ async function main(): Promise<void> {
     // entry doesn't appear twice.
     // Discuss is the exception: it uses its own fixed read-only allowlist and
     // ignores the config extensions entirely.
+    // #114: an APPLY-enabled per-plan discuss (`isApplyDiscuss`) is the one
+    // discuss variant that is write-capable — it reuses the SAME base+extra
+    // allowlist as the non-discuss lifecycle path (which already includes the
+    // write tools and `Skill`) and applies NO disallowed block, so the agent can
+    // edit this plan's file via `plan-discuss`. The DEFAULT (read-only) discuss
+    // branch below is left byte-for-byte unchanged.
     const isDiscuss = args.mode === "discuss";
-    const allowedTools = isDiscuss
-      ? DISCUSS_ALLOWED_TOOLS
-      : Array.from(
-          new Set([
-            ...BASE_ALLOWED_TOOLS,
-            ...readExtraAllowedTools(args.projectRoot),
-          ]),
-        );
+    const isApplyDiscuss = isDiscuss && !!args.apply;
+    const baseExtraAllowed = Array.from(
+      new Set([
+        ...BASE_ALLOWED_TOOLS,
+        ...readExtraAllowedTools(args.projectRoot),
+      ]),
+    );
+    const allowedTools =
+      isDiscuss && !isApplyDiscuss ? DISCUSS_ALLOWED_TOOLS : baseExtraAllowed;
 
     const response = query({
       prompt: buildPrompt(args),
@@ -1159,7 +1251,9 @@ async function main(): Promise<void> {
         permissionMode: "acceptEdits",
         maxBudgetUsd: isDiscuss ? DISCUSS_MAX_BUDGET_USD : MAX_BUDGET_USD,
         allowedTools,
-        ...(isDiscuss ? { disallowedTools: DISCUSS_DISALLOWED_TOOLS } : {}),
+        ...(isDiscuss && !isApplyDiscuss
+          ? { disallowedTools: DISCUSS_DISALLOWED_TOOLS }
+          : {}),
         ...(args.resume ? { resume: args.resume } : {}),
       },
     });
