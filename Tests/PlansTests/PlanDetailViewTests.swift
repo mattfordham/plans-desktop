@@ -556,58 +556,67 @@ final class PlanDetailViewTests: XCTestCase {
 
     // MARK: - PlanDetailView.canApplyViaDiscussion (#114 — apply-changes gating)
 
-    /// Applying edits via discussion is gated to `pending` / `elaborated` ONLY,
-    /// mirroring `canBacklog`'s SAFETY reasoning: an applying turn is write-capable
-    /// and can commit changes to the plan file, so it must never be reachable from
-    /// an in-progress / in-review / completed plan where a single in-app action
-    /// could disturb active or finished work. Those statuses — and an undecodable
-    /// `nil` status, which is not known to be safe — are withheld.
+    /// Applying edits via discussion is permitted for the active and
+    /// pre-execution statuses — `pending`, `elaborated`, `in-progress`,
+    /// `review`, `in-review` — so a user can reshape a live plan in flight (#115).
+    /// It is withheld only for `completed` (a finished plan has nothing to
+    /// re-shape; reopen is the path) and an undecodable `nil` status (not known
+    /// to be safe). The applying turn is write-capable but is a deliberate,
+    /// explicit second control routing through `plan-discuss`, scoped to the
+    /// single selected plan.
     @MainActor
-    func testCanApplyViaDiscussionOnlyForPendingAndElaborated() {
-        XCTAssertTrue(PlanDetailView.canApplyViaDiscussion(status: .pending,
-                                                           isBlocked: false,
-                                                           isBacklogged: false))
-        XCTAssertTrue(PlanDetailView.canApplyViaDiscussion(status: .elaborated,
-                                                           isBlocked: false,
-                                                           isBacklogged: false))
-
-        for status in [TaskStatus.inProgress, .review, .inReview, .completed] {
-            XCTAssertFalse(
+    func testCanApplyViaDiscussionPermittedForActiveStatuses() {
+        for status in [TaskStatus.pending, .elaborated, .inProgress, .review, .inReview] {
+            XCTAssertTrue(
                 PlanDetailView.canApplyViaDiscussion(status: status,
                                                      isBlocked: false,
                                                      isBacklogged: false),
-                "Apply-via-discussion must stay hidden for \(status.rawValue) — "
-                    + "its applying turn could disturb active or finished work"
+                "Apply-via-discussion must be offered for \(status.rawValue) — "
+                    + "the user can reshape an active plan via discussion"
             )
         }
+
+        XCTAssertFalse(
+            PlanDetailView.canApplyViaDiscussion(status: .completed,
+                                                 isBlocked: false,
+                                                 isBacklogged: false),
+            "Apply-via-discussion must stay hidden for completed — "
+                + "a finished plan has nothing to re-shape"
+        )
         XCTAssertFalse(PlanDetailView.canApplyViaDiscussion(status: nil,
                                                             isBlocked: false,
                                                             isBacklogged: false))
     }
 
-    /// A blocked plan never offers the Apply control: unlike Backlog (where being
-    /// blocked is a reason to park), applying edits to a blocked plan is withheld,
-    /// matching the other write-capable gates.
+    /// A blocked plan never offers the Apply control, regardless of status: the
+    /// `isBlocked` guard is a cross-cutting gate that wins even for the newly
+    /// permitted active statuses (`in-progress` / `review` / `in-review`).
     @MainActor
     func testCanApplyViaDiscussionFalseWhenBlocked() {
-        XCTAssertFalse(PlanDetailView.canApplyViaDiscussion(status: .pending,
-                                                            isBlocked: true,
-                                                            isBacklogged: false))
-        XCTAssertFalse(PlanDetailView.canApplyViaDiscussion(status: .elaborated,
-                                                            isBlocked: true,
-                                                            isBacklogged: false))
+        for status in [TaskStatus.pending, .elaborated, .inProgress, .review, .inReview] {
+            XCTAssertFalse(
+                PlanDetailView.canApplyViaDiscussion(status: status,
+                                                     isBlocked: true,
+                                                     isBacklogged: false),
+                "Apply-via-discussion must stay hidden when blocked — status \(status.rawValue)"
+            )
+        }
     }
 
-    /// A backlogged plan never offers the Apply control: parked plans get Restore
-    /// and read-only actions only, never a write-capable discuss turn.
+    /// A backlogged plan never offers the Apply control, regardless of status:
+    /// parked plans get Restore and read-only actions only. The `isBacklogged`
+    /// guard is cross-cutting and wins even for the newly permitted active
+    /// statuses (`in-progress` / `review` / `in-review`).
     @MainActor
     func testCanApplyViaDiscussionFalseWhenBacklogged() {
-        XCTAssertFalse(PlanDetailView.canApplyViaDiscussion(status: .pending,
-                                                            isBlocked: false,
-                                                            isBacklogged: true))
-        XCTAssertFalse(PlanDetailView.canApplyViaDiscussion(status: .elaborated,
-                                                            isBlocked: false,
-                                                            isBacklogged: true))
+        for status in [TaskStatus.pending, .elaborated, .inProgress, .review, .inReview] {
+            XCTAssertFalse(
+                PlanDetailView.canApplyViaDiscussion(status: status,
+                                                     isBlocked: false,
+                                                     isBacklogged: true),
+                "Apply-via-discussion must stay hidden when backlogged — status \(status.rawValue)"
+            )
+        }
     }
 
     // MARK: - PlanDetailView.discussSubmission (#099 — submit-enable/trim)
