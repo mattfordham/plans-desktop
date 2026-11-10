@@ -149,6 +149,46 @@ final class TaskParserTests: XCTestCase {
         XCTAssertFalse(task.isKeptWorktree)
     }
 
+    // MARK: - Single-file: worktreePath (#083)
+
+    /// The `**Worktree:**` PATH is retained (not just the kept boolean) so the
+    /// guided-review open-in actions can target the kept worktree directory.
+    func testWorktreePathRetainedWhenFieldPresent() {
+        let text = """
+        # Title
+
+        **ID:** 007
+        **Status:** review
+        **Worktree:** /Users/x/.worktrees/007-x
+        """
+        let task = TaskParser().parse(filename: "007-x.md", text: text, isCompletedDir: false)
+        XCTAssertEqual(task.worktreePath, "/Users/x/.worktrees/007-x")
+    }
+
+    /// An absent `**Worktree:**` field yields a `nil` path.
+    func testWorktreePathNilWhenFieldAbsent() {
+        let task = TaskParser().parse(
+            filename: "008-x.md",
+            text: "# Title only",
+            isCompletedDir: false
+        )
+        XCTAssertNil(task.worktreePath)
+    }
+
+    /// A present-but-empty `**Worktree:**` field yields a `nil` path (parity with
+    /// `isKeptWorktree == false`).
+    func testWorktreePathNilWhenFieldEmpty() {
+        let text = """
+        # Title
+
+        **ID:** 009
+        **Status:** review
+        **Worktree:**
+        """
+        let task = TaskParser().parse(filename: "009-x.md", text: text, isCompletedDir: false)
+        XCTAssertNil(task.worktreePath)
+    }
+
     // MARK: - Single-file: showsKeptWorktreeMarker (#086)
 
     func testShowsKeptWorktreeMarkerTrueWhenKeptAndReview() {

@@ -146,6 +146,13 @@ struct Task: Equatable {
     /// `review` / `in-review` tasks.
     let isKeptWorktree: Bool
 
+    /// The raw `**Worktree:**` path (#083), retained so the guided-review
+    /// open-in-Terminal / open-in-Editor actions can target the kept worktree
+    /// directory for a `kept` review. `nil` when the field is absent or its value
+    /// is empty — the same condition that sets `isKeptWorktree` to `false`. Unlike
+    /// `isKeptWorktree` (a presence boolean) this keeps the actual path string.
+    let worktreePath: String?
+
     /// The ids parsed from `**Blocked by:**` (split on whitespace and commas;
     /// only tokens matching `^#?([0-9]{3}|[1-9][0-9]{3,})$` are kept, `#`
     /// stripped). Empty when the field is absent or lists nothing valid.
@@ -207,6 +214,7 @@ struct Task: Equatable {
         created: String?,
         branch: String?,
         isKeptWorktree: Bool,
+        worktreePath: String? = nil,
         blockedBy: [String],
         sections: [TaskSection],
         howProgress: (done: Int, total: Int),
@@ -223,6 +231,7 @@ struct Task: Equatable {
         self.created = created
         self.branch = branch
         self.isKeptWorktree = isKeptWorktree
+        self.worktreePath = worktreePath
         self.blockedBy = blockedBy
         self.sections = sections
         self.howProgress = howProgress
@@ -256,6 +265,7 @@ struct Task: Equatable {
             && lhs.created == rhs.created
             && lhs.branch == rhs.branch
             && lhs.isKeptWorktree == rhs.isKeptWorktree
+            && lhs.worktreePath == rhs.worktreePath
             && lhs.blockedBy == rhs.blockedBy
             && lhs.sections == rhs.sections
             && lhs.howProgress.done == rhs.howProgress.done
@@ -716,6 +726,7 @@ struct TaskParser {
             created: task.created,
             branch: task.branch,
             isKeptWorktree: task.isKeptWorktree,
+            worktreePath: task.worktreePath,
             blockedBy: task.blockedBy,
             sections: task.sections,
             howProgress: task.howProgress,
@@ -826,6 +837,11 @@ struct TaskParser {
         // stripped/blank `**Worktree:**` (value trimmed to "") is NOT kept.
         // (`frontmatterValue` already returns the trimmed value.)
         let isKeptWorktree = !(worktreeRaw ?? "").isEmpty
+        // #083: retain the actual path too (not just the boolean) so the
+        // open-in-Terminal / open-in-Editor review actions can target the kept
+        // worktree. `nil` when the field is absent or trimmed to empty — exactly
+        // when `isKeptWorktree` is false.
+        let worktreePath: String? = isKeptWorktree ? worktreeRaw : nil
 
         let blockedBy = Self.parseBlockedBy(blockedByRaw)
 
@@ -840,6 +856,7 @@ struct TaskParser {
             created: createdRaw,
             branch: branchRaw,
             isKeptWorktree: isKeptWorktree,
+            worktreePath: worktreePath,
             blockedBy: blockedBy,
             sections: sections,
             howProgress: howProgress,

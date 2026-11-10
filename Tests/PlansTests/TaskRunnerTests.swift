@@ -2439,4 +2439,169 @@ final class TaskRunnerTests: XCTestCase {
         XCTAssertNil(runner.projectThread(projectPath: "/p"))
         XCTAssertTrue(runner.discussions.isEmpty)
     }
+
+    // MARK: - #083 review mode: RunMode shape
+
+    func testReviewModeFlags() {
+        XCTAssertTrue(RunMode.review.usesTaskID, "review names an existing task")
+        XCTAssertFalse(RunMode.review.usesDescription,
+                       "review carries no --description; Q&A flows over stdin")
+        XCTAssertEqual(RunMode.review.activityVerb, "Reviewing")
+    }
+
+    // MARK: - #083 review mode: .question decoding
+
+    @MainActor
+    func testDecodesQuestionViaIngest() {
+        let run = TaskRun(taskID: "083", mode: .review)
+        let json = #"{"kind":"question","toolUseId":"tu-1","questions":[{"question":"Does the toolbar look right?","header":"Observation 1","multiSelect":false,"options":[{"label":"Looks good","description":"Matches the plan"},{"label":"Something's wrong","description":"Describe it"}]}]}"#
+        run.ingestForTesting(json + "\n")
+
+        guard case let .question(toolUseId, questions) = run.lines.last?.event else {
+            return XCTFail("expected .question, got \(String(describing: run.lines.last?.event))")
+        }
+        XCTAssertEqual(toolUseId, "tu-1")
+        XCTAssertEqual(questions.count, 1)
+        XCTAssertEqual(questions[0].question, "Does the toolbar look right?")
+        XCTAssertEqual(questions[0].header, "Observation 1")
+        XCTAssertFalse(questions[0].multiSelect)
+        XCTAssertEqual(questions[0].options.map(\.label),
+                       ["Looks good", "Something's wrong"])
+    }
+
+    /// `multiSelect` defaults to false when absent from the wire shape.
+    @MainActor
+    func testQuestionMultiSelectDefaultsFalse() {
+        let run = TaskRun(taskID: "083", mode: .review)
+        let json = #"{"kind":"question","toolUseId":"tu-2","questions":[{"question":"Q","header":"H","options":[{"label":"A"}]}]}"#
+        run.ingestForTesting(json + "\n")
+        guard case let .question(_, questions) = run.lines.last?.event else {
+            return XCTFail("expected .question")
+        }
+        XCTAssertFalse(questions[0].multiSelect,
+                       "absent multiSelect must decode as false")
+    }
+
+    /// A `.question` line split across two ingest chunks (partial-line case,
+    /// mirroring the captured/reply split tests) still decodes once complete.
+    @MainActor
+    func testQuestionDecodesWhenSplitAcrossChunks() {
+        let run = TaskRun(taskID: "083", mode: .review)
+        run.ingestForTesting(#"{"kind":"question","toolUseId":"tu-3","questi"#)
+        XCTAssertNil(run.lines.last, "no complete line yet")
+        run.ingestForTesting(#"ons":[{"question":"Q","header":"H","options":[{"label":"A"}]}]}"# + "\n")
+        guard case let .question(toolUseId, _) = run.lines.last?.event else {
+            return XCTFail("expected .question after the second chunk")
+        }
+        XCTAssertEqual(toolUseId, "tu-3")
+    }
+
+    /// `.question` round-trips through encode → decode unchanged (Codable).
+    func testQuestionRoundTrips() throws {
+        let original = RunEvent.question(
+            toolUseId: "tu-4",
+            questions: [
+                ReviewQuestion(
+                    question: "Q", header: "H", multiSelect: true,
+                    options: [ReviewQuestionOption(label: "A", description: "d", preview: "p")]
+                )
+            ]
+        )
+        let data = try JSONEncoder().encode(original)
+        let decoded = try JSONDecoder().decode(RunEvent.self, from: data)
+        XCTAssertEqual(decoded, original)
+    }
+
+    // MARK: - #083 review mode: argument shape
+
+    func testArgumentsForReviewKept() {
+        let args = TaskRun.arguments(
+            scriptPath: "/b/run-task.js", projectPath: "/proj", taskID: "083",
+            mode: .review, description: nil, deep: false, keep: false,
+            resume: nil, reviewLocation: .kept
+        )
+        XCTAssertEqual(args, [
+            "/b/run-task.js", "--project-root", "/proj",
+            "--task-id", "083", "--mode", "review", "--review-location", "kept",
+        ])
+    }
+
+    func testArgumentsForReviewWorktreeAndMain() {
+        for loc in [ReviewLocation.worktree, .main] {
+            let args = TaskRun.arguments(
+                scriptPath: "/s", projectPath: "/p", taskID: "1",
+                mode: .review, description: nil, deep: false, keep: false,
+                resume: nil, reviewLocation: loc
+            )
+            XCTAssertEqual(args, [
+                "/s", "--project-root", "/p",
+                "--task-id", "1", "--mode", "review", "--review-location", loc.rawValue,
+            ])
+        }
+    }
+
+    /// A non-review mode never emits `--review-location`, even if a location is
+    /// passed (it defaults nil for every existing call site).
+    func testArgumentsIgnoreReviewLocationForNonReviewModes() {
+        let args = TaskRun.arguments(
+            scriptPath: "/s", projectPath: "/p", taskID: "1",
+            mode: .execute, description: nil, deep: false, keep: false,
+            resume: nil, reviewLocation: .kept
+        )
+        XCTAssertFalse(args.contains("--review-location"),
+                       "execute must not pass --review-location")
+    }
+
+    // MARK: - #083 review mode: stdin pipe + pendingQuestion + answer
+
+    /// The review-only stdin pipe is created for a `.review` run and left nil for
+    /// every other mode.
+    @MainActor
+    func testStandardInputPipeCreatedOnlyForReview() {
+        let reviewRun = TaskRun(taskID: "083", mode: .review)
+        reviewRun.makeStandardInputForTesting()
+        XCTAssertNotNil(reviewRun.standardInputForTesting,
+                        "review run gets a stdin pipe")
+
+        let executeRun = TaskRun(taskID: "019", mode: .execute)
+        executeRun.makeStandardInputForTesting()
+        XCTAssertNil(executeRun.standardInputForTesting,
+                     "non-review run never gets a stdin pipe")
+    }
+
+    /// A `.question` event sets `pendingQuestion`; `finish` clears it.
+    @MainActor
+    func testPendingQuestionSetOnQuestionAndClearedOnFinish() {
+        let run = TaskRun(taskID: "083", mode: .review, outcomeLog: tempOutcomeLog())
+        run.markRunningForTesting(projectPath: "/proj")
+        let json = #"{"kind":"question","toolUseId":"tu-9","questions":[{"question":"Q","header":"H","options":[{"label":"A"}]}]}"#
+        run.ingestForTesting(json + "\n")
+        XCTAssertEqual(run.pendingQuestion?.toolUseId, "tu-9")
+
+        run.finishForTesting(projectPath: "/proj")
+        XCTAssertNil(run.pendingQuestion, "finish must clear the pending question")
+    }
+
+    /// `answer(...)` serializes exactly one NDJSON line matching the wire shape.
+    func testAnswerSerialization() throws {
+        let line = TaskRun.answerLine(toolUseId: "tu-7",
+                                      answers: ["Observation 1": "Looks good"])
+        XCTAssertTrue(line.hasSuffix("\n"), "answer line must be newline-terminated")
+        let obj = try JSONSerialization.jsonObject(
+            with: Data(line.utf8)) as? [String: Any]
+        XCTAssertEqual(obj?["kind"] as? String, "answer")
+        XCTAssertEqual(obj?["toolUseId"] as? String, "tu-7")
+        let answers = obj?["answers"] as? [String: String]
+        XCTAssertEqual(answers?["Observation 1"], "Looks good")
+    }
+
+    /// The `TaskRunner.review(...)` launcher keys a `.review` run the normal way.
+    @MainActor
+    func testReviewLauncherKeysRunNormally() {
+        let runner = TaskRunner()
+        runner.review(projectPath: "/proj", taskID: "083", location: .worktree)
+        let run = runner.run(for: "083", in: "/proj")
+        XCTAssertNotNil(run, "review run is keyed in runs like any other")
+        XCTAssertEqual(run?.mode, .review)
+    }
 }

@@ -108,9 +108,28 @@ struct PlanRowActions: View {
             }
     }
 
+    /// Whether this row's run is a guided review PARKED on a question (#083): a
+    /// needs-input signal so a review the user navigated away from isn't lost. The
+    /// gate comes from the pure `PlanDetailView.reviewNeedsInput` helper.
+    private var reviewNeedsInput: Bool {
+        guard let run = runner.run(for: row.task.id, in: row.projectPath) else { return false }
+        return PlanDetailView.reviewNeedsInput(hasPendingQuestion: run.pendingQuestion != nil)
+    }
+
     @ViewBuilder
     private var actions: some View {
         if runner.isRunning(taskID: row.task.id, in: row.projectPath) {
+            // #083: a guided review parked on a question lights a needs-input
+            // badge beside the spinner, so the parked review is visible after
+            // switching plans. Tapping it (like the spinner) opens the progress
+            // popover; the full answer panel lives in the detail view.
+            HStack(spacing: 2) {
+                if reviewNeedsInput {
+                    Image(systemName: "questionmark.circle.fill")
+                        .imageScale(.small)
+                        .foregroundStyle(Color.accentColor)
+                        .help("This review needs your input")
+                }
             // Tapping the live spinner toggles the run's progress dialog in
             // place, anchored to the spinner, with the run's live log. The
             // `.popover` attaches to the bare spinner glyph's BOUNDS so macOS
@@ -139,6 +158,7 @@ struct PlanRowActions: View {
                     progressPopoverOpen.toggle()
                 }
                 .help("Show progress")
+            }
         } else if PlanDetailView.canRetry(failure: row.task.failure) {
             // #079: the latest run for this plan failed. Offer a Retry glyph that
             // re-runs `plan-execute` via the SAME Execute consent gate as the

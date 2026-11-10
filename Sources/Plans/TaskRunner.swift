@@ -27,6 +27,55 @@ private let runnerLog = Logger(subsystem: "com.plans.desktop", category: "TaskRu
 /// This is a pure value enum (no stored identity — Swift enums can't carry
 /// stored properties). The log list iterates `LoggedEvent` wrappers instead,
 /// which attach a fresh `UUID` per decoded line for stable SwiftUI identity.
+/// One option offered inside a guided-review `AskUserQuestion` (#083). Mirrors
+/// the SDK's option shape as it arrives over the NDJSON wire: a `label` the user
+/// picks, an optional human `description`, and an optional `preview` string the
+/// skill may attach. Decodable/Equatable so a `.question` event round-trips and
+/// so tests can assert exact payloads.
+struct ReviewQuestionOption: Codable, Equatable {
+    let label: String
+    let description: String?
+    let preview: String?
+
+    init(label: String, description: String? = nil, preview: String? = nil) {
+        self.label = label
+        self.description = description
+        self.preview = preview
+    }
+}
+
+/// One question in a guided-review `AskUserQuestion` (#083). Mirrors the wire
+/// `questions` array element: the `question` text, a short `header`, its
+/// `options`, and whether multiple options may be selected. `multiSelect`
+/// defaults to `false` when absent from the wire (the common single-select case).
+struct ReviewQuestion: Codable, Equatable {
+    let question: String
+    let header: String
+    let multiSelect: Bool
+    let options: [ReviewQuestionOption]
+
+    private enum CodingKeys: String, CodingKey {
+        case question, header, multiSelect, options
+    }
+
+    init(question: String, header: String, multiSelect: Bool = false,
+         options: [ReviewQuestionOption]) {
+        self.question = question
+        self.header = header
+        self.multiSelect = multiSelect
+        self.options = options
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        question = try container.decode(String.self, forKey: .question)
+        header = try container.decode(String.self, forKey: .header)
+        // `multiSelect` is optional on the wire; default false when absent.
+        multiSelect = try container.decodeIfPresent(Bool.self, forKey: .multiSelect) ?? false
+        options = try container.decode([ReviewQuestionOption].self, forKey: .options)
+    }
+}
+
 enum RunEvent: Codable, Equatable {
     /// A tool invocation surfaced for the live activity log.
     case activity(tool: String, detail: String?)
@@ -52,9 +101,16 @@ enum RunEvent: Codable, Equatable {
     /// directly to this id — bypassing the ambiguous baseline-diff guard when two
     /// captures overlap. The run continues (and still finishes) after reporting.
     case captured(taskID: String)
+    /// A guided-review question (#083): the `plan-review` skill reached for
+    /// `AskUserQuestion` and the runner parked it, emitting this so the Swift app
+    /// can render the choice panel. The app replies with an `answer` line on the
+    /// run's stdin, keyed by the SAME `toolUseId`, which unblocks the agent.
+    /// Emitted ONLY by a `.review` run; NON-terminal — the run keeps going once
+    /// answered.
+    case question(toolUseId: String, questions: [ReviewQuestion])
 
     private enum CodingKeys: String, CodingKey {
-        case kind, tool, detail, chunk, costUsd, turns, stopReason, message, sessionId, text, taskId
+        case kind, tool, detail, chunk, costUsd, turns, stopReason, message, sessionId, text, taskId, toolUseId, questions
     }
 
     init(from decoder: Decoder) throws {
@@ -91,6 +147,11 @@ enum RunEvent: Codable, Equatable {
             // Task #100: the launcher's reported real task id.
             let taskID = try container.decode(String.self, forKey: .taskId)
             self = .captured(taskID: taskID)
+        case "question":
+            // Task #083: a parked guided-review question.
+            let toolUseId = try container.decode(String.self, forKey: .toolUseId)
+            let questions = try container.decode([ReviewQuestion].self, forKey: .questions)
+            self = .question(toolUseId: toolUseId, questions: questions)
         default:
             // Unknown `kind`: throw a clear DecodingError. The caller
             // (`RunEvent.parseLines`) catches per-line decode failures and skips
@@ -135,6 +196,10 @@ enum RunEvent: Codable, Equatable {
         case let .captured(taskID):
             try container.encode("captured", forKey: .kind)
             try container.encode(taskID, forKey: .taskId)
+        case let .question(toolUseId, questions):
+            try container.encode("question", forKey: .kind)
+            try container.encode(toolUseId, forKey: .toolUseId)
+            try container.encode(questions, forKey: .questions)
         }
     }
 
@@ -182,6 +247,18 @@ enum RunEvent: Codable, Equatable {
 /// task's plan file (the in-app confirm having already stood in for the skill's
 /// interactive gate), deliberately KEEPING the task's git branch so a single
 /// click can never destroy commits.
+/// Where a `.review` run should inspect the work (#083). Carried on a review
+/// `TaskRun` and threaded to the Node runner's `--review-location <raw>` flag.
+/// `kept` reviews the task's kept execution worktree; `worktree` spins up a
+/// throwaway worktree off the branch; `main` reviews the main checkout. Lives
+/// here (not its own file) because it is meaningful ONLY alongside `RunMode` and
+/// the review argument builder it feeds.
+enum ReviewLocation: String {
+    case kept
+    case worktree
+    case main
+}
+
 enum RunMode: String {
     case execute
     case elaborate
@@ -196,6 +273,13 @@ enum RunMode: String {
     /// description, but it applies to a reviewed (not yet-elaborated) plan — the
     /// companion to the review-state "execute more" action.
     case reElaborateReview
+    /// Drives a GUIDED, INTERACTIVE `plan-review` of a `review`/`in-review` plan
+    /// (#083). Names an EXISTING task (so `spawn` passes `--task-id`) and carries
+    /// a `ReviewLocation` (threaded as `--review-location`), but NO description —
+    /// the question/answer exchange flows over the run's stdin pipe, not through
+    /// the prompt. The only mode whose runner parks on `AskUserQuestion` and is
+    /// unblocked by a user answer; every other mode runs fully autonomously.
+    case review
     case delete
     /// Defers a pending/elaborated task by driving `plan-backlog` to move its
     /// file from `.plans/pending/` into `.plans/backlog/` (#077 follow-up).
@@ -225,7 +309,7 @@ enum RunMode: String {
     /// can emit `--task-id` AND `--description` for them.
     var usesTaskID: Bool {
         switch self {
-        case .execute, .elaborate, .reElaborate, .reElaborateReview, .delete, .backlog, .restore, .discuss:
+        case .execute, .elaborate, .reElaborate, .reElaborateReview, .review, .delete, .backlog, .restore, .discuss:
             return true
         case .capture, .captureElaborate, .executeYolo:
             return false
@@ -260,7 +344,7 @@ enum RunMode: String {
         switch self {
         case .capture, .captureElaborate, .executeYolo, .reElaborate, .reElaborateReview, .elaborate, .execute, .discuss:
             return true
-        case .delete, .backlog, .restore:
+        case .delete, .backlog, .restore, .review:
             return false
         }
     }
@@ -275,6 +359,7 @@ extension RunMode {
         case .execute: return "Executing"
         case .elaborate: return "Elaborating"
         case .reElaborate, .reElaborateReview: return "Refining"
+        case .review: return "Reviewing"
         case .capture: return "Capturing"
         case .captureElaborate: return "Capturing & elaborating"
         case .executeYolo: return "Capturing & executing"
@@ -417,6 +502,11 @@ final class TaskRun {
     /// existing discuss call site stays byte-for-byte read-only.
     let apply: Bool
 
+    /// The review target for a `.review` run (#083), threaded to the runner's
+    /// `--review-location <raw>` flag. `nil` for every non-review mode (the
+    /// argument builder emits the flag only when mode is `.review`).
+    let reviewLocation: ReviewLocation?
+
     /// The Agent SDK session id a `.discuss` turn resumes, passed to the runner
     /// as `--resume <id>` so the agent keeps the earlier conversation's context.
     /// `nil` for a first discussion turn and for every other mode (ignored by
@@ -521,6 +611,27 @@ final class TaskRun {
     /// `done`-less nonzero exit, or a streamed `error` event's message.
     private(set) var error: String?
 
+    /// The guided-review question currently awaiting the user's answer (#083), or
+    /// `nil` when none is pending. Set when a `.question` event arrives in
+    /// `handle`, cleared when the user's answer is sent via `answer(...)` and on
+    /// `finish`. Observable so the review panel can render/hide the choice UI.
+    private(set) var pendingQuestion: PendingReviewQuestion?
+
+    /// A guided-review question paired with the `toolUseId` its answer must echo.
+    struct PendingReviewQuestion: Equatable {
+        let toolUseId: String
+        let questions: [ReviewQuestion]
+    }
+
+    /// The write end of the `.review` run's stdin pipe (#083), used by
+    /// `answer(...)` to feed the agent the user's selection. Created ONLY for a
+    /// `.review` run in `spawn`; closed in `finish`. `nil` for every other mode.
+    private var standardInput: Pipe?
+
+    /// Serial queue guarding writes to the review stdin pipe (#083) so overlapping
+    /// `answer(...)` calls can never interleave a half-written line.
+    private let answerQueue = DispatchQueue(label: "com.plans.desktop.review-answer")
+
     /// The live child process, retained so `stop()` can terminate it.
     private var process: Process?
 
@@ -548,14 +659,23 @@ final class TaskRun {
     /// state, so an observer (a discussion thread) can mirror the stream.
     var onEvent: ((RunEvent) -> Void)?
 
+    /// Ignore SIGPIPE exactly once per process (#083): a `answer(...)` write that
+    /// races the child's exit would otherwise deliver SIGPIPE and kill the whole
+    /// app. Referenced from `init` so it runs before any review run can write.
+    private static let ignoreSIGPIPE: Void = {
+        signal(SIGPIPE, SIG_IGN)
+    }()
+
     init(taskID: String, mode: RunMode, description: String? = nil,
          projectPath: String? = nil, baselineTaskIDs: Set<String> = [],
          deep: Bool = false,
          keep: Bool = false,
          resume: String? = nil,
          apply: Bool = false,
+         reviewLocation: ReviewLocation? = nil,
          outcomeLog: RunOutcomeLog = RunOutcomeLog(),
          now: @escaping () -> String = { ISO8601DateFormatter().string(from: Date()) }) {
+        _ = TaskRun.ignoreSIGPIPE
         self.taskID = taskID
         self.mode = mode
         self.description = description
@@ -565,6 +685,7 @@ final class TaskRun {
         self.keep = keep
         self.resume = resume
         self.apply = apply
+        self.reviewLocation = reviewLocation
         self.outcomeLog = outcomeLog
         self.now = now
     }
@@ -611,6 +732,7 @@ final class TaskRun {
         let keep = self.keep
         let resume = self.resume
         let apply = self.apply
+        let reviewLocation = self.reviewLocation
         _Concurrency.Task { [weak self] in
             // One login-shell lookup yields both node and the login PATH; the
             // PATH becomes the child's so `npx`-launched MCP servers resolve.
@@ -633,7 +755,7 @@ final class TaskRun {
             self.spawn(nodePath: nodePath, loginPath: loginPath, scriptURL: scriptURL,
                        projectPath: projectPath, taskID: taskID, mode: mode,
                        description: description, deep: deep, keep: keep,
-                       resume: resume, apply: apply)
+                       resume: resume, apply: apply, reviewLocation: reviewLocation)
         }
     }
 
@@ -665,7 +787,8 @@ final class TaskRun {
     nonisolated static func arguments(scriptPath: String, projectPath: String,
                                       taskID: String, mode: RunMode,
                                       description: String?, deep: Bool, keep: Bool,
-                                      resume: String?, apply: Bool = false) -> [String] {
+                                      resume: String?, apply: Bool = false,
+                                      reviewLocation: ReviewLocation? = nil) -> [String] {
         var arguments = [
             scriptPath,
             "--project-root", projectPath,
@@ -690,6 +813,12 @@ final class TaskRun {
             arguments += ["--description", description]
         }
         arguments += ["--mode", mode.rawValue]
+        // `--review-location` (#083) is a value flag emitted ONLY for `.review`,
+        // selecting the checkout the guided review inspects (kept/worktree/main).
+        // Appended immediately after `--mode` so the review argv shape is stable.
+        if mode == .review, let reviewLocation {
+            arguments += ["--review-location", reviewLocation.rawValue]
+        }
         // `--deep` (#065) is a valueless flag, ORTHOGONAL to the
         // task-id/description split above: it can accompany ANY mode's elaborate
         // pass (captureElaborate / reElaborate / elaborate). Appended AFTER
@@ -727,7 +856,7 @@ final class TaskRun {
     private func spawn(nodePath: String, loginPath: String?, scriptURL: URL,
                        projectPath: String, taskID: String, mode: RunMode,
                        description: String?, deep: Bool, keep: Bool, resume: String?,
-                       apply: Bool) {
+                       apply: Bool, reviewLocation: ReviewLocation?) {
         let proc = Process()
         proc.executableURL = URL(fileURLWithPath: nodePath)
         // Give the child the login-shell PATH instead of the bare launchd one a
@@ -743,13 +872,22 @@ final class TaskRun {
         proc.arguments = Self.arguments(
             scriptPath: scriptURL.path, projectPath: projectPath, taskID: taskID,
             mode: mode, description: description, deep: deep, keep: keep,
-            resume: resume, apply: apply
+            resume: resume, apply: apply, reviewLocation: reviewLocation
         )
 
         let stdoutPipe = Pipe()
         let stderrPipe = Pipe()
         proc.standardOutput = stdoutPipe
         proc.standardError = stderrPipe
+
+        // #083: a guided review answers `AskUserQuestion` over stdin. Only a
+        // `.review` run gets a stdin pipe; every other mode leaves `standardInput`
+        // nil (and the child inherits/ignores stdin as before).
+        if mode == .review {
+            let stdinPipe = Pipe()
+            proc.standardInput = stdinPipe
+            standardInput = stdinPipe
+        }
 
         let generation = spawnGeneration
 
@@ -934,11 +1072,65 @@ final class TaskRun {
             // like `.denied`: record it for reconciliation's live-capture hand-off
             // but do NOT touch `error` or `summary` — the run keeps running.
             reportedTaskID = taskID
+        case let .question(toolUseId, questions):
+            // Task #083: the runner parked on a guided-review question. Surface it
+            // as the pending question so the review panel can render the choices;
+            // NON-terminal — the run resumes once `answer(...)` is sent.
+            pendingQuestion = PendingReviewQuestion(toolUseId: toolUseId, questions: questions)
         case .activity, .text:
             break
         }
         onEvent?(event)
     }
+
+    /// Serializes one `answer` NDJSON line for the review stdin contract (#083).
+    /// The wire field is `toolUseId` (lowercase d), matching what the runner
+    /// reads, even though the SDK's own option is `toolUseID`. Newline-terminated
+    /// so the runner's line splitter consumes it. Pure so the shape is testable
+    /// without a pipe. Keys sorted for deterministic output.
+    nonisolated static func answerLine(toolUseId: String,
+                                       answers: [String: String]) -> String {
+        let obj: [String: Any] = [
+            "kind": "answer",
+            "toolUseId": toolUseId,
+            "answers": answers,
+        ]
+        guard let data = try? JSONSerialization.data(
+            withJSONObject: obj, options: [.sortedKeys]),
+            let json = String(data: data, encoding: .utf8) else {
+            return ""
+        }
+        return json + "\n"
+    }
+
+    /// Sends the user's answer to a parked guided-review question (#083): writes
+    /// one `answer` NDJSON line to the review stdin pipe on a private serial queue
+    /// (so overlapping sends never interleave) and clears `pendingQuestion`. A
+    /// no-op when there is no stdin pipe (non-review run or not yet spawned).
+    func answer(toolUseId: String, answers: [String: String]) {
+        pendingQuestion = nil
+        guard let handle = standardInput?.fileHandleForWriting else { return }
+        let line = Self.answerLine(toolUseId: toolUseId, answers: answers)
+        answerQueue.async {
+            // SIGPIPE is ignored process-wide (see `ignoreSIGPIPE`), so a write
+            // racing the child's exit throws rather than killing the app; swallow.
+            try? handle.write(contentsOf: Data(line.utf8))
+        }
+    }
+
+    #if DEBUG
+    /// Test seam: exposes the review-only stdin pipe so tests can assert it is
+    /// created for `.review` and nil otherwise, without spawning a process.
+    var standardInputForTesting: Pipe? { standardInput }
+
+    /// Test seam: runs the review-only stdin-pipe creation path (`spawn`'s
+    /// `mode == .review` branch) WITHOUT spawning a process. DEBUG-only.
+    func makeStandardInputForTesting() {
+        if mode == .review {
+            standardInput = Pipe()
+        }
+    }
+    #endif
 
     #if DEBUG
     /// Test seam: feeds raw NDJSON bytes through the exact private ingest path
@@ -1008,6 +1200,14 @@ final class TaskRun {
         if let error, self.error == nil { self.error = error }
         phase = nil
         isRunning = false
+        // #083: a finishing review run abandons any still-parked question and
+        // closes its stdin pipe's write end so the child (if still draining) sees
+        // EOF. Best-effort — ignore a close error on an already-torn-down handle.
+        pendingQuestion = nil
+        if let standardInput {
+            try? standardInput.fileHandleForWriting.close()
+            self.standardInput = nil
+        }
         // A discussion turn is read-only Q&A, not a lifecycle action: outcomes
         // are keyed by (project, task), so recording one would raise or mask the
         // task's failure badge.
@@ -1370,6 +1570,25 @@ final class TaskRunner {
         }
         let taskRun = TaskRun(taskID: taskID, mode: mode, description: description,
                               deep: deep, keep: keep)
+        runs[key] = taskRun
+        taskRun.start(projectPath: projectPath) { [weak self] in
+            self?.onAnyRunFinished?(projectPath)
+        }
+    }
+
+    /// Launches a GUIDED `.review` run for `taskID` in `projectPath` at
+    /// `location` (#083). Keyed in `runs` exactly like `run(...)` — a no-op if a
+    /// run for this task is already in flight — so the review surfaces as a normal
+    /// tracked run (spinner, live log) while its question/answer exchange flows
+    /// over the run's stdin pipe. Unlike `run(...)` it carries NO description and
+    /// threads the `ReviewLocation` through to the `--review-location` flag.
+    func review(projectPath: String, taskID: String, location: ReviewLocation) {
+        let key = Self.runKey(projectPath: projectPath, taskID: taskID)
+        if let existing = runs[key], existing.isRunning {
+            runnerLog.notice("review ignored: task \(taskID, privacy: .public) is already running")
+            return
+        }
+        let taskRun = TaskRun(taskID: taskID, mode: .review, reviewLocation: location)
         runs[key] = taskRun
         taskRun.start(projectPath: projectPath) { [weak self] in
             self?.onAnyRunFinished?(projectPath)

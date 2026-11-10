@@ -79,7 +79,9 @@ final class DiscussionThread {
                 setError("The agent hit its budget or turn cap before answering. Try a narrower question.",
                          at: index)
             }
-        case .text, .denied, .captured:
+        case .text, .denied, .captured, .question:
+            // `.question` (#083) is a review-only event; a discussion never
+            // produces one, so it is ignored here (present only to compile).
             break
         }
     }

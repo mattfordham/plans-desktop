@@ -904,6 +904,7 @@ final class PlansStore {
                 created: task.created,
                 branch: task.branch,
                 isKeptWorktree: task.isKeptWorktree,
+                worktreePath: task.worktreePath,
                 blockedBy: task.blockedBy,
                 sections: task.sections,
                 howProgress: task.howProgress,

@@ -158,12 +158,30 @@ struct PlanDetailView: View {
     /// that gates to the elaborated state while this gates to review.
     @State private var showReviewReElaborate = false
 
+    /// Whether the guided-"Review" sheet (#083) is presented. Raised by the
+    /// "Review" header action for a review/in-review plan (`canReview`) and
+    /// lowered by the sheet's own Cancel/Start. Drives the `ReviewModal` (built in
+    /// Step 5); for now a minimal placeholder sheet occupies the seam.
+    @State private var showReview = false
+
     /// The live text of the discussion composer. Normalized by
     /// `Self.discussSubmission(_:)` on send (empty / whitespace-only never
     /// fires) and cleared once the question is asked. Not persisted — a fresh
     /// plan opens empty since the detail column re-keys per `selectedRowID`;
     /// the conversation itself lives on the runner's `DiscussionThread`.
     @State private var discussText = ""
+
+    /// #083: the user's in-progress selection for each parked review question,
+    /// keyed by the question's `header` (unique within one `AskUserQuestion`
+    /// payload). Each value is the list of picked option labels, honouring
+    /// `multiSelect`. Cleared when the answer is sent (and naturally reset when a
+    /// new question arrives under different headers).
+    @State private var reviewSelections: [String: [String]] = [:]
+
+    /// #083: the "Other" free-text answer for each parked review question, keyed
+    /// by the question's `header`. When non-empty it is sent in place of (or
+    /// appended to) the option selection.
+    @State private var reviewOtherText: [String: String] = [:]
 
     /// The resolved row for `rowID` across all projects' active rows, or `nil`
     /// when absent. Re-derived from the live store on each render.
@@ -177,6 +195,13 @@ struct PlanDetailView: View {
             if let row {
                 let thread = runner.discussion(projectPath: row.projectPath, taskID: row.task.id)
                 let showsPanel = Self.showsConversationPanel(turnCount: thread?.turns.count ?? 0)
+                // #083: a LIVE guided-review run takes over the bottom panel,
+                // REPLACING the Discuss composer with the review panel (the
+                // discussion transcript above it stays). `reviewRun` is the live
+                // `.review` run for this task, or nil.
+                let reviewRun = Self.liveReviewRun(
+                    runner.run(for: row.task.id, in: row.projectPath))
+                let showsReview = Self.showsReviewPanel(hasLiveReviewRun: reviewRun != nil)
                 // The plan on top; below it the discussion panel — the
                 // transcript (once a question has been asked) and the composer
                 // on one `.bar` surface. With a transcript, both halves take
@@ -193,18 +218,23 @@ struct PlanDetailView: View {
                             Divider()
                             conversationTranscript(row, thread: thread)
                         }
-                        // Shown whenever the plan can be discussed (not
-                        // blocked/backlogged) — including while an
-                        // execute/elaborate run is live, since a discussion is
-                        // read-only and tracked apart from task runs.
-                        if Self.canDiscuss(status: row.task.status,
-                                           isBlocked: row.task.isBlocked,
-                                           isBacklogged: row.task.isBacklogged) {
+                        if showsReview, let reviewRun {
+                            // The review panel REPLACES the composer while the
+                            // guided review runs.
+                            Divider()
+                            reviewPanel(row, run: reviewRun)
+                        } else if Self.canDiscuss(status: row.task.status,
+                                                  isBlocked: row.task.isBlocked,
+                                                  isBacklogged: row.task.isBacklogged) {
+                            // Shown whenever the plan can be discussed (not
+                            // blocked/backlogged) — including while an
+                            // execute/elaborate run is live, since a discussion is
+                            // read-only and tracked apart from task runs.
                             discussFooter(row, isBusy: thread?.isBusy ?? false,
                                           showsDivider: !showsPanel)
                         }
                     }
-                    .frame(maxHeight: showsPanel ? .infinity : nil)
+                    .frame(maxHeight: (showsPanel || showsReview) ? .infinity : nil)
                     .background(.bar)
                 }
             } else {
@@ -285,6 +315,18 @@ struct PlanDetailView: View {
         .sheet(isPresented: $showReviewReElaborate) {
             if let row {
                 ReviewReElaborateModal(taskID: row.task.id, projectPath: row.projectPath)
+            }
+        }
+        // The guided-"Review" sheet (#083): the location picker + per-project
+        // default + read-only main-checkout preflight. Same row-resolution shape
+        // as the sheets above. The `siblings` are the project's OTHER tasks, so
+        // the modal can detect a `mainCheckoutOccupant` holding the main checkout.
+        .sheet(isPresented: $showReview) {
+            if let row {
+                ReviewModal(taskID: row.task.id,
+                            projectPath: row.projectPath,
+                            task: row.task,
+                            siblings: Self.siblingTasks(in: store.projects, row: row))
             }
         }
         // NOTE: dismissing the detail pane deliberately does NOT stop the run.
@@ -477,6 +519,25 @@ struct PlanDetailView: View {
                         }
                         .buttonStyle(.borderedProminent)
                     }
+
+                    // "Review" (guided) — opens the interactive `plan-review`
+                    // flow (#083) for a review/in-review plan. Available on the
+                    // same statuses as the review Execute/Refine above, but gated
+                    // additionally on the plan having a branch (the review needs a
+                    // checkout). Opens the `ReviewModal` (Step 5) to pick the
+                    // review location, rather than firing a run off the button.
+                    if Self.canReview(status: row.task.status,
+                                      branch: row.task.branch,
+                                      isBlocked: row.task.isBlocked,
+                                      isBacklogged: row.task.isBacklogged,
+                                      hasLiveRun: runner.isRunning(taskID: row.task.id,
+                                                                   in: row.projectPath)) {
+                        Button {
+                            showReview = true
+                        } label: {
+                            Label("Review", systemImage: "checklist")
+                        }
+                    }
                 }
 
                 Spacer(minLength: 8)
@@ -531,6 +592,264 @@ struct PlanDetailView: View {
             }
             .controlSize(.large)
         }
+    }
+
+    /// The project's OTHER tasks for `row` (#083): every task in the owning
+    /// project except the row's own, so the `ReviewModal` can compute a
+    /// `mainCheckoutOccupant`. Pure (takes the projects snapshot) so the lookup is
+    /// unit-testable without a live store; an empty result when the project is
+    /// absent from the snapshot.
+    static func siblingTasks(in projects: [ProjectTasks], row: TaskRow) -> [Task] {
+        guard let project = projects.first(where: { $0.projectPath == row.projectPath }) else {
+            return []
+        }
+        return project.tasks.filter { $0.id != row.task.id }
+    }
+
+    /// The live `.review` run for this task (#083), or `nil` when the given run is
+    /// absent, not running, or not a review run. A FINISHED review run returns
+    /// `nil` so the panel collapses back to the Discuss composer once the guided
+    /// review ends. Pure so the gate is testable without a live run.
+    static func liveReviewRun(_ run: TaskRun?) -> TaskRun? {
+        guard let run, run.isRunning, run.mode == .review else { return nil }
+        return run
+    }
+
+    /// The sentinel option label (#083) the guided review offers alongside the
+    /// skill's own choices: picking it hands the decision back to the agent
+    /// ("Resolve for me") rather than the user choosing. It is sent verbatim as
+    /// the answer value.
+    static let resolveForMeLabel = "Resolve for me"
+
+    // MARK: - Review panel (#083 guided in-app review)
+
+    /// The guided-review panel shown in place of the Discuss composer while a
+    /// `.review` run is live (#083). It keeps the discussion transcript above it,
+    /// then shows: the run transcript (reusing `RunLogContents`), the parked
+    /// question (one option button per choice INCLUDING "Resolve for me",
+    /// honouring `multiSelect`, plus an "Other" free-text field) when one is
+    /// pending, the review's final summary via `markdownBlockView` once replied,
+    /// and the open-in-Terminal / open-in-Editor actions for the review directory.
+    /// Plain stacks + `maxHeight: .infinity` only — NO GeometryReader / measured
+    /// heights (#096).
+    private func reviewPanel(_ row: TaskRow, run: TaskRun) -> some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                Image(systemName: "checklist")
+                    .foregroundStyle(.secondary)
+                Text("Guided Review")
+                    .font(.headline)
+                if run.isRunning {
+                    ProgressView().controlSize(.small)
+                }
+                Spacer(minLength: 8)
+                reviewOpenInButtons(row, run: run)
+                Button(role: .destructive) {
+                    run.stop()
+                } label: {
+                    Label("Stop", systemImage: "stop.fill")
+                }
+                .controlSize(.small)
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 8)
+
+            Divider()
+
+            ScrollView {
+                VStack(alignment: .leading, spacing: 16) {
+                    // The live run transcript (activity + text), reusing the
+                    // shared run-log body so the review stream reads like every
+                    // other run. It scrolls within its own band (#096).
+                    RunLogContents(run: run)
+                        .frame(maxHeight: 220)
+
+                    // The parked question, if any.
+                    if let pending = run.pendingQuestion {
+                        reviewQuestionsView(row, run: run, pending: pending)
+                    }
+
+                    // The final summary once the agent has replied.
+                    if let reply = run.reply, !reply.isEmpty {
+                        markdownBlockView(reply, style: .compact)
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.horizontal, 16)
+                .padding(.vertical, 12)
+            }
+            .frame(maxHeight: .infinity)
+        }
+        .frame(maxHeight: .infinity)
+    }
+
+    /// The open-in-Terminal / open-in-Editor buttons for the review directory
+    /// (#083): the worktree path for a `kept`/`worktree` review, the project root
+    /// for `main`. Hidden for a `kept`/`worktree` review whose worktree path has
+    /// not been written yet (surfaces on the next store refresh) — the targeting
+    /// comes from the pure `reviewOpenDirectory` helper.
+    @ViewBuilder
+    private func reviewOpenInButtons(_ row: TaskRow, run: TaskRun) -> some View {
+        if let location = run.reviewLocation,
+           let dir = Self.reviewOpenDirectory(location: location,
+                                              worktreePath: row.task.worktreePath,
+                                              projectRoot: row.projectPath) {
+            Button {
+                Self.openInTerminal(directory: dir)
+            } label: {
+                Label("Open in Terminal", systemImage: "terminal")
+                    .labelStyle(.iconOnly)
+            }
+            .controlSize(.small)
+            .help("Open the review directory in Terminal")
+
+            Button {
+                NSWorkspace.shared.open(URL(fileURLWithPath: dir))
+            } label: {
+                Label("Open in Editor", systemImage: "folder")
+                    .labelStyle(.iconOnly)
+            }
+            .controlSize(.small)
+            .help("Open the review directory in the default app")
+        }
+    }
+
+    /// Renders one-to-four parked review questions (#083): each shows its header
+    /// and question text, an option button per choice INCLUDING the
+    /// "Resolve for me" sentinel (honouring `multiSelect`), an "Other" free-text
+    /// field, and a Send button that writes the answer back over the run's stdin
+    /// via `TaskRun.answer`. Plain stacks only (#096).
+    private func reviewQuestionsView(_ row: TaskRow, run: TaskRun,
+                                     pending: TaskRun.PendingReviewQuestion) -> some View {
+        VStack(alignment: .leading, spacing: 16) {
+            ForEach(Array(pending.questions.enumerated()), id: \.offset) { _, question in
+                reviewQuestionView(question)
+            }
+            HStack {
+                Spacer(minLength: 0)
+                Button("Send") {
+                    sendReviewAnswer(run: run, pending: pending)
+                }
+                .keyboardShortcut(.return, modifiers: .command)
+                .disabled(!reviewCanSend(pending: pending))
+            }
+        }
+        .padding(12)
+        .background(
+            RoundedRectangle(cornerRadius: 10)
+                .fill(Color.accentColor.opacity(0.06))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 10)
+                .strokeBorder(Color.accentColor.opacity(0.25), lineWidth: 1)
+        )
+    }
+
+    /// A single parked question: header + question text, the option buttons
+    /// (with the "Resolve for me" sentinel appended), and the "Other" field.
+    private func reviewQuestionView(_ question: ReviewQuestion) -> some View {
+        let selected = reviewSelections[question.header] ?? []
+        return VStack(alignment: .leading, spacing: 8) {
+            Text(question.header)
+                .font(.subheadline.weight(.semibold))
+            Text(question.question)
+                .font(.callout)
+                .fixedSize(horizontal: false, vertical: true)
+
+            VStack(alignment: .leading, spacing: 6) {
+                ForEach(reviewOptionLabels(question), id: \.self) { label in
+                    let isOn = selected.contains(label)
+                    Button {
+                        reviewSelections[question.header] = Self.reviewToggleSelection(
+                            current: selected, choice: label, multiSelect: question.multiSelect)
+                    } label: {
+                        HStack(spacing: 8) {
+                            Image(systemName: optionGlyph(isOn: isOn, multiSelect: question.multiSelect))
+                                .foregroundStyle(isOn ? Color.accentColor : Color.secondary)
+                            Text(label)
+                                .fixedSize(horizontal: false, vertical: true)
+                            Spacer(minLength: 0)
+                        }
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+
+            HStack(spacing: 6) {
+                Text("Other:")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                TextField("Type a free-text answer…",
+                          text: Binding(
+                            get: { reviewOtherText[question.header] ?? "" },
+                            set: { reviewOtherText[question.header] = $0 }))
+                    .textFieldStyle(.roundedBorder)
+            }
+        }
+    }
+
+    /// The option labels shown for a question: the skill's own options plus the
+    /// "Resolve for me" sentinel appended last.
+    private func reviewOptionLabels(_ question: ReviewQuestion) -> [String] {
+        question.options.map(\.label) + [Self.resolveForMeLabel]
+    }
+
+    /// The per-option glyph: a checkbox for multi-select, a radio for
+    /// single-select; filled when selected.
+    private func optionGlyph(isOn: Bool, multiSelect: Bool) -> String {
+        if multiSelect {
+            return isOn ? "checkmark.square.fill" : "square"
+        }
+        return isOn ? "largecircle.fill.circle" : "circle"
+    }
+
+    /// Whether the Send button is enabled: at least one question must have either
+    /// a picked option or a non-empty "Other" answer.
+    private func reviewCanSend(pending: TaskRun.PendingReviewQuestion) -> Bool {
+        pending.questions.contains { question in
+            let hasPick = !(reviewSelections[question.header] ?? []).isEmpty
+            let hasOther = !(reviewOtherText[question.header] ?? "")
+                .trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            return hasPick || hasOther
+        }
+    }
+
+    /// Assembles and sends the user's answers back over the review run's stdin
+    /// (#083), keyed by the parked `toolUseId`. Per question the answer value is
+    /// the picked options (joined, honouring `multiSelect`) with any non-empty
+    /// "Other" text appended, via the tested pure helpers. Clears the in-progress
+    /// selection/other state once sent.
+    private func sendReviewAnswer(run: TaskRun, pending: TaskRun.PendingReviewQuestion) {
+        var answers: [String: String] = [:]
+        for question in pending.questions {
+            let selected = reviewSelections[question.header] ?? []
+            var value = Self.reviewAnswerValue(selected: selected, multiSelect: question.multiSelect)
+            let other = (reviewOtherText[question.header] ?? "")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            if !other.isEmpty {
+                value = value.isEmpty ? other : "\(value), \(other)"
+            }
+            answers[question.header] = value
+        }
+        run.answer(toolUseId: pending.toolUseId, answers: answers)
+        reviewSelections = [:]
+        reviewOtherText = [:]
+    }
+
+    /// Opens `directory` in Terminal via `open -a Terminal <dir>` (#083). A plain
+    /// `NSWorkspace` open of a directory URL would reveal it in Finder, not a
+    /// shell, so Terminal is launched explicitly with the directory as its argument.
+    static func openInTerminal(directory: String) {
+        let config = NSWorkspace.OpenConfiguration()
+        config.arguments = [directory]
+        guard let terminal = NSWorkspace.shared.urlForApplication(
+            withBundleIdentifier: "com.apple.Terminal") else {
+            // Fall back to revealing the directory if Terminal can't be located.
+            NSWorkspace.shared.open(URL(fileURLWithPath: directory))
+            return
+        }
+        NSWorkspace.shared.openApplication(at: terminal, configuration: config)
     }
 
     /// #105: the backlog/restore and delete actions, shown in the detail
@@ -1270,6 +1589,108 @@ struct PlanDetailView: View {
         return status == .review || status == .inReview
     }
 
+    /// Pure predicate for the guided-"Review" action's availability (#083).
+    /// Available for a plan in `review` / `in-review` that HAS a branch (the
+    /// review needs something to check out), is not blocked, not backlogged, and
+    /// has no live run. Unlike the old assumption a kept worktree is NO LONGER
+    /// required — a non-kept review plan can still be reviewed on a fresh worktree
+    /// or on the main checkout. `hasLiveRun` is passed by the call site from the
+    /// runner so the predicate stays pure and unit-testable.
+    static func canReview(status: TaskStatus?, branch: String?,
+                          isBlocked: Bool, isBacklogged: Bool,
+                          hasLiveRun: Bool) -> Bool {
+        guard !isBacklogged else { return false }
+        guard !isBlocked else { return false }
+        guard !hasLiveRun else { return false }
+        guard let branch, !branch.isEmpty else { return false }
+        return status == .review || status == .inReview
+    }
+
+    /// The review locations offered for `task` (#083), in display order. `worktree`
+    /// and `main` are ALWAYS available; `kept` is offered ONLY when the task shows
+    /// the kept-worktree marker (there is a surviving execution worktree to review
+    /// in place). Pure so the menu's contents are unit-testable.
+    static func availableReviewLocations(for task: Task) -> [ReviewLocation] {
+        var locations: [ReviewLocation] = []
+        if task.showsKeptWorktreeMarker {
+            locations.append(.kept)
+        }
+        locations.append(.worktree)
+        locations.append(.main)
+        return locations
+    }
+
+    /// The sibling task (same project) that would be holding the MAIN checkout
+    /// during a review (#083), or `nil` when none would. A task holds the main
+    /// checkout when it is in `review` / `in-review` AND has NO kept worktree (a
+    /// kept-worktree review sits in its own worktree, freeing main). Used to warn
+    /// the user before a `main` review disturbs another in-flight review. The
+    /// `current` task is never its own occupant. Takes the sibling collection so
+    /// it is unit-testable without a live store.
+    static func mainCheckoutOccupant(current: Task, siblings: [Task]) -> Task? {
+        siblings.first { sibling in
+            sibling.id != current.id
+                && (sibling.status == .review || sibling.status == .inReview)
+                && !sibling.isKeptWorktree
+        }
+    }
+
+    /// The directory the review panel's "Open in Terminal" / "Open in Editor"
+    /// buttons target (#083): the WORKTREE path for a `kept` / `worktree` review,
+    /// the PROJECT ROOT for a `main` review. `nil` for a `kept`/`worktree` review
+    /// whose worktree path has not yet been written (the skill writes it; it
+    /// surfaces on the next store refresh), so the buttons hide until then; `main`
+    /// always has the project root. Pure so the targeting rule is unit-testable.
+    static func reviewOpenDirectory(location: ReviewLocation,
+                                    worktreePath: String?,
+                                    projectRoot: String) -> String? {
+        switch location {
+        case .main:
+            return projectRoot
+        case .kept, .worktree:
+            return worktreePath
+        }
+    }
+
+    /// Whether the review panel REPLACES the Discuss composer: only while a
+    /// `.review` run is live for this task. The discussion thread itself stays
+    /// (the panel sits where the composer was). Pure so the swap is testable.
+    static func showsReviewPanel(hasLiveReviewRun: Bool) -> Bool {
+        hasLiveReviewRun
+    }
+
+    /// Whether the needs-input indicator lights on the plan's row (#083): true
+    /// when the plan's live review run has a parked question awaiting an answer,
+    /// so a review the user navigated away from isn't lost. Pure so the row
+    /// indicator's gate is testable without a live run.
+    static func reviewNeedsInput(hasPendingQuestion: Bool) -> Bool {
+        hasPendingQuestion
+    }
+
+    /// The new selection after toggling `choice` on a review question (#083),
+    /// honouring `multiSelect`: single-select REPLACES the selection with the one
+    /// choice; multi-select ADDS the choice when absent and REMOVES it when
+    /// already present. Order is preserved (append on add). Pure so the
+    /// selection logic is unit-testable without the view.
+    static func reviewToggleSelection(current: [String], choice: String,
+                                      multiSelect: Bool) -> [String] {
+        guard multiSelect else { return [choice] }
+        if let index = current.firstIndex(of: choice) {
+            var next = current
+            next.remove(at: index)
+            return next
+        }
+        return current + [choice]
+    }
+
+    /// The answer VALUE sent for a review question given the `selected` choice
+    /// labels (#083): the single label for single-select, the labels joined by
+    /// ", " for multi-select, and "" when nothing is selected (callers gate send
+    /// on a non-empty value). Pure so the wire value is unit-testable.
+    static func reviewAnswerValue(selected: [String], multiSelect: Bool) -> String {
+        selected.joined(separator: ", ")
+    }
+
     /// Pure predicate for the "Discuss" footer's availability (#099). Unlike the
     /// lifecycle actions (Elaborate / Execute / Refine), discussion is a
     /// a read-only conversation ABOUT a plan — so it is offered at EVERY
@@ -1953,6 +2374,18 @@ struct RunLogContents: View {
             // task id), not a user-facing log line — consumed by TaskRunner's
             // live-capture hand-off, nothing to show in the stream.
             EmptyView()
+        case let .question(_, questions):
+            // Task #083: a guided-review question. The rich answer panel is built
+            // in Step 6; for now render a minimal inline marker so the stream
+            // switch is exhaustive and the pending question is at least visible.
+            HStack(alignment: .firstTextBaseline, spacing: 6) {
+                Image(systemName: "questionmark.circle")
+                    .font(.caption)
+                    .foregroundStyle(.blue)
+                Text(questions.first?.question ?? "Review question")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
         }
     }
 

@@ -978,4 +978,202 @@ final class PlanDetailViewTests: XCTestCase {
         XCTAssertGreaterThanOrEqual(style.headingSize(forLevel: 1) ?? 0,
                                     style.headingSize(forLevel: 3) ?? 0)
     }
+
+    // MARK: - #083 review gating
+
+    /// Local `Task` fixture builder for the review-gating predicates: lets each
+    /// test vary only the fields the predicate reads (status, branch, blocked,
+    /// backlogged, kept worktree).
+    private func reviewTask(
+        id: String,
+        status: TaskStatus?,
+        branch: String? = "feature/x",
+        isBlocked: Bool = false,
+        isBacklogged: Bool = false,
+        isKeptWorktree: Bool = false
+    ) -> Task {
+        Task(
+            id: id, title: nil, type: nil, status: status, created: nil,
+            branch: branch, isKeptWorktree: isKeptWorktree, blockedBy: [],
+            sections: [], howProgress: (done: 0, total: 0), isBlocked: isBlocked,
+            isCompletedDir: false, isBacklogged: isBacklogged
+        )
+    }
+
+    /// `canReview` is true for a review/in-review plan with a branch that is not
+    /// blocked, not backlogged, and has no live run. A kept worktree is NOT
+    /// required (unlike the old assumption).
+    func testCanReviewTrueForReviewAndInReviewWithoutKeptWorktree() {
+        for status in [TaskStatus.review, .inReview] {
+            XCTAssertTrue(
+                PlanDetailView.canReview(status: status, branch: "feature/x",
+                                         isBlocked: false, isBacklogged: false,
+                                         hasLiveRun: false),
+                "\(status) with a branch and no live run should be reviewable")
+        }
+    }
+
+    func testCanReviewFalseWhenGatesFail() {
+        // No branch.
+        XCTAssertFalse(PlanDetailView.canReview(status: .review, branch: nil,
+                                                isBlocked: false, isBacklogged: false,
+                                                hasLiveRun: false))
+        // Blocked.
+        XCTAssertFalse(PlanDetailView.canReview(status: .review, branch: "b",
+                                                isBlocked: true, isBacklogged: false,
+                                                hasLiveRun: false))
+        // Backlogged.
+        XCTAssertFalse(PlanDetailView.canReview(status: .review, branch: "b",
+                                                isBlocked: false, isBacklogged: true,
+                                                hasLiveRun: false))
+        // Live run.
+        XCTAssertFalse(PlanDetailView.canReview(status: .review, branch: "b",
+                                                isBlocked: false, isBacklogged: false,
+                                                hasLiveRun: true))
+        // Wrong statuses.
+        for status in [TaskStatus.pending, .elaborated, .inProgress, .completed] {
+            XCTAssertFalse(
+                PlanDetailView.canReview(status: status, branch: "b",
+                                         isBlocked: false, isBacklogged: false,
+                                         hasLiveRun: false),
+                "\(status) must not be reviewable")
+        }
+        // Nil status.
+        XCTAssertFalse(PlanDetailView.canReview(status: nil, branch: "b",
+                                                isBlocked: false, isBacklogged: false,
+                                                hasLiveRun: false))
+    }
+
+    /// `availableReviewLocations` always offers worktree + main; kept only when
+    /// the task shows the kept-worktree marker.
+    func testAvailableReviewLocationsIncludesKeptOnlyWithMarker() {
+        let kept = reviewTask(id: "001", status: .review, isKeptWorktree: true)
+        XCTAssertTrue(kept.showsKeptWorktreeMarker, "precondition")
+        XCTAssertEqual(PlanDetailView.availableReviewLocations(for: kept),
+                       [.kept, .worktree, .main])
+
+        let noKept = reviewTask(id: "002", status: .review, isKeptWorktree: false)
+        XCTAssertFalse(noKept.showsKeptWorktreeMarker, "precondition")
+        XCTAssertEqual(PlanDetailView.availableReviewLocations(for: noKept),
+                       [.worktree, .main])
+    }
+
+    /// `mainCheckoutOccupant` finds a sibling in review/in-review WITHOUT a kept
+    /// worktree (it would be holding the main checkout).
+    func testMainCheckoutOccupantFindsReviewSiblingWithoutKeptWorktree() {
+        let current = reviewTask(id: "001", status: .review, isKeptWorktree: true)
+        let occupant = reviewTask(id: "002", status: .inReview, isKeptWorktree: false)
+        let siblings = [current, occupant, reviewTask(id: "003", status: .pending)]
+
+        let found = PlanDetailView.mainCheckoutOccupant(current: current, siblings: siblings)
+        XCTAssertEqual(found?.id, "002")
+    }
+
+    /// No occupant when every review sibling has a kept worktree, or none is in
+    /// review, and the current task is never itself the occupant.
+    func testMainCheckoutOccupantNilWhenNoneHoldsMain() {
+        let current = reviewTask(id: "001", status: .review, isKeptWorktree: false)
+        // Sibling in review but kept → not holding main.
+        let kept = reviewTask(id: "002", status: .review, isKeptWorktree: true)
+        // Sibling not in review → irrelevant.
+        let pending = reviewTask(id: "003", status: .pending, isKeptWorktree: false)
+        let siblings = [current, kept, pending]
+
+        XCTAssertNil(PlanDetailView.mainCheckoutOccupant(current: current, siblings: siblings),
+                     "current itself must not count; kept + non-review siblings don't hold main")
+    }
+
+    // MARK: - Review panel: open-in directory (#083 Step 6)
+
+    /// The open-in-Terminal / open-in-Editor buttons target the WORKTREE path for
+    /// a `kept` or `worktree` review, and the PROJECT ROOT for a `main` review.
+    func testReviewOpenDirectoryIsWorktreeForKeptAndWorktree() {
+        let wt = "/Users/x/.worktrees/007-x"
+        let root = "/Users/x/project"
+        XCTAssertEqual(
+            PlanDetailView.reviewOpenDirectory(location: .kept, worktreePath: wt, projectRoot: root),
+            wt)
+        XCTAssertEqual(
+            PlanDetailView.reviewOpenDirectory(location: .worktree, worktreePath: wt, projectRoot: root),
+            wt)
+    }
+
+    func testReviewOpenDirectoryIsProjectRootForMain() {
+        let wt = "/Users/x/.worktrees/007-x"
+        let root = "/Users/x/project"
+        XCTAssertEqual(
+            PlanDetailView.reviewOpenDirectory(location: .main, worktreePath: wt, projectRoot: root),
+            root)
+    }
+
+    /// For a `kept`/`worktree` review whose worktree path has not yet been written
+    /// (the skill writes it, picked up on the next store refresh), there is no
+    /// directory to open — `nil` so the buttons hide.
+    func testReviewOpenDirectoryNilForWorktreeLocationsWithoutPath() {
+        let root = "/Users/x/project"
+        XCTAssertNil(
+            PlanDetailView.reviewOpenDirectory(location: .kept, worktreePath: nil, projectRoot: root))
+        XCTAssertNil(
+            PlanDetailView.reviewOpenDirectory(location: .worktree, worktreePath: nil, projectRoot: root))
+        // main always has the project root.
+        XCTAssertEqual(
+            PlanDetailView.reviewOpenDirectory(location: .main, worktreePath: nil, projectRoot: root),
+            root)
+    }
+
+    // MARK: - Review panel: answer assembly (#083 Step 6, multiSelect)
+
+    /// A single-select question answers with the one picked label.
+    func testReviewAnswerValueSingleSelectIsJoinedChoice() {
+        XCTAssertEqual(
+            PlanDetailView.reviewAnswerValue(selected: ["Approve"], multiSelect: false),
+            "Approve")
+    }
+
+    /// A multi-select question joins the picked labels (order preserved).
+    func testReviewAnswerValueMultiSelectJoinsChoices() {
+        XCTAssertEqual(
+            PlanDetailView.reviewAnswerValue(selected: ["A", "B"], multiSelect: true),
+            "A, B")
+    }
+
+    /// No selection yields an empty answer value (callers gate send on non-empty).
+    func testReviewAnswerValueEmptyWhenNoneSelected() {
+        XCTAssertEqual(PlanDetailView.reviewAnswerValue(selected: [], multiSelect: true), "")
+        XCTAssertEqual(PlanDetailView.reviewAnswerValue(selected: [], multiSelect: false), "")
+    }
+
+    /// Toggling a choice in single-select REPLACES the selection; in multi-select
+    /// it ADDS/REMOVES, honouring `multiSelect`.
+    func testReviewToggleSelectionHonoursMultiSelect() {
+        // Single-select: picking B replaces A.
+        XCTAssertEqual(
+            PlanDetailView.reviewToggleSelection(current: ["A"], choice: "B", multiSelect: false),
+            ["B"])
+        // Multi-select: picking B adds to A.
+        XCTAssertEqual(
+            PlanDetailView.reviewToggleSelection(current: ["A"], choice: "B", multiSelect: true),
+            ["A", "B"])
+        // Multi-select: picking A again removes it.
+        XCTAssertEqual(
+            PlanDetailView.reviewToggleSelection(current: ["A", "B"], choice: "A", multiSelect: true),
+            ["B"])
+    }
+
+    // MARK: - Review panel: needs-input indicator (#083 Step 6)
+
+    /// The needs-input indicator shows when a review run has a parked question.
+    func testReviewNeedsInputReflectsPendingQuestion() {
+        XCTAssertTrue(PlanDetailView.reviewNeedsInput(hasPendingQuestion: true))
+        XCTAssertFalse(PlanDetailView.reviewNeedsInput(hasPendingQuestion: false))
+    }
+
+    // MARK: - Review panel: replaces Discuss composer while live (#083 Step 6)
+
+    /// While a `.review` run is live the review panel REPLACES the Discuss
+    /// composer (the discussion thread stays).
+    func testReviewPanelReplacesComposerWhileReviewLive() {
+        XCTAssertTrue(PlanDetailView.showsReviewPanel(hasLiveReviewRun: true))
+        XCTAssertFalse(PlanDetailView.showsReviewPanel(hasLiveReviewRun: false))
+    }
 }

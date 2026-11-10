@@ -74,9 +74,25 @@ one place. The app bundles an Agent-SDK **runner subprocess**
 (`Tools/work-task/run-task.ts`, built to `dist/run-task.js`), and that
 subprocess is the **sole writer** of a project's `.plans/` directory and git
 tree. The app drives it for the plans-cc lifecycle verbs — **capture**,
-**elaborate**, **execute**, **delete**, **backlog**, and **restore** — by
-spawning it with a `--mode` and the task id or description, then rendering its
-NDJSON progress stream.
+**elaborate**, **execute**, **review**, **delete**, **backlog**, and
+**restore** — by spawning it with a `--mode` and the task id or description, then
+rendering its NDJSON progress stream.
+
+**Review** is the one INTERACTIVE verb. Every other mode runs fully
+autonomously; `review` drives a guided `plan-review` of a `review` / `in-review`
+plan and PAUSES on the skill's `AskUserQuestion`, parking each question as a
+`{"kind":"question", …}` NDJSON line. The app renders the choices, and the user's
+answer flows back to the agent over a **review-only stdin channel** — one
+`{"kind":"answer", …}` line per reply, keyed by the same `toolUseId`. Only the
+`review` mode opens that stdin pipe; it unblocks the paused agent and the run
+continues. A review runs at one of **three locations**, threaded as
+`--review-location`: the task's **kept** execution worktree, a fresh throwaway
+**review worktree** off the task branch, or the project's **main** checkout. The
+app's own preflight for the review (checking the main checkout's branch and
+whether its tree is dirty, to warn before a `main` review) only **reads** git via
+`rev-parse` / `status --porcelain` — it never mutates it; a `main` review leaves
+main on the task branch until `/plan-complete`, and the per-project default
+review location is stored in the app's `UserDefaults`, never in `.plans/`.
 
 The **backlog** / **restore** pair defers a plan into `.plans/backlog/` and
 brings it back to `.plans/pending/` (see §5.1). Both are offered from the plan

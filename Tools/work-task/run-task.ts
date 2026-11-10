@@ -53,8 +53,14 @@
  *   {"kind":"session","sessionId":"…"}
  *   {"kind":"reply","text":"…","sessionId":"…"}
  *   {"kind":"captured","taskId":"NNN"}
+ *   {"kind":"question","toolUseId":"…","questions":[…]}
  *   {"kind":"done","costUsd":N,"turns":N,"stopReason":"…"}
  *   {"kind":"error","message":"…"}
+ * The `question` line (task #083) is emitted ONLY by a `review` run, when the
+ * guided `plan-review` skill asks via `AskUserQuestion`. The run PARKS until the
+ * Swift app writes a matching `{"kind":"answer","toolUseId":…,"answers":{…}}`
+ * line back on stdin — the one place this process reads stdin, and only in
+ * review mode.
  * `session` is emitted once, at the start of a run, with the Agent SDK session
  * id; `reply` is emitted on a successful result, immediately before `done`, and
  * carries the agent's clean final answer (the `text` chunks also include
@@ -109,7 +115,17 @@ type Mode =
   | "delete"
   | "backlog"
   | "restore"
-  | "discuss";
+  | "discuss"
+  | "review";
+
+/**
+ * Where a `review` run should look for the work to review (#083). `kept` reviews
+ * the task's kept execution worktree (read from the task file's `**Worktree:**`
+ * field); `worktree` creates a throwaway worktree off the task's branch; `main`
+ * reviews the branch checked out in the main tree. Only `worktree` ever puts the
+ * word "worktree" in the prompt — the `plan-review` skill keyword-matches it.
+ */
+type ReviewLocation = "kept" | "worktree" | "main";
 
 interface Args {
   projectRoot: string;
@@ -157,6 +173,13 @@ interface Args {
    * Orthogonal to `mode`; ignored outside discuss.
    */
   apply?: boolean;
+  /**
+   * Required for `review` (#083), ignored otherwise. Selects which checkout the
+   * guided `plan-review` run should inspect — the task's kept worktree, a fresh
+   * throwaway worktree, or the main tree. Carried as a value flag
+   * (`--review-location kept|worktree|main`).
+   */
+  reviewLocation?: ReviewLocation;
 }
 
 /** Emit one NDJSON line on stdout. Never pretty-printed. */
@@ -182,6 +205,8 @@ function parseArgs(argv: string[]): Args | null {
   // apply the agreed change. Only meaningful alongside `--mode discuss`.
   let apply = false;
   let resume: string | undefined;
+  // #083: value flag selecting the review target. Required when mode is review.
+  let reviewLocation: ReviewLocation | undefined;
 
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
@@ -191,6 +216,12 @@ function parseArgs(argv: string[]): Args | null {
       taskId = argv[++i];
     } else if (arg === "--description") {
       description = argv[++i];
+    } else if (arg === "--review-location") {
+      const value = argv[++i];
+      if (value !== "kept" && value !== "worktree" && value !== "main") {
+        return null;
+      }
+      reviewLocation = value;
     } else if (arg === "--resume") {
       resume = argv[++i];
       if (!resume) {
@@ -218,7 +249,8 @@ function parseArgs(argv: string[]): Args | null {
         value !== "delete" &&
         value !== "backlog" &&
         value !== "restore" &&
-        value !== "discuss"
+        value !== "discuss" &&
+        value !== "review"
       ) {
         return null;
       }
@@ -270,6 +302,16 @@ function parseArgs(argv: string[]): Args | null {
       return null;
     }
     return { projectRoot, taskId, mode, description, deep, keep, resume, apply };
+  }
+
+  if (mode === "review") {
+    // review (#083) operates on an EXISTING task and REQUIRES a review location
+    // (kept/worktree/main). It carries no free-text description — the interactive
+    // Q&A flows over stdin, not through the prompt.
+    if (!taskId || !reviewLocation) {
+      return null;
+    }
+    return { projectRoot, taskId, mode, reviewLocation };
   }
 
   // execute / elaborate / reElaborateReview / delete / backlog / restore operate
@@ -980,6 +1022,95 @@ function buildApplyDiscussFollowUpPrompt(taskId: string, question: string): stri
   ].join("\n");
 }
 
+/**
+ * Build the prompt for a `review` run (#083). This is a GUIDED, interactive
+ * review: the `plan-review` skill walks the task's observations with the user,
+ * asking via `AskUserQuestion` — which `canUseTool` parks and the Swift app
+ * answers over stdin. Unlike every other mode the prompt is deliberately a BARE
+ * slash command (no autonomous "do not ask" trailer): the whole point is to let
+ * the skill ask. Any trailing prose would be consumed by the skill as
+ * `$ARGUMENTS`, so behavioral rules live in `buildReviewSystemPrompt` instead.
+ *
+ * Only the `worktree` location may contain the word "worktree": the skill
+ * keyword-matches its third argument. `kept` and `main` therefore send a plain
+ * `/plan-review NNN` (the kept-worktree path is supplied to the skill out of
+ * band by the caller's working directory), while `worktree` sends
+ * `/plan-review NNN worktree`.
+ */
+function buildReviewPrompt(taskId: string, location: ReviewLocation): string {
+  if (location === "worktree") {
+    return `/plan-review ${taskId} worktree`;
+  }
+  return `/plan-review ${taskId}`;
+}
+
+/**
+ * The behavioral rules for a `review` run (#083), carried as a SEPARATE
+ * `systemPrompt` (never in the prompt, which would be consumed as `$ARGUMENTS`).
+ * The one load-bearing rule: when the user picks "Something's wrong" in the
+ * skill's per-observation loop, their free-text explanation arrives as the
+ * AskUserQuestion answer, so the skill's "Something's wrong" branch must act on
+ * that text rather than discarding it.
+ */
+function buildReviewSystemPrompt(): string {
+  return [
+    "You are driving an INTERACTIVE guided plan review via the `plan-review`",
+    "skill. The user is present and answering your questions through the",
+    "AskUserQuestion tool, so DO ask them — never assume answers or run",
+    "autonomously past a decision point.",
+    "",
+    "In the per-observation loop, when the user chooses \"Something's wrong\",",
+    "their free-text description of what is wrong is delivered as the answer to",
+    "that AskUserQuestion. Treat that text as the content of the \"Something's",
+    "wrong\" branch: route it into the skill's follow-up so the problem the user",
+    "described is what gets acted on. Never drop or ignore that free text.",
+  ].join("\n");
+}
+
+/**
+ * Reads the task's `**Worktree:**` path from its `.plans` file for a `kept`
+ * review (#083). plans-cc writes the live worktree path on a kept-worktree task;
+ * the guided review must `cd` into it, so we resolve it up front. Searches the
+ * `review` folder first (kept worktrees only meaningfully exist on review-state
+ * tasks), then the other status folders as a fallback. Returns the trimmed path
+ * when present and non-empty, else `undefined`.
+ */
+function readTaskWorktreePath(
+  projectRoot: string,
+  taskId: string,
+): string | undefined {
+  try {
+    const folders = ["review", "pending", "completed"];
+    for (const folder of folders) {
+      const dir = path.join(projectRoot, ".plans", folder);
+      let entries: string[];
+      try {
+        entries = fs.readdirSync(dir);
+      } catch {
+        continue;
+      }
+      const match = entries.find(
+        (name) => name.startsWith(`${taskId}-`) && name.endsWith(".md"),
+      );
+      if (!match) {
+        continue;
+      }
+      const contents = fs.readFileSync(path.join(dir, match), "utf8");
+      const m = contents.match(/^\*\*Worktree:\*\*\s*(.+?)\s*$/im);
+      if (m) {
+        const value = m[1].trim();
+        if (value.length > 0) {
+          return value;
+        }
+      }
+    }
+  } catch {
+    // Any unexpected failure: treat the path as missing so the caller's guard
+    // fires rather than silently falling through to a bad checkout.
+  }
+  return undefined;
+}
+
 function buildPrompt(args: Args): string {
   if (args.mode === "capture") {
     return buildCapturePrompt(args.description ?? "");
@@ -1010,6 +1141,9 @@ function buildPrompt(args: Args): string {
       args.deep ?? false,
       args.description,
     );
+  }
+  if (args.mode === "review") {
+    return buildReviewPrompt(args.taskId ?? "", args.reviewLocation ?? "main");
   }
   if (args.mode === "delete") {
     return buildDeletePrompt(args.taskId ?? "");
@@ -1268,6 +1402,25 @@ async function main(): Promise<void> {
     return;
   }
 
+  // #083: a `kept` review must inspect the task's kept execution worktree. Read
+  // that path up front; if it is missing or not on disk, the review cannot
+  // proceed — fail loudly rather than falling through to a bad checkout. This
+  // guard is kept-only: `worktree`/`main` resolve their checkout themselves.
+  let reviewCwd = args.projectRoot;
+  if (args.mode === "review" && args.reviewLocation === "kept") {
+    const worktree = readTaskWorktreePath(args.projectRoot, args.taskId ?? "");
+    if (!worktree || !fs.existsSync(worktree)) {
+      emitError(
+        `Kept worktree for task ${args.taskId} not found. Expected the task's `
+          + `**Worktree:** path to exist on disk; re-run with a different review `
+          + `location, or restore the kept worktree.`,
+      );
+      process.exit(1);
+      return;
+    }
+    reviewCwd = worktree;
+  }
+
   try {
     // Combine the built-in safe-default allowlist with any per-project
     // extensions from `.plans/config.json` (`extraAllowedTools`). Config may
@@ -1283,22 +1436,139 @@ async function main(): Promise<void> {
     // branch below is left byte-for-byte unchanged.
     const isDiscuss = args.mode === "discuss";
     const isApplyDiscuss = isDiscuss && !!args.apply;
+    // #083: review is the only mode with a parked, user-answered permission
+    // callback. A BARE allowlist entry SHADOWS/bypasses `canUseTool` (the SDK
+    // logs `[CLAUDE_SDK_CAN_USE_TOOL_SHADOWED]`), so `AskUserQuestion` MUST be
+    // stripped from the merged allowlist for the callback to fire. Never set
+    // `canUseTool` for any other mode — an autonomous verb must never park.
+    const isReview = args.mode === "review";
     const baseExtraAllowed = Array.from(
       new Set([
         ...BASE_ALLOWED_TOOLS,
         ...readExtraAllowedTools(args.projectRoot),
       ]),
-    );
+    ).filter((t) => !(isReview && t === "AskUserQuestion"));
     const allowedTools =
       isDiscuss && !isApplyDiscuss ? DISCUSS_ALLOWED_TOOLS : baseExtraAllowed;
+
+    // #083: the parked-question bridge. `canUseTool` emits the question, parks a
+    // Promise keyed by the SDK's `toolUseID`, and the stdin reader resolves it
+    // from the Swift app's `{kind:"answer",toolUseId,answers}` line. Active ONLY
+    // in review mode; never installed otherwise.
+    const pendingQuestions = new Map<
+      string,
+      (answers: Record<string, string>) => void
+    >();
+    const cancelPendingQuestions = (): void => {
+      for (const resolve of pendingQuestions.values()) {
+        // Resolve with an empty answer so a parked Promise can settle and node
+        // can exit on EOF/abort rather than hanging forever.
+        resolve({});
+      }
+      pendingQuestions.clear();
+    };
+
+    let reviewStdinBuffer = "";
+    const onStdinChunk = (chunk: Buffer): void => {
+      reviewStdinBuffer += chunk.toString("utf8");
+      let nl: number;
+      while ((nl = reviewStdinBuffer.indexOf("\n")) >= 0) {
+        const line = reviewStdinBuffer.slice(0, nl).trim();
+        reviewStdinBuffer = reviewStdinBuffer.slice(nl + 1);
+        if (line.length === 0) {
+          continue;
+        }
+        try {
+          const parsed = JSON.parse(line);
+          if (
+            parsed &&
+            parsed.kind === "answer" &&
+            typeof parsed.toolUseId === "string"
+          ) {
+            const resolve = pendingQuestions.get(parsed.toolUseId);
+            if (resolve) {
+              pendingQuestions.delete(parsed.toolUseId);
+              const answers =
+                parsed.answers && typeof parsed.answers === "object"
+                  ? (parsed.answers as Record<string, string>)
+                  : {};
+              resolve(answers);
+            }
+          }
+        } catch {
+          // Ignore malformed stdin lines — a stray line must never crash the run.
+        }
+      }
+    };
+    if (isReview) {
+      process.stdin.on("data", onStdinChunk);
+      process.stdin.on("end", cancelPendingQuestions);
+      process.stdin.resume();
+    }
 
     const response = query({
       prompt: buildPrompt(args),
       options: {
-        cwd: args.projectRoot,
+        cwd: reviewCwd,
         permissionMode: "acceptEdits",
         maxBudgetUsd: isDiscuss ? DISCUSS_MAX_BUDGET_USD : MAX_BUDGET_USD,
         allowedTools,
+        ...(isReview ? { systemPrompt: buildReviewSystemPrompt() } : {}),
+        ...(isReview
+          ? {
+              canUseTool: async (
+                toolName: string,
+                input: Record<string, unknown>,
+                options: { toolUseID?: string; signal?: AbortSignal },
+              ) => {
+                const toolUseId = options.toolUseID ?? "";
+                if (toolName === "AskUserQuestion") {
+                  // Emit the question to the Swift app and park until its answer
+                  // (or EOF / abort) arrives. The wire field is `toolUseId`
+                  // (lowercase d) even though the SDK option is `toolUseID`.
+                  emit({
+                    kind: "question",
+                    toolUseId,
+                    questions: (input as { questions?: unknown }).questions,
+                  });
+                  const answers = await new Promise<Record<string, string>>(
+                    (resolve) => {
+                      pendingQuestions.set(toolUseId, resolve);
+                      const signal = options.signal;
+                      if (signal) {
+                        const onAbort = () => {
+                          pendingQuestions.delete(toolUseId);
+                          resolve({});
+                        };
+                        if (signal.aborted) {
+                          onAbort();
+                        } else {
+                          signal.addEventListener("abort", onAbort, {
+                            once: true,
+                          });
+                        }
+                      }
+                    },
+                  );
+                  return {
+                    behavior: "allow" as const,
+                    updatedInput: {
+                      questions: (input as { questions?: unknown }).questions,
+                      answers,
+                    },
+                  };
+                }
+                // Any OTHER unlisted tool: deny with the stable marker substring
+                // so the existing `denied` tool_result path reports it.
+                return {
+                  behavior: "deny" as const,
+                  message:
+                    `Claude requested permission to use ${toolName}, but you `
+                      + `haven't granted it yet.`,
+                };
+              },
+            }
+          : {}),
         ...(isDiscuss && !isApplyDiscuss
           ? { disallowedTools: DISCUSS_DISALLOWED_TOOLS }
           : {}),
@@ -1490,6 +1760,16 @@ async function main(): Promise<void> {
           // stable contract.
           break;
       }
+    }
+
+    // #083: the message loop ended. Settle any still-parked question and tear
+    // down the stdin reader so node actually exits (an open, resumed stdin keeps
+    // the event loop alive). No-op for non-review modes, which never attached it.
+    if (isReview) {
+      cancelPendingQuestions();
+      process.stdin.off("data", onStdinChunk);
+      process.stdin.off("end", cancelPendingQuestions);
+      process.stdin.destroy();
     }
   } catch (err) {
     const message =
