@@ -75,6 +75,7 @@
 import { query } from "@anthropic-ai/claude-agent-sdk";
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { fileURLToPath } from "node:url";
 
 // Hard ceiling on spend. Under subscription (claude login) auth the real bound
 // is the plan; this ceiling is the safety net for API-key fallback. Raised to
@@ -328,7 +329,7 @@ function toolDetail(input: unknown): string {
  * string OR an array of content blocks (`{type:"text", text:"…"}`); we coerce
  * both to text so the permission-denial marker can be detected uniformly.
  */
-function toolResultText(content: unknown): string {
+export function toolResultText(content: unknown): string {
   if (typeof content === "string") {
     return content;
   }
@@ -344,6 +345,31 @@ function toolResultText(content: unknown): string {
       .join("");
   }
   return "";
+}
+
+/**
+ * Decide whether a `user`-message content block is a genuine permission DENIAL
+ * (task #116). A denial is counted ONLY when the block is a `tool_result` that
+ * is itself an error (`is_error === true`) AND whose flattened text carries the
+ * SDK's exact denial wording `Claude requested permissions to use`. This is
+ * deliberately strict: a SUCCESSFUL read whose content merely quotes that
+ * phrase (e.g. a file or log line that mentions permissions) must NOT be
+ * flagged as a denial. Defensive about the unknown block shape — never throws.
+ */
+export function isPermissionDenial(block: unknown): boolean {
+  if (!block || typeof block !== "object") {
+    return false;
+  }
+  const rec = block as Record<string, unknown>;
+  if (rec.type !== "tool_result") {
+    return false;
+  }
+  if (rec.is_error !== true) {
+    return false;
+  }
+  return toolResultText(rec.content).includes(
+    "Claude requested permissions to use",
+  );
 }
 
 /**
@@ -366,6 +392,12 @@ function toolResultText(content: unknown): string {
  * buildElaboratePrompt) and feeds that inline elaboration pass. When absent the
  * prompt is emitted without the guidance block, exactly as a bare
  * `/plan-execute <id>` hand-off always was.
+ *
+ * #116 (stranded subagents): this is a headless, single-turn run — ending the
+ * turn ends the SDK query and kills any in-flight subagent. The prompt therefore
+ * forbids backgrounding a delegated subagent (e.g. plan-executor) and then ending
+ * the turn to "await a completion notification"; any delegation MUST run in the
+ * foreground and be awaited inline within the same turn.
  */
 function buildExecutePrompt(
   taskId: string,
@@ -411,6 +443,11 @@ function buildExecutePrompt(
     "4. Run the targeted tests relevant to your changes and make them pass.",
     "5. When the work is complete and tests pass, move the task to the `review`",
     "   state. Do NOT mark it done — leave it in review for human verification.",
+    "6. If you delegate any part of this work to a subagent (e.g. plan-executor),",
+    "   you MUST run that subagent in the FOREGROUND and wait for it inline within",
+    "   this same turn. NEVER spawn a background subagent and then end your turn to",
+    "   await a completion notification — ending the turn ends this run and kills",
+    "   the in-flight subagent, stranding the task at `in-progress`.",
     "",
     "Work autonomously to completion. Do not ask for confirmation.",
   ].join("\n");
@@ -649,6 +686,12 @@ function buildCaptureElaboratePrompt(
  * #078: when `keep` is true, a trailing ` keep` token is appended to the
  * `/plan-execute "<description>" yolo` command line so the worktree is kept after
  * the run rather than cleaned up.
+ *
+ * #116 (stranded subagents): like buildExecutePrompt, this is a headless,
+ * single-turn run — ending the turn kills any in-flight subagent. The prompt
+ * forbids backgrounding a delegated subagent (e.g. plan-executor) and then ending
+ * the turn to await a completion notification; delegation MUST run in the
+ * foreground and be awaited inline within the same turn.
  */
 function buildExecuteYoloPrompt(description: string, keep: boolean): string {
   return [
@@ -670,6 +713,11 @@ function buildExecuteYoloPrompt(description: string, keep: boolean): string {
     "   targeted tests relevant to your changes pass.",
     "4. When the work is complete and tests pass, leave the task in the `review`",
     "   state. Do NOT mark it done — leave it in review for human verification.",
+    "5. If you delegate any part of this work to a subagent (e.g. plan-executor),",
+    "   you MUST run that subagent in the FOREGROUND and wait for it inline within",
+    "   this same turn. NEVER spawn a background subagent and then end your turn to",
+    "   await a completion notification — ending the turn ends this run and kills",
+    "   the in-flight subagent, stranding the task at `in-progress`.",
     "",
     "Work autonomously to completion. Do not ask for confirmation.",
   ].join("\n");
@@ -1408,15 +1456,12 @@ async function main(): Promise<void> {
               if (block?.type !== "tool_result") {
                 continue;
               }
-              // A tool_result's content is either a plain string or an array of
-              // content blocks ({type:"text", text:"…"}); flatten both to text.
-              const text = toolResultText(block.content);
-              // The SDK's exact wording is:
-              //   "Claude requested permissions to use <TOOL>, but you haven't
-              //    granted it yet."
-              // Match on the stable tail substring so minor prefix changes
-              // don't silently stop detecting denials.
-              if (!text.includes("haven't granted it yet")) {
+              // A denial is only counted when the tool_result is itself an
+              // error (`is_error === true`) AND its flattened text carries the
+              // SDK's `Claude requested permissions to use` wording (#116). A
+              // SUCCESSFUL read whose content merely mentions that phrase — e.g.
+              // a file or log line — is NOT a denial and must not be flagged.
+              if (!isPermissionDenial(block)) {
                 continue;
               }
               // tool_result carries only the tool_use_id, not the name — map it
@@ -1454,9 +1499,16 @@ async function main(): Promise<void> {
   }
 }
 
-main().catch((err) => {
-  const message =
-    err instanceof Error ? err.message : String(err ?? "unknown error");
-  emitError(message);
-  process.exit(1);
-});
+// Only launch a run when this module is executed as the entry script. When it
+// is imported (e.g. by the denial-predicate test), `main()` must NOT fire.
+const isEntry =
+  !!process.argv[1] &&
+  path.resolve(process.argv[1]) === fileURLToPath(import.meta.url);
+if (isEntry) {
+  main().catch((err) => {
+    const message =
+      err instanceof Error ? err.message : String(err ?? "unknown error");
+    emitError(message);
+    process.exit(1);
+  });
+}
