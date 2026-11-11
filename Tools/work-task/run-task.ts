@@ -56,11 +56,12 @@
  *   {"kind":"question","toolUseId":"…","questions":[…]}
  *   {"kind":"done","costUsd":N,"turns":N,"stopReason":"…"}
  *   {"kind":"error","message":"…"}
- * The `question` line (task #083) is emitted ONLY by a `review` run, when the
- * guided `plan-review` skill asks via `AskUserQuestion`. The run PARKS until the
+ * The `question` line (task #083) is emitted ONLY by an interactive run — a
+ * `review` (the guided `plan-review` skill) or a `complete` (`plan-complete`) —
+ * when the skill asks via `AskUserQuestion`. The run PARKS until the
  * Swift app writes a matching `{"kind":"answer","toolUseId":…,"answers":{…}}`
  * line back on stdin — the one place this process reads stdin, and only in
- * review mode.
+ * the interactive modes (review and complete).
  * `session` is emitted once, at the start of a run, with the Agent SDK session
  * id; `reply` is emitted on a successful result, immediately before `done`, and
  * carries the agent's clean final answer (the `text` chunks also include
@@ -116,7 +117,18 @@ type Mode =
   | "backlog"
   | "restore"
   | "discuss"
-  | "review";
+  | "review"
+  | "complete";
+
+/**
+ * Whether a mode may park on `AskUserQuestion` and wait for the user's answer
+ * over stdin. Only the guided `review` and the interactive `complete` do; every
+ * other mode is an autonomous verb and must never park, so `canUseTool`, the
+ * stdin reader, and the `AskUserQuestion` allowlist strip are all gated on this.
+ */
+export function isInteractiveMode(mode: Mode): boolean {
+  return mode === "review" || mode === "complete";
+}
 
 /**
  * Where a `review` run should look for the work to review (#083). `kept` reviews
@@ -192,7 +204,7 @@ function emitError(message: string): void {
 }
 
 /** Tiny hand-rolled argv parser. Returns null if a required flag is missing. */
-function parseArgs(argv: string[]): Args | null {
+export function parseArgs(argv: string[]): Args | null {
   let projectRoot: string | undefined;
   let taskId: string | undefined;
   let description: string | undefined;
@@ -250,7 +262,8 @@ function parseArgs(argv: string[]): Args | null {
         value !== "backlog" &&
         value !== "restore" &&
         value !== "discuss" &&
-        value !== "review"
+        value !== "review" &&
+        value !== "complete"
       ) {
         return null;
       }
@@ -312,6 +325,15 @@ function parseArgs(argv: string[]): Args | null {
       return null;
     }
     return { projectRoot, taskId, mode, reviewLocation };
+  }
+
+  if (mode === "complete") {
+    // complete operates on an EXISTING task and carries nothing else: its
+    // prompt must stay a bare `/plan-complete NNN` (see buildCompletePrompt).
+    if (!taskId) {
+      return null;
+    }
+    return { projectRoot, taskId, mode };
   }
 
   // execute / elaborate / reElaborateReview / delete / backlog / restore operate
@@ -1068,6 +1090,40 @@ function buildReviewSystemPrompt(): string {
 }
 
 /**
+ * Build the prompt for a `complete` run: a BARE `/plan-complete NNN`. Any
+ * trailing prose would be read by the skill as `$ARGUMENTS`, and several common
+ * words ("done", "good", "ship", "accept", ...) are its auto-accept keywords
+ * that silently skip confirmations — so nothing may follow the id. The
+ * behavioral rules live in `buildCompleteSystemPrompt` instead.
+ */
+function buildCompletePrompt(taskId: string): string {
+  return `/plan-complete ${taskId}`;
+}
+
+/**
+ * The behavioral rules for a `complete` run, carried as a separate
+ * `systemPrompt`. The user already confirmed in the app that they want to
+ * complete the task, but every decision the skill asks about (merge choice,
+ * incomplete steps, unreviewed observations, verification, debug cleanup) must
+ * still go to them through AskUserQuestion, which the app renders as buttons.
+ */
+function buildCompleteSystemPrompt(): string {
+  return [
+    "You are driving an INTERACTIVE `plan-complete` run from the Plans desktop",
+    "app. The user is present and answers your questions through the",
+    "AskUserQuestion tool, which the app renders as buttons.",
+    "",
+    "Ask EVERY question or confirmation the skill calls for through",
+    "AskUserQuestion — including the plain yes/no prompts (incomplete steps,",
+    "verification criteria, unstarted task) — never print a question and wait",
+    "for a typed reply, and never assume an answer. The merge choice in",
+    "particular MUST be asked with AskUserQuestion. Follow the skill's merge",
+    "dispatch exactly: never check out the target branch in a directory you do",
+    "not own. Work from the project root you were started in.",
+  ].join("\n");
+}
+
+/**
  * Reads the task's `**Worktree:**` path from its `.plans` file for a `kept`
  * review (#083). plans-cc writes the live worktree path on a kept-worktree task;
  * the guided review must `cd` into it, so we resolve it up front. Searches the
@@ -1111,7 +1167,7 @@ function readTaskWorktreePath(
   return undefined;
 }
 
-function buildPrompt(args: Args): string {
+export function buildPrompt(args: Args): string {
   if (args.mode === "capture") {
     return buildCapturePrompt(args.description ?? "");
   }
@@ -1144,6 +1200,9 @@ function buildPrompt(args: Args): string {
   }
   if (args.mode === "review") {
     return buildReviewPrompt(args.taskId ?? "", args.reviewLocation ?? "main");
+  }
+  if (args.mode === "complete") {
+    return buildCompletePrompt(args.taskId ?? "");
   }
   if (args.mode === "delete") {
     return buildDeletePrompt(args.taskId ?? "");
@@ -1396,7 +1455,7 @@ async function main(): Promise<void> {
   const args = parseArgs(process.argv.slice(2));
   if (!args) {
     emitError(
-      "Missing or invalid arguments. Usage: run-task.js --project-root <abs path> [--mode execute|elaborate|reElaborate|capture|captureElaborate|executeYolo|delete|backlog|restore|discuss] (--task-id <NNN> for execute/elaborate/delete/backlog/restore; --description <text> for capture/captureElaborate/executeYolo; BOTH --task-id <NNN> and --description <text> for reElaborate; --description <text> for discuss with --task-id OPTIONAL (omit it for a whole-project discussion); optional --resume <session id> for discuss only)",
+      "Missing or invalid arguments. Usage: run-task.js --project-root <abs path> [--mode execute|elaborate|reElaborate|capture|captureElaborate|executeYolo|delete|backlog|restore|discuss|review|complete] (--task-id <NNN> for execute/elaborate/delete/backlog/restore/review/complete; --review-location kept|worktree|main for review; --description <text> for capture/captureElaborate/executeYolo; BOTH --task-id <NNN> and --description <text> for reElaborate; --description <text> for discuss with --task-id OPTIONAL (omit it for a whole-project discussion); optional --resume <session id> for discuss only)",
     );
     process.exit(1);
     return;
@@ -1436,18 +1495,20 @@ async function main(): Promise<void> {
     // branch below is left byte-for-byte unchanged.
     const isDiscuss = args.mode === "discuss";
     const isApplyDiscuss = isDiscuss && !!args.apply;
-    // #083: review is the only mode with a parked, user-answered permission
-    // callback. A BARE allowlist entry SHADOWS/bypasses `canUseTool` (the SDK
-    // logs `[CLAUDE_SDK_CAN_USE_TOOL_SHADOWED]`), so `AskUserQuestion` MUST be
-    // stripped from the merged allowlist for the callback to fire. Never set
-    // `canUseTool` for any other mode — an autonomous verb must never park.
+    // #083: review and complete are the only modes with a parked,
+    // user-answered permission callback. A BARE allowlist entry SHADOWS/bypasses
+    // `canUseTool` (the SDK logs `[CLAUDE_SDK_CAN_USE_TOOL_SHADOWED]`), so
+    // `AskUserQuestion` MUST be stripped from the merged allowlist for the
+    // callback to fire. Never set `canUseTool` for any other mode — an
+    // autonomous verb must never park.
     const isReview = args.mode === "review";
+    const isInteractive = isInteractiveMode(args.mode);
     const baseExtraAllowed = Array.from(
       new Set([
         ...BASE_ALLOWED_TOOLS,
         ...readExtraAllowedTools(args.projectRoot),
       ]),
-    ).filter((t) => !(isReview && t === "AskUserQuestion"));
+    ).filter((t) => !(isInteractive && t === "AskUserQuestion"));
     const allowedTools =
       isDiscuss && !isApplyDiscuss ? DISCUSS_ALLOWED_TOOLS : baseExtraAllowed;
 
@@ -1500,7 +1561,7 @@ async function main(): Promise<void> {
         }
       }
     };
-    if (isReview) {
+    if (isInteractive) {
       process.stdin.on("data", onStdinChunk);
       process.stdin.on("end", cancelPendingQuestions);
       process.stdin.resume();
@@ -1514,7 +1575,10 @@ async function main(): Promise<void> {
         maxBudgetUsd: isDiscuss ? DISCUSS_MAX_BUDGET_USD : MAX_BUDGET_USD,
         allowedTools,
         ...(isReview ? { systemPrompt: buildReviewSystemPrompt() } : {}),
-        ...(isReview
+        ...(args.mode === "complete"
+          ? { systemPrompt: buildCompleteSystemPrompt() }
+          : {}),
+        ...(isInteractive
           ? {
               canUseTool: async (
                 toolName: string,
@@ -1765,7 +1829,7 @@ async function main(): Promise<void> {
     // #083: the message loop ended. Settle any still-parked question and tear
     // down the stdin reader so node actually exits (an open, resumed stdin keeps
     // the event loop alive). No-op for non-review modes, which never attached it.
-    if (isReview) {
+    if (isInteractive) {
       cancelPendingQuestions();
       process.stdin.off("data", onStdinChunk);
       process.stdin.off("end", cancelPendingQuestions);
