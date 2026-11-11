@@ -135,10 +135,14 @@ struct BrowserWindow: View {
             // actual change so an unchanged selection doesn't invalidate the
             // detail column every poll.
             .onChange(of: displayedRows.map(\.id)) { _, _ in
-                let valid = BrowserViewModel.validSelection(selectedRowID, visibleIn: displayedRows)
-                if valid != selectedRowID {
-                    selectedRowID = valid
-                }
+                revalidateSelection()
+            }
+            // #117: capture migrations land on a reload too, so re-run the
+            // capture-aware invariant when the migration map changes — a
+            // synthetic `capture:` selection remaps to its real row the moment
+            // reconciliation hands the agent off.
+            .onChange(of: runner.captureMigrations.count) { _, _ in
+                revalidateSelection()
             }
             // #031: the shared "New Plan" modal, presented over the whole window.
             // Driven by `newPlanRequest` (set by the global toolbar button below
@@ -223,16 +227,20 @@ struct BrowserWindow: View {
                 if !activeRuns.isEmpty {
                     ToolbarItem {
                         ActiveRunsIndicator(items: activeRuns) { item in
-                            switch BrowserViewModel.activeRunRowAction(item) {
-                            case .answerQuestion:
-                                // A parked run answers in a sheet, which works
-                                // even when its plan has left the list.
-                                answeringRun = item
-                            case .openPlan:
-                                // Show the run's project; for a run on an
-                                // existing plan, also open that plan.
+                            // #117: always SELECT the plan or capture and focus
+                            // the always-present dock (one place to look). Fall
+                            // back to the parked-question sheet ONLY when the
+                            // needs-input run's row can't be resolved — the
+                            // complete-archives-first case, where the plan left
+                            // the list before the question landed.
+                            if let rowID = item.rowID {
                                 store.browserSelection = .project(item.projectPath)
-                                selectedRowID = item.rowID
+                                selectedRowID = rowID
+                            } else if item.needsInput {
+                                answeringRun = item
+                            } else {
+                                store.browserSelection = .project(item.projectPath)
+                                selectedRowID = nil
                             }
                         }
                     }
@@ -425,6 +433,24 @@ struct BrowserWindow: View {
             ),
             showBacklog: store.showBacklog
         )
+    }
+
+    /// Re-runs the capture-aware detail-selection invariant (#095/#117): drops a
+    /// selection the content column no longer lists, KEEPS a synthetic `capture:`
+    /// selection while the runner still holds that capture, and REMAPS it to the
+    /// real plan row once reconciliation migrates the agent. Only assigns on an
+    /// actual change so an unchanged selection doesn't invalidate the detail
+    /// column every poll.
+    private func revalidateSelection() {
+        let valid = BrowserViewModel.validSelection(
+            selectedRowID,
+            visibleIn: displayedRows,
+            heldCaptureIDs: runner.heldCaptureIDs,
+            captureMigrations: runner.captureMigrations
+        )
+        if valid != selectedRowID {
+            selectedRowID = valid
+        }
     }
 
     /// §004/#094 drill-down: when the menu bar set `store.selectedProjectPath`
@@ -917,6 +943,38 @@ enum BrowserViewModel {
         return id
     }
 
+    /// The detail-column selection after a reload, CAPTURE-AWARE (#117). A
+    /// synthetic `capture:` selection has no backing row (the capture has no
+    /// `.plans/` file yet), so the plain visibility rule would clear it and the
+    /// placeholder dock would close mid-capture. Instead:
+    /// - while the runner still HOLDS that capture (`heldCaptureIDs`), the
+    ///   synthetic selection is KEPT so the "Capturing…" placeholder dock stays
+    ///   open;
+    /// - once the capture MIGRATES to its real task id (`captureMigrations`
+    ///   maps the synthetic key to the real `path/id` row id), the selection
+    ///   REMAPS to that real row id so the dock follows the plan;
+    /// - a capture the runner no longer holds and never migrated clears (its row
+    ///   never appeared).
+    /// A non-capture selection falls through to the plain `validSelection(_:
+    /// visibleIn:)` rule unchanged. Pure value work — no I/O, no SwiftUI.
+    static func validSelection(
+        _ id: TaskRow.ID?,
+        visibleIn rows: [TaskRow],
+        heldCaptureIDs: Set<String>,
+        captureMigrations: [String: TaskRow.ID]
+    ) -> TaskRow.ID? {
+        guard let id else { return nil }
+        if TaskRunner.isSyntheticCaptureID(id) {
+            if let realRowID = captureMigrations[id] {
+                // Remap to the real row once it is actually listed; otherwise keep
+                // the synthetic selection one more cycle until the row appears.
+                return rows.contains(where: { $0.id == realRowID }) ? realRowID : id
+            }
+            return heldCaptureIDs.contains(id) ? id : nil
+        }
+        return validSelection(id, visibleIn: rows)
+    }
+
     /// The rows the content column displays for a (resolved) sidebar
     /// `selection` — single source of truth for both rendering and the
     /// detail-selection invariant. `.smart` → `rows(in:matching:)` over every
@@ -1301,13 +1359,23 @@ enum BrowserViewModel {
             } else {
                 title = task?.title ?? "#\(run.taskID)"
             }
+            // #117: a capture is now SELECTABLE — its synthetic `capture:` id is
+            // a valid detail selection (the "Capturing…" placeholder + dock), so
+            // carry it as the rowID. A real task carries its composite row id; a
+            // run on a task not currently listed carries nil.
+            let rowID: TaskRow.ID?
+            if isCapture {
+                rowID = run.taskID
+            } else {
+                rowID = task.map { _ in run.projectPath + "/" + run.taskID }
+            }
             return ActiveRunItem(
                 id: TaskRunner.runKey(projectPath: run.projectPath, taskID: run.taskID),
                 verb: run.mode.activityVerb,
                 title: title,
                 projectName: projectName,
                 projectPath: run.projectPath,
-                rowID: task.map { _ in run.projectPath + "/" + run.taskID },
+                rowID: rowID,
                 needsInput: run.needsInput
             )
         }

@@ -68,11 +68,28 @@ swift test               # run the XCTest suite
   panel first opens. Don't introduce a second store instance.
 - **Selection-driven detail column.** Plan detail lives in the browser's
   `NavigationSplitView` detail column, driven by `BrowserWindow`'s single
-  (unpersisted) `selectedRowID`, shared by card rows and task-list rows via
-  `onOpenDetail`. It renders `PlanDetailView(rowID:)` keyed by
-  `.id(selectedRowID)` so per-plan state resets; the selection is cleared via
-  `BrowserViewModel.validSelection` when its row disappears. There is no
-  separate detail window.
+  (unpersisted) `selectedRowID`, shared by card rows, task-list rows, and
+  in-flight capture rows via `onOpenDetail`. It renders `PlanDetailView(rowID:)`
+  keyed by `.id(selectedRowID)` so per-plan state resets; the selection is
+  cleared via the capture-aware `BrowserViewModel.validSelection` when its row
+  disappears (a synthetic `capture:` id is kept while the capture runs and
+  remapped to the real row once it migrates). There is no separate detail window.
+- **Agent dock (#117).** The plan body is pinned at the top of the detail column
+  with an always-present **agent dock** (`AgentDock.swift`) docked beneath it,
+  each taking `maxHeight: .infinity` so the column splits without anything
+  measuring its own size (#096). The dock REPLACES the former top progress
+  drawer, the review / finished-review panels, and the stand-alone Discuss
+  composer with ONE surface driven by the plan's single `PlanAgent`: a header
+  (status pill + Stop / New conversation), a unified transcript (run logs via
+  `RunLogContents`, discuss turns via `AgentTurnView`, finished-review follow-ups),
+  and a footer chosen by the pure `AgentDock.dockFooterMode(state:canDiscuss:)`
+  (composer when idle, a disabled "Stop to interrupt" band while working, the
+  `ParkedQuestionForm` when the agent needs an answer). Header/housekeeping
+  actions are gated behind the agent's single busy gate. A synthetic `capture:`
+  selection shows a "Capturing…" placeholder over the same dock, which also hosts
+  Dismiss for an errored capture. Live spinners and the toolbar's active-runs
+  indicator all "select the plan (or capture) and focus the dock" rather than
+  opening per-row popovers.
 - **Glyph/label vocabulary** for statuses and types is centralized in
   `TaskStatus+Glance.swift` and `TaskType+Glyph.swift` — change it there, not
   inline in views.

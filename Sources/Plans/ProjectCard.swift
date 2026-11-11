@@ -388,7 +388,9 @@ struct ProjectCard: View {
         // view (also rendered by the single-project `TaskListView`), rendering
         // nothing when no captures run. #087: non-plan-row content, so re-inset by
         // the card gutter (only the plan rows bleed full width).
-        CaptureProgressRows(projectPath: project.projectPath)
+        CaptureProgressRows(projectPath: project.projectPath,
+                            onOpenDetail: onOpenDetail,
+                            selectedRowID: selectedRowID)
             .padding(.horizontal, ProjectCard.rowColumns.cardHorizontalPadding)
         body(for: rows)
         // #077: the optional backlog section sits BELOW the active plan list. It
@@ -671,7 +673,7 @@ struct ProjectCard: View {
             // never swallowed by a row-level gesture. #094: extracted into the
             // shared `PlanRowActions` view (which owns its own action-sheet state)
             // so the identical control also serves the cross-project `TaskListRow`.
-            PlanRowActions(row: row)
+            PlanRowActions(row: row, onOpenDetail: onOpenDetail)
         }
         // `.padding(.vertical, 5)` sets the row's height/tap area. The open-detail
         // tap gesture is applied per column (see `OpenDetailOnTap`) rather than

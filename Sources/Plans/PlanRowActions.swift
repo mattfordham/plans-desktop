@@ -29,18 +29,15 @@ struct PlanRowActions: View {
     /// The row whose action this cell renders. Read-only; never mutated.
     let row: TaskRow
 
-    /// The shared task store, re-read after a run's progress popover closes so the
-    /// task's new status is surfaced by the existing read path. Read-only (§2).
-    @Environment(PlansStore.self) private var store
+    /// #117: opens this plan's detail (and therefore the always-present agent
+    /// dock) by selecting its row id. Replaces the former per-row run-progress
+    /// popover — tapping a live spinner now navigates to "one place to look".
+    let onOpenDetail: (TaskRow.ID) -> Void
 
     /// The shared "Work this task" runner, for the per-row Elaborate / Execute
     /// icon buttons and inline running status. Reads only — the run itself is the
     /// sole writer of `.plans/` (§2), driven by the bundled Agent-SDK process.
     @Environment(TaskRunner.self) private var runner
-
-    /// Whether this row's run-progress popover is currently open. Scoped to this
-    /// single row's actions view (one per row), so it needs no id disambiguation.
-    @State private var progressPopoverOpen = false
 
     /// The pending "Refine Plan" request (#056), or `nil` when no Refine sheet is
     /// open. Set by the Refine glyph (elaborated, non-blocked tasks only); an
@@ -130,34 +127,17 @@ struct PlanRowActions: View {
                         .foregroundStyle(Color.accentColor)
                         .help("This review needs your input")
                 }
-            // Tapping the live spinner toggles the run's progress dialog in
-            // place, anchored to the spinner, with the run's live log. The
-            // `.popover` attaches to the bare spinner glyph's BOUNDS so macOS
-            // lands the arrow against whichever glyph edge it flips to with the
-            // arrow tip just off the spinner rather than piercing its center.
-            ProgressView()
-                .controlSize(.small)
-                .popover(isPresented: $progressPopoverOpen,
-                         attachmentAnchor: .rect(.bounds)) {
-                    // Same dialog the detail view presents as a sheet; here it
-                    // pops over the spinner. The explicit 480pt width (matching
-                    // the sheet's own `minWidth`) gives the popover a stable
-                    // width from first paint. On close, drop the finished run and
-                    // reload so the task's new status surfaces.
-                    RunProgressSheet(run: runner.run(for: row.task.id, in: row.projectPath),
-                                     taskID: row.task.id)
-                        .frame(width: 480)
-                        .onDisappear {
-                            runner.dismiss(taskID: row.task.id, in: row.projectPath)
-                            store.reload()
-                        }
-                }
-                .padding(.leading, 8)
-                .contentShape(Rectangle())
-                .onTapGesture {
-                    progressPopoverOpen.toggle()
-                }
-                .help("Show progress")
+                // #117: tapping the live spinner SELECTS this plan and focuses the
+                // always-present agent dock — "one place to look" — instead of
+                // opening a per-row progress popover.
+                ProgressView()
+                    .controlSize(.small)
+                    .padding(.leading, 8)
+                    .contentShape(Rectangle())
+                    .onTapGesture {
+                        onOpenDetail(row.id)
+                    }
+                    .help("Show progress")
             }
         } else if PlanDetailView.canRetry(failure: row.task.failure) {
             // #079: the latest run for this plan failed. Offer a Retry glyph that
@@ -251,7 +231,8 @@ struct PlanRowActions: View {
                                               branch: row.task.branch,
                                               isBlocked: row.task.isBlocked,
                                               isBacklogged: row.task.isBacklogged,
-                                              hasLiveRun: false),
+                                              hasLiveRun: runner.isRunning(taskID: row.task.id,
+                                                                           in: row.projectPath)),
                    let branch = row.task.branch {
                     RowActionGlyph(systemImage: "checkmark.seal", help: "Complete this plan…") {
                         rowActionsLog.notice("row Complete clicked: task=\(row.task.id, privacy: .public)")

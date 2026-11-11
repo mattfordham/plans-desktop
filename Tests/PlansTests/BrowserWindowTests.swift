@@ -746,6 +746,65 @@ final class BrowserWindowTests: XCTestCase {
         XCTAssertNil(BrowserViewModel.validSelection(nil, in: twoProjectFixture()))
     }
 
+    // MARK: - BrowserViewModel.validSelection capture-awareness (#117)
+
+    /// A synthetic `capture:` selection survives a reload while the runner still
+    /// holds that capture (the placeholder dock stays open), even though no row
+    /// carries that id.
+    func testValidSelectionKeepsHeldCaptureSelection() {
+        let capture = "capture:/proj1:ABC"
+        let valid = BrowserViewModel.validSelection(
+            capture,
+            visibleIn: [],
+            heldCaptureIDs: [capture],
+            captureMigrations: [:]
+        )
+        XCTAssertEqual(valid, capture)
+    }
+
+    /// Once a held capture migrates to its real task id, its selection REMAPS to
+    /// the real row id (`path/realID`) so the dock follows the plan.
+    func testValidSelectionRemapsMigratedCaptureSelection() {
+        let capture = "capture:/proj1:ABC"
+        let valid = BrowserViewModel.validSelection(
+            capture,
+            visibleIn: [makeRow(path: "/proj1", id: "002")],
+            heldCaptureIDs: [],
+            captureMigrations: [capture: "/proj1/002"]
+        )
+        XCTAssertEqual(valid, "/proj1/002")
+    }
+
+    /// A capture the runner no longer holds (and never migrated) clears, because
+    /// no row carries its id.
+    func testValidSelectionClearsVanishedCapture() {
+        let valid = BrowserViewModel.validSelection(
+            "capture:/proj1:ABC",
+            visibleIn: [makeRow(path: "/proj1", id: "002")],
+            heldCaptureIDs: [],
+            captureMigrations: [:]
+        )
+        XCTAssertNil(valid)
+    }
+
+    /// A normal (non-capture) selection falls back to the plain visibility rule.
+    func testValidSelectionCaptureAwareFallsBackForPlanRows() {
+        let rows = [makeRow(path: "/proj1", id: "001")]
+        XCTAssertEqual(
+            BrowserViewModel.validSelection("/proj1/001", visibleIn: rows,
+                                            heldCaptureIDs: [], captureMigrations: [:]),
+            "/proj1/001"
+        )
+        XCTAssertNil(
+            BrowserViewModel.validSelection("/proj1/999", visibleIn: rows,
+                                            heldCaptureIDs: [], captureMigrations: [:])
+        )
+    }
+
+    private func makeRow(path: String, id: String) -> TaskRow {
+        TaskRow(projectPath: path, projectName: path, task: makeTask(id: id, status: .pending))
+    }
+
     // MARK: - BrowserViewModel.displayedRows / validSelection(visibleIn:) (#095)
 
     /// One project with an in-progress, a review, and a backlogged plan — enough
@@ -1340,9 +1399,11 @@ final class BrowserWindowTests: XCTestCase {
         XCTAssertEqual(items[0].rowID, "/a/001")
     }
 
-    /// A capture run has no task yet: it shows its description, has no row to
-    /// open, and still names its project.
-    func testActiveRunItemForCaptureUsesDescriptionAndHasNoRow() {
+    /// A capture run has no task yet: it shows its description and names its
+    /// project. #117: it is now SELECTABLE — its synthetic `capture:` id is a
+    /// valid detail selection (the "Capturing…" placeholder + dock), so it
+    /// carries that id as its `rowID`.
+    func testActiveRunItemForCaptureUsesDescriptionAndSyntheticRow() {
         let a = makeProject(path: "/a", name: "A")
         let items = BrowserViewModel.activeRunItems(
             from: [RunSnapshot(projectPath: "/a", taskID: "capture:/a:XYZ",
@@ -1352,7 +1413,7 @@ final class BrowserWindowTests: XCTestCase {
         XCTAssertEqual(items.map(\.verb), ["Capturing & elaborating"])
         XCTAssertEqual(items.map(\.title), ["Add dark mode"])
         XCTAssertEqual(items.map(\.projectName), ["A"])
-        XCTAssertNil(items[0].rowID)
+        XCTAssertEqual(items[0].rowID, "capture:/a:XYZ")
     }
 
     /// A run whose task is not (or no longer) listed falls back to `#id` and the

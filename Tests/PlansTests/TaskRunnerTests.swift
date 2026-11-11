@@ -1707,32 +1707,35 @@ final class TaskRunnerTests: XCTestCase {
                 projectPath: path, baselineTaskIDs: baseline)
     }
 
-    /// (Step 6.1) A finished capture is marked for dismissal once a task id that
-    /// was NOT in its baseline appears in the project — the captured plan is now
-    /// present, so the spinner row hands off to the real plan row.
+    /// (#117) A finished capture whose single new id is now known MIGRATES to the
+    /// real task id (carrying its agent + transcript) rather than being dropped,
+    /// so the placeholder dock's history follows the plan. It is therefore in
+    /// `toMigrate`, not `toDismiss`.
     @MainActor
-    func testFinishedCaptureDismissedWhenNewTaskIDAppears() {
+    func testFinishedCaptureMigratesWhenNewTaskIDAppears() {
         let run = makeFinishedCapture(path: "/p", baseline: ["001", "002"])
         let projects = [makeProject(path: "/p", taskIDs: ["001", "002", "003"])]
 
-        let toDismiss = TaskRunner.taskIDsToDismiss(
+        let decision = TaskRunner.reconcile(
             runs: [run.taskID: run], projects: projects
         )
-        XCTAssertTrue(toDismiss.contains(run.taskID))
+        XCTAssertEqual(decision.toMigrate[run.taskID], "003")
+        XCTAssertFalse(decision.toDismiss.contains(run.taskID))
     }
 
-    /// (Step 6.1, instance-method seam) Driving the full
-    /// `ingestRunForTesting` → `reconcileFinishedCaptures` path removes the
-    /// finished capture from `runs` once the new plan appears, so
-    /// `runningCaptures(projectPath:)` (step 4) no longer returns it.
+    /// (#117, instance-method seam) Driving the full `ingestRunForTesting` →
+    /// `reconcileFinishedCaptures` path MIGRATES a finished capture's agent to the
+    /// real task id once the new plan appears: the synthetic placeholder row is
+    /// gone, and the real plan's run (the migrated, finished capture run) is now
+    /// resolvable under `project/realID` — so its transcript follows the plan.
     @MainActor
-    func testReconcileRemovesFinishedCaptureWhenNewPlanAppears() {
+    func testReconcileMigratesFinishedCaptureWhenNewPlanAppears() {
         let runner = TaskRunner()
         let run = makeFinishedCapture(path: "/p", baseline: ["001"])
         runner.ingestRunForTesting(run)
 
-        // Before reconciliation the row is visible (step-4 behavior: a
-        // finished-but-not-yet-reconciled capture is still returned).
+        // Before reconciliation the row is visible (a finished-but-not-yet-
+        // reconciled capture is still returned).
         XCTAssertEqual(runner.runningCaptures(projectPath: "/p").map(\.taskID),
                        [run.taskID])
 
@@ -1740,9 +1743,11 @@ final class TaskRunnerTests: XCTestCase {
             against: [makeProject(path: "/p", taskIDs: ["001", "002"])]
         )
 
-        // The new id (002) appeared → the run was dismissed → the row is gone.
+        // The new id (002) appeared → the agent migrated → the synthetic row is
+        // gone, and the run (now re-keyed to 002) is resolvable at the real key.
         XCTAssertTrue(runner.runningCaptures(projectPath: "/p").isEmpty)
-        XCTAssertNil(runner.run(for: run.taskID, in: "/p"))
+        XCTAssertNotNil(runner.run(for: "002", in: "/p"))
+        XCTAssertEqual(runner.run(for: "002", in: "/p")?.taskID, "002")
     }
 
     /// (Step 6.2) Only FINISHED capture runs participate. `isRunning` cannot be
@@ -1785,13 +1790,17 @@ final class TaskRunnerTests: XCTestCase {
                                        id: "capture:/p:B")
         let projects = [makeProject(path: "/p", taskIDs: ["001", "002"])]
 
-        let toDismiss = TaskRunner.taskIDsToDismiss(
+        let decision = TaskRunner.reconcile(
             runs: [runA.taskID: runA, runB.taskID: runB], projects: projects
         )
 
-        // runA's plan ("002") landed → dismissed; runB still awaits its own new id.
-        XCTAssertTrue(toDismiss.contains(runA.taskID))
-        XCTAssertFalse(toDismiss.contains(runB.taskID))
+        // runA's plan ("002") landed → it MIGRATES to 002 (#117); runB, whose
+        // baseline already had 002, sees no new id and is neither migrated nor
+        // dismissed (no cross-dismiss).
+        XCTAssertEqual(decision.toMigrate[runA.taskID], "002")
+        XCTAssertNil(decision.toMigrate[runB.taskID])
+        XCTAssertFalse(decision.toDismiss.contains(runA.taskID))
+        XCTAssertFalse(decision.toDismiss.contains(runB.taskID))
     }
 
     /// (Step 6.4) A finished capture that never observes a new id is NOT
@@ -1887,28 +1896,37 @@ final class TaskRunnerTests: XCTestCase {
     /// removes the run early, and the next reconcile pass finds nothing to do.
     @MainActor
     func testManualDismissAndReconcileAreIdempotent() {
-        // (a) reconcile-then-manual: second dismiss is a no-op.
+        // (a) reconcile-then-manual: the capture MIGRATES to its real id (#117),
+        // so the synthetic row is gone; a later manual dismiss of the (now
+        // vanished) synthetic key is a safe no-op.
         let runnerA = TaskRunner()
         let runA = makeFinishedCapture(path: "/p", baseline: ["001"])
+        let syntheticA = runA.taskID
         runnerA.ingestRunForTesting(runA)
         runnerA.reconcileFinishedCaptures(
             against: [makeProject(path: "/p", taskIDs: ["001", "002"])]
         )
-        XCTAssertNil(runnerA.run(for: runA.taskID, in: "/p"))
-        runnerA.dismiss(taskID: runA.taskID, in: "/p")  // manual popover close, already gone
-        XCTAssertNil(runnerA.run(for: runA.taskID, in: "/p"))
+        // The synthetic placeholder is gone; the migrated run lives at the real id.
+        XCTAssertNil(runnerA.run(for: syntheticA, in: "/p"))
+        XCTAssertNotNil(runnerA.run(for: "002", in: "/p"))
+        runnerA.dismiss(taskID: syntheticA, in: "/p")  // manual popover close, already gone
+        XCTAssertNil(runnerA.run(for: syntheticA, in: "/p"))
 
-        // (b) manual-then-reconcile: early manual dismiss leaves nothing to do.
+        // (b) manual-then-reconcile: early manual dismiss removes the finished
+        // capture before any new id appears, so the next reconcile finds nothing.
         let runnerB = TaskRunner()
         let runB = makeFinishedCapture(path: "/p", baseline: ["001"])
+        let syntheticB = runB.taskID
         runnerB.ingestRunForTesting(runB)
-        runnerB.dismiss(taskID: runB.taskID, in: "/p")  // user closes popover first
-        XCTAssertNil(runnerB.run(for: runB.taskID, in: "/p"))
-        // Next reconcile pass: the run is gone, so it is a clean no-op.
+        runnerB.dismiss(taskID: syntheticB, in: "/p")  // user closes popover first
+        XCTAssertNil(runnerB.run(for: syntheticB, in: "/p"))
+        // Next reconcile pass: the run is gone, so it is a clean no-op (and the
+        // new id can't migrate a vanished agent).
         runnerB.reconcileFinishedCaptures(
             against: [makeProject(path: "/p", taskIDs: ["001", "002"])]
         )
-        XCTAssertNil(runnerB.run(for: runB.taskID, in: "/p"))
+        XCTAssertNil(runnerB.run(for: syntheticB, in: "/p"))
+        XCTAssertNil(runnerB.run(for: "002", in: "/p"))
     }
 
     // MARK: - Errored captures persist until manual dismissal
@@ -2241,7 +2259,7 @@ final class TaskRunnerTests: XCTestCase {
 
     /// Capture reconciliation sees a brand-new `1002` (alongside existing 999,
     /// 1000, 1001) as the new plan: a running capture re-keys to it, a finished
-    /// one is dismissed.
+    /// one MIGRATES to it (#117).
     @MainActor
     func testCaptureReconcileDetectsNewFourDigitTaskID() {
         let baseline: Set<String> = ["999", "1000", "1001"]
@@ -2252,10 +2270,8 @@ final class TaskRunnerTests: XCTestCase {
         XCTAssertEqual(decision.toRekey, [running.taskID: "1002"])
 
         let finished = makeFinishedCapture(path: "/p", baseline: baseline)
-        XCTAssertTrue(
-            TaskRunner.taskIDsToDismiss(runs: [finished.taskID: finished], projects: [project])
-                .contains(finished.taskID)
-        )
+        let finishedDecision = TaskRunner.reconcile(runs: [finished.taskID: finished], projects: [project])
+        XCTAssertEqual(finishedDecision.toMigrate[finished.taskID], "1002")
 
         let runner = TaskRunner()
         runner.ingestRunForTesting(running)
@@ -2759,7 +2775,108 @@ final class TaskRunnerTests: XCTestCase {
         live.markRunningForTesting(projectPath: "/proj")
         runner.ingestRunForTesting(live)
         runner.continueReviewInDiscussion(projectPath: "/proj", taskID: "083")
-        XCTAssertNil(runner.discussion(projectPath: "/proj", taskID: "083"))
+        // #117: the plan's agent already exists (its live review run lives there),
+        // so its thread is non-nil — but `continueReviewInDiscussion` is a no-op
+        // for a LIVE run, so the thread was never seeded and the run stays.
+        XCTAssertTrue(runner.discussion(projectPath: "/proj", taskID: "083")?.turns.isEmpty ?? true)
         XCTAssertNotNil(runner.run(for: "083", in: "/proj"))
+    }
+
+    // MARK: - #117: single-gate routing through agents
+
+    private final class RunLaunchRecorder {
+        var runs: [TaskRun] = []
+        var paths: [String] = []
+        var finishers: [() -> Void] = []
+    }
+
+    @MainActor
+    private func makeRunLauncherRunner() -> (TaskRunner, RunLaunchRecorder, RunLaunchRecorder) {
+        let runner = TaskRunner()
+        let runRec = RunLaunchRecorder()
+        let discussRec = RunLaunchRecorder()
+        runner.runLauncherForTesting = { run, path, onFinish in
+            runRec.runs.append(run); runRec.paths.append(path); runRec.finishers.append(onFinish)
+        }
+        runner.discussLauncherForTesting = { run, path, onFinish in
+            discussRec.runs.append(run); discussRec.paths.append(path); discussRec.finishers.append(onFinish)
+        }
+        return (runner, runRec, discussRec)
+    }
+
+    /// Every non-discuss mode routes through the `runLauncherForTesting` seam, so
+    /// it is testable without spawning `node`.
+    @MainActor
+    func testRunReviewCompleteCaptureRouteThroughRunLauncher() {
+        let (runner, runRec, _) = makeRunLauncherRunner()
+        runner.run(projectPath: "/p", taskID: "1", mode: .execute)
+        runner.review(projectPath: "/p", taskID: "2", location: .main)
+        runner.complete(projectPath: "/p", taskID: "3")
+        runner.capture(projectPath: "/p", description: "new thing")
+        XCTAssertEqual(runRec.runs.map(\.mode), [.execute, .review, .complete, .capture])
+    }
+
+    /// The single gate: while a plan's agent is working an execute run, a discuss
+    /// turn (apply or not) for the SAME plan is refused — and vice versa.
+    @MainActor
+    func testExecuteAndDiscussAreMutuallyExclusivePerPlan() {
+        let (runner, runRec, discussRec) = makeRunLauncherRunner()
+        // Execute first, mark it running, then a discuss turn is refused.
+        runner.run(projectPath: "/p", taskID: "7", mode: .execute)
+        runRec.runs[0].markRunningForTesting(projectPath: "/p")
+        runner.ask(projectPath: "/p", taskID: "7", question: "why?")
+        runner.ask(projectPath: "/p", taskID: "7", question: "fix it", apply: true)
+        XCTAssertTrue(discussRec.runs.isEmpty, "discuss refused while execute runs")
+
+        // Finish the execute run → agent idle → discuss is accepted.
+        runRec.finishers[0]()
+        runner.ask(projectPath: "/p", taskID: "7", question: "now?")
+        XCTAssertEqual(discussRec.runs.count, 1)
+
+        // While the discuss turn is live, an execute run is refused.
+        discussRec.runs[0].markRunningForTesting(projectPath: "/p")
+        runner.run(projectPath: "/p", taskID: "7", mode: .elaborate)
+        XCTAssertEqual(runRec.runs.count, 1, "execute refused while discuss runs")
+    }
+
+    /// Discuss turns for a plan agent in the project make an `--apply` project
+    /// discuss turn refuse; a read-only project turn is never gated this way.
+    @MainActor
+    func testProjectApplyRefusedWhileAPlanAgentIsWorking() {
+        let (runner, runRec, discussRec) = makeRunLauncherRunner()
+        runner.run(projectPath: "/p", taskID: "7", mode: .execute)
+        runRec.runs[0].markRunningForTesting(projectPath: "/p")
+        XCTAssertTrue(runner.anyPlanAgentWorking(inProject: "/p"))
+
+        // An --apply project turn is refused while the plan agent works.
+        runner.askProject(projectPath: "/p", question: "fix all", apply: true)
+        XCTAssertTrue(discussRec.runs.isEmpty)
+
+        // A read-only project turn is accepted even while the plan agent works.
+        runner.askProject(projectPath: "/p", question: "what next?")
+        XCTAssertEqual(discussRec.runs.count, 1)
+
+        // Once the plan agent is idle, an --apply project turn is accepted.
+        runRec.finishers[0]()
+        discussRec.runs[0].finishForTesting(projectPath: "/p")
+        discussRec.finishers[0]()
+        runner.askProject(projectPath: "/p", question: "fix all now", apply: true)
+        XCTAssertEqual(discussRec.runs.count, 2)
+    }
+
+    /// `stopAllRunning` terminates BOTH an agent's execute run and a live discuss
+    /// turn across every agent (#117).
+    @MainActor
+    func testStopAllRunningCoversRunsAndDiscussTurns() {
+        let (runner, runRec, discussRec) = makeRunLauncherRunner()
+        runner.run(projectPath: "/p", taskID: "7", mode: .execute)
+        runRec.runs[0].markRunningForTesting(projectPath: "/p")
+        runner.ask(projectPath: "/q", taskID: "9", question: "why?")
+        discussRec.runs[0].markRunningForTesting(projectPath: "/q")
+
+        XCTAssertEqual(runner.runningRunCount, 2)
+        runner.stopAllRunning()
+        XCTAssertFalse(runRec.runs[0].isRunning)
+        XCTAssertFalse(discussRec.runs[0].isRunning)
     }
 }

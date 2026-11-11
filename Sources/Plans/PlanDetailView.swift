@@ -107,19 +107,6 @@ struct PlanDetailView: View {
     /// the inline running state, and the progress sheet.
     @Environment(TaskRunner.self) private var runner
 
-    /// Whether the inline progress DRAWER (#107) is expanded. The drawer — the
-    /// de-modalized run log that replaces the old `RunProgressSheet` — renders
-    /// below the #105 step-count `progressPanel`; this flag is its
-    /// expanded/collapsed state, NOT a sheet presentation. Raised on appear ONLY
-    /// when this task is already running (the `.onAppear` already-running case,
-    /// gated by `progressDrawerStartsExpanded(onAppearRunning:mode:)`) and
-    /// toggled by the header's "Show progress" button. A fresh run started from
-    /// THIS view deliberately does NOT auto-expand it (#061) — matching the
-    /// dashboard, where Execute starts the run without surfacing the log.
-    /// Collapsing only hides the drawer's body; it never stops the run — the run
-    /// keeps going in the background, reachable again via the chevron.
-    @State private var showProgress = false
-
     /// Whether the "Refine Plan" sheet (#056) is presented. Raised by the
     /// "Refine" header action (only shown for an elaborated, non-blocked task)
     /// and lowered by the sheet's own Cancel/Refine. Drives the
@@ -181,76 +168,30 @@ struct PlanDetailView: View {
     var body: some View {
         Group {
             if let row {
-                let thread = runner.discussion(projectPath: row.projectPath, taskID: row.task.id)
-                let showsPanel = Self.showsConversationPanel(turnCount: thread?.turns.count ?? 0)
-                // #083: a LIVE interactive run (guided review or complete) takes
-                // over the bottom panel, REPLACING the Discuss composer with the
-                // question panel (the discussion transcript above it stays). A
-                // review that finished cleanly keeps the panel up with its
-                // summary and follow-up actions until dismissed.
-                let currentRun = runner.run(for: row.task.id, in: row.projectPath)
-                let liveRun = Self.liveInteractiveRun(currentRun)
-                let finishedReview = Self.finishedReviewRun(currentRun)
-                let showsReview = Self.showsReviewPanel(hasLiveReviewRun: liveRun != nil,
-                                                        hasFinishedReviewRun: finishedReview != nil)
-                // The plan on top; below it the discussion panel — the
-                // transcript (once a question has been asked) and the composer
-                // on one `.bar` surface. With a transcript, both halves take
-                // `maxHeight: .infinity`, so SwiftUI splits the column evenly
-                // without anything measuring itself (#096). The plan ScrollView
-                // and the composer keep their structural identity as the panel
-                // appears, so neither the plan's scroll position nor the
-                // composer's state resets on the first question.
+                // #117: the plan on top, the always-present agent dock below, each
+                // taking `maxHeight: .infinity` so SwiftUI splits the column
+                // without anything measuring itself (#096). The dock REPLACES the
+                // former top progress drawer, the review / finished-review panels,
+                // and the stand-alone Discuss composer with one surface driven by
+                // this plan's single `PlanAgent`.
                 VStack(spacing: 0) {
                     planScrollView(row)
                         .frame(maxHeight: .infinity)
-                    VStack(spacing: 0) {
-                        if showsPanel, let thread {
-                            Divider()
-                            conversationTranscript(row, thread: thread)
-                        }
-                        if showsReview, let liveRun {
-                            // The question panel REPLACES the composer while the
-                            // interactive run is live.
-                            Divider()
-                            reviewPanel(row, run: liveRun)
-                        } else if showsReview, let finishedReview {
-                            Divider()
-                            finishedReviewPanel(row, run: finishedReview)
-                        } else if Self.canDiscuss(status: row.task.status,
-                                                  isBlocked: row.task.isBlocked,
-                                                  isBacklogged: row.task.isBacklogged) {
-                            // Shown whenever the plan can be discussed (not
-                            // blocked/backlogged) — including while an
-                            // execute/elaborate run is live, since a discussion is
-                            // read-only and tracked apart from task runs.
-                            discussFooter(row, isBusy: thread?.isBusy ?? false,
-                                          showsDivider: !showsPanel)
-                        }
-                    }
-                    .frame(maxHeight: (showsPanel || showsReview) ? .infinity : nil)
-                    .background(.bar)
+                    Divider()
+                    AgentDock(row: row)
+                        .frame(maxHeight: .infinity)
                 }
+            } else if let rowID, TaskRunner.isSyntheticCaptureID(rowID) {
+                // #117: a synthetic `capture:` selection has no backing plan yet.
+                // Show a "Capturing…" placeholder header plus the SAME dock, which
+                // hosts the capture's log and a Dismiss for an errored capture.
+                capturePlaceholder(rowID: rowID)
             } else {
                 VStack {
                     Text("Plan not found")
                         .foregroundStyle(.secondary)
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
-            }
-        }
-        // If this task is ALREADY running when the window opens (e.g. the user
-        // clicked the card spinner to come here), start the progress drawer
-        // EXPANDED (#107). This is the ONLY auto-expand path (#022): a fresh run
-        // started from this view does NOT auto-expand (#061) — the header's
-        // "Show progress" button is the deliberate re-entry. The rule is encoded
-        // in the pure `progressDrawerStartsExpanded(onAppearRunning:mode:)` helper.
-        .onAppear {
-            if let row {
-                showProgress = PlanDetailView.progressDrawerStartsExpanded(
-                    onAppearRunning: runner.isRunning(taskID: row.task.id, in: row.projectPath),
-                    mode: runner.run(for: row.task.id, in: row.projectPath)?.mode
-                )
             }
         }
         // #107: the modal progress sheet is gone — the run log now renders inline
@@ -329,6 +270,53 @@ struct PlanDetailView: View {
         // via the sheet's Stop button or the card.
     }
 
+    /// The "Capturing…" placeholder (#117) for a synthetic `capture:` selection
+    /// that has no backing plan yet: a minimal header naming the in-flight capture
+    /// over the same `AgentDock`, which hosts the capture's live log (its one run
+    /// segment) and a Dismiss for an errored capture. Once reconciliation migrates
+    /// the capture to its real task id, `validSelection` remaps the selection and
+    /// this view is replaced by the real plan's detail.
+    @ViewBuilder
+    private func capturePlaceholder(rowID: TaskRow.ID) -> some View {
+        let captureRun = runner.runs[rowID]
+        VStack(spacing: 0) {
+            VStack(alignment: .leading, spacing: 8) {
+                HStack(spacing: 8) {
+                    if captureRun?.isRunning == true {
+                        ProgressView().controlSize(.small)
+                    }
+                    Text(captureRun?.description ?? "Capturing…")
+                        .font(.title2)
+                        .fontWeight(.semibold)
+                        .lineLimit(2)
+                        .truncationMode(.tail)
+                }
+                Text("A new plan is being captured. The detail opens here once it lands.")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(28)
+            Divider()
+            Spacer(minLength: 0)
+            AgentDock(row: nil, captureRun: captureRun)
+                .frame(maxHeight: .infinity)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    /// Whether this plan's single agent is busy (working or needs input) — the
+    /// one gate every header/housekeeping action is disabled behind (#117).
+    private func agentBusy(_ row: TaskRow) -> Bool {
+        runner.agent(for: row.task.id, in: row.projectPath)?.isBusy ?? false
+    }
+
+    /// The tooltip copy for a disabled action while the agent is busy, from the
+    /// agent's pure `busyReason` (#117), or `nil` when idle.
+    private func agentBusyReason(_ row: TaskRow) -> String? {
+        runner.agent(for: row.task.id, in: row.projectPath)?.busyReason
+    }
+
     /// The detail header: the title as a prominent heading, the owning project's
     /// name (since there is no longer a selected sidebar project for context),
     /// plus a status line (the type badge and the status's `filterLabel`).
@@ -401,13 +389,14 @@ struct PlanDetailView: View {
             // icon buttons, and the backlog/delete housekeeping in an overflow
             // menu, so the bar reads as one tidy row instead of six equal pills.
             HStack(spacing: 8) {
-                if runner.isRunning(taskID: row.task.id, in: row.projectPath) {
-                    // This task is being worked: show live status + a toggle for
-                    // the inline progress drawer (#107) — the run is independent
-                    // of this window. No action buttons while it runs.
-                    ProgressView().controlSize(.small)
-                    Button("Show progress") { showProgress.toggle() }
-                } else {
+                // #117: while the plan's agent is busy, the lifecycle actions stay
+                // VISIBLE but DISABLED (the dock below shows the live log and a
+                // Stop), with a `.help(busyReason)` explaining why — the agent is
+                // the single gate. `agentBusy` / `agentBusyReason` read the one
+                // `PlanAgent`.
+                let busy = agentBusy(row)
+                let busyReason = agentBusyReason(row)
+                Group {
                     // "Elaborate" — hands a pending plan off to the bundled
                     // runner in autonomous `plan-elaborate` mode. Available only
                     // for a pending, non-blocked task. Since #074 it opens the
@@ -554,6 +543,8 @@ struct PlanDetailView: View {
                         }
                     }
                 }
+                .disabled(busy)
+                .help(busy ? (busyReason ?? "") : "")
 
                 Spacer(minLength: 8)
 
@@ -602,7 +593,10 @@ struct PlanDetailView: View {
                     }
                     .menuIndicator(.hidden)
                     .fixedSize()
-                    .help("More actions")
+                    // #117: housekeeping (Backlog / Restore / Delete) is also
+                    // gated while the agent is busy — these drive their own runs.
+                    .disabled(busy)
+                    .help(busy ? (busyReason ?? "") : "More actions")
                 }
             }
             .controlSize(.large)
@@ -621,14 +615,6 @@ struct PlanDetailView: View {
         return project.tasks.filter { $0.id != row.task.id }
     }
 
-    /// The live interactive run for this task — a guided `.review` or a
-    /// `.complete` — or `nil` when the given run is absent, not running, or
-    /// autonomous. Both modes park on questions, so both drive the question
-    /// panel. Pure so the gate is testable without a live run.
-    static func liveInteractiveRun(_ run: TaskRun?) -> TaskRun? {
-        guard let run, run.isRunning, run.mode.isInteractive else { return nil }
-        return run
-    }
 
     /// The FINISHED guided review for this task, or `nil`. Only a review that
     /// ran to a clean `done` qualifies — not one that is still running, was
@@ -642,211 +628,12 @@ struct PlanDetailView: View {
         return run
     }
 
-    /// The bottom panel's title for an interactive run.
-    static func interactivePanelTitle(mode: RunMode) -> String {
-        mode == .complete ? "Complete Plan" : "Guided Review"
-    }
 
     /// The sentinel option label (#083) the guided review offers alongside the
     /// skill's own choices: picking it hands the decision back to the agent
     /// ("Resolve for me") rather than the user choosing. It is sent verbatim as
     /// the answer value.
     static let resolveForMeLabel = "Resolve for me"
-
-    // MARK: - Review panel (#083 guided in-app review)
-
-    /// The question panel shown in place of the Discuss composer while an
-    /// interactive run (guided review or complete) is live (#083). It keeps the
-    /// discussion transcript above it, then shows: the run transcript (reusing
-    /// `RunLogContents`) filling the panel, and — when a question is parked — a
-    /// section beneath it with one option button per choice INCLUDING "Resolve
-    /// for me" (honouring `multiSelect`) plus an "Other" free-text field. The
-    /// final summary is shown by `finishedReviewPanel` once a review finishes.
-    /// The header carries the open-in-Terminal / open-in-Editor actions for a
-    /// review directory. Plain stacks + `maxHeight: .infinity` only — NO
-    /// GeometryReader / measured heights (#096).
-    private func reviewPanel(_ row: TaskRow, run: TaskRun) -> some View {
-        VStack(alignment: .leading, spacing: 0) {
-            HStack(alignment: .firstTextBaseline, spacing: 8) {
-                Image(systemName: run.mode == .complete ? "checkmark.seal" : "checklist")
-                    .foregroundStyle(.secondary)
-                Text(Self.interactivePanelTitle(mode: run.mode))
-                    .font(.headline)
-                if run.isRunning {
-                    ProgressView().controlSize(.small)
-                }
-                Spacer(minLength: 8)
-                reviewOpenInButtons(row, run: run)
-                Button(role: .destructive) {
-                    run.stop()
-                } label: {
-                    Label("Stop", systemImage: "stop.fill")
-                }
-                .controlSize(.small)
-            }
-            .padding(.horizontal, 16)
-            .padding(.vertical, 8)
-
-            Divider()
-
-            // The live transcript gets the panel's full height as its own band
-            // and auto-scrolls to the newest output (RunLogContents). Nothing
-            // here measures its own size (#096).
-            RunLogContents(run: run, edgeToEdge: true, horizontalPadding: 16, topPadding: 10)
-                .frame(maxWidth: .infinity, minHeight: 0, maxHeight: .infinity)
-
-            // A parked question sits beneath the transcript at its natural
-            // height and wins the layout, so the card (and its Send button) is
-            // never clipped — the transcript yields the space instead. Only
-            // when the questions alone outgrow the panel does the built-in
-            // ViewThatFits fall back to a scrolling card. No self-measuring
-            // (#096).
-            if let pending = run.pendingQuestion {
-                Divider()
-                ViewThatFits(in: .vertical) {
-                    reviewQuestionsSection(row, run: run, pending: pending)
-                    ScrollView {
-                        reviewQuestionsSection(row, run: run, pending: pending)
-                    }
-                }
-                .layoutPriority(1)
-            }
-        }
-        .frame(maxHeight: .infinity)
-    }
-
-    private func reviewQuestionsSection(_ row: TaskRow, run: TaskRun,
-                                        pending: TaskRun.PendingReviewQuestion) -> some View {
-        reviewQuestionsView(row, run: run, pending: pending)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(.horizontal, 16)
-            .padding(.vertical, 12)
-    }
-
-    /// The panel shown after a guided review finished cleanly: the reviewer's
-    /// final summary (markdown, scrolling in the panel's full height) and the
-    /// follow-up actions — continue the conversation with the reviewer, complete
-    /// the plan (behind an explicit confirmation), or dismiss back to the plain
-    /// Discuss composer. Plain stacks + `maxHeight: .infinity` only (#096).
-    private func finishedReviewPanel(_ row: TaskRow, run: TaskRun) -> some View {
-        let canDiscussNow = Self.canDiscuss(status: row.task.status,
-                                            isBlocked: row.task.isBlocked,
-                                            isBacklogged: row.task.isBacklogged)
-            && !(runner.discussion(projectPath: row.projectPath, taskID: row.task.id)?.isBusy ?? false)
-        let canCompleteNow = Self.canComplete(status: row.task.status,
-                                              branch: row.task.branch,
-                                              isBlocked: row.task.isBlocked,
-                                              isBacklogged: row.task.isBacklogged,
-                                              hasLiveRun: run.isRunning)
-        return VStack(alignment: .leading, spacing: 0) {
-            HStack(alignment: .firstTextBaseline, spacing: 8) {
-                Image(systemName: "checkmark.circle")
-                    .foregroundStyle(.secondary)
-                Text("Review Finished")
-                    .font(.headline)
-                Spacer(minLength: 8)
-                reviewOpenInButtons(row, run: run)
-                Button("Done") {
-                    runner.dismiss(taskID: row.task.id, in: row.projectPath)
-                    store.reload()
-                }
-                .controlSize(.small)
-                .help("Close the review and return to the Discuss composer")
-            }
-            .padding(.horizontal, 16)
-            .padding(.vertical, 8)
-
-            Divider()
-
-            ScrollView {
-                Group {
-                    if let reply = run.reply, !reply.isEmpty {
-                        markdownBlockView(reply, style: .compact)
-                    } else {
-                        Text("The review finished without a summary.")
-                            .foregroundStyle(.secondary)
-                    }
-                }
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(.horizontal, 16)
-                .padding(.vertical, 12)
-            }
-            .textSelection(.enabled)
-            .frame(maxHeight: .infinity)
-
-            Divider()
-
-            HStack(spacing: 8) {
-                Spacer(minLength: 0)
-                if canDiscussNow {
-                    Button {
-                        runner.continueReviewInDiscussion(projectPath: row.projectPath,
-                                                          taskID: row.task.id)
-                    } label: {
-                        Label("Discuss with Reviewer", systemImage: "bubble.left.and.bubble.right")
-                    }
-                    .help("Continue the conversation with the reviewing agent")
-                }
-                if canCompleteNow, let branch = row.task.branch {
-                    Button {
-                        if Self.confirmComplete(taskID: row.task.id, title: row.title,
-                                                branch: branch) {
-                            runner.complete(projectPath: row.projectPath, taskID: row.task.id)
-                        }
-                    } label: {
-                        Label("Complete…", systemImage: "checkmark.seal")
-                    }
-                    .buttonStyle(.borderedProminent)
-                    .help("Merge the branch and archive this plan")
-                }
-            }
-            .padding(.horizontal, 16)
-            .padding(.vertical, 10)
-        }
-        .frame(maxHeight: .infinity)
-    }
-
-    /// The open-in-Terminal / open-in-Editor buttons for the review directory
-    /// (#083): the worktree path for a `kept`/`worktree` review, the project root
-    /// for `main`. Hidden for a `kept`/`worktree` review whose worktree path has
-    /// not been written yet (surfaces on the next store refresh) — the targeting
-    /// comes from the pure `reviewOpenDirectory` helper.
-    @ViewBuilder
-    private func reviewOpenInButtons(_ row: TaskRow, run: TaskRun) -> some View {
-        if let location = run.reviewLocation,
-           let dir = Self.reviewOpenDirectory(location: location,
-                                              worktreePath: row.task.worktreePath,
-                                              projectRoot: row.projectPath) {
-            Button {
-                Self.openInTerminal(directory: dir)
-            } label: {
-                Label("Open in Terminal", systemImage: "terminal")
-                    .labelStyle(.iconOnly)
-            }
-            .controlSize(.small)
-            .help("Open the review directory in Terminal")
-
-            Button {
-                NSWorkspace.shared.open(URL(fileURLWithPath: dir))
-            } label: {
-                Label("Open in Editor", systemImage: "folder")
-                    .labelStyle(.iconOnly)
-            }
-            .controlSize(.small)
-            .help("Open the review directory in the default app")
-        }
-    }
-
-    /// The parked question(s) for an interactive run, answered back over the
-    /// run's stdin via `TaskRun.answer`. Rendered by the shared
-    /// `ParkedQuestionForm` (also used by the active-runs popover's sheet).
-    private func reviewQuestionsView(_ row: TaskRow, run: TaskRun,
-                                     pending: TaskRun.PendingReviewQuestion) -> some View {
-        ParkedQuestionForm(pending: pending) { answers in
-            run.answer(toolUseId: pending.toolUseId, answers: answers)
-        }
-        .id(pending.toolUseId)
-    }
 
     /// Builds the `answers` payload for a parked `AskUserQuestion`. The UI keeps
     /// selection state per question `header`, but the SDK reads answers keyed by
@@ -945,130 +732,9 @@ struct PlanDetailView: View {
         }
     }
 
-    /// The discussion composer, styled like the Claude app's reply box: one
-    /// rounded, filled field with a faint border holding a multi-line question
-    /// and a trailing return glyph that sends it — or, while a turn is pending,
-    /// a stop glyph that cancels it. Return sends (`.onSubmit`).
-    /// The field grows with its text up to six lines via `lineLimit` — its
-    /// height is natural, never measured (#096). Input is disabled while a
-    /// turn is pending. The top divider is dropped when the composer sits
-    /// under the transcript, so the two read as one panel; the enclosing
-    /// panel supplies the `.bar` background.
-    private func discussFooter(_ row: TaskRow, isBusy: Bool, showsDivider: Bool) -> some View {
-        let canSend = Self.canSendDiscussion(discussText, isBusy: isBusy)
-        // #114: the opt-in Apply affordance. Gated to the same quiescent,
-        // pre-execution statuses as Backlog so a write-capable turn can never fire
-        // for an in-progress / in-review / completed / blocked / backlogged plan.
-        let canApply = Self.canApplyViaDiscussion(status: row.task.status,
-                                                  isBlocked: row.task.isBlocked,
-                                                  isBacklogged: row.task.isBacklogged)
-        return VStack(spacing: 0) {
-            if showsDivider {
-                Divider()
-            }
-            HStack(alignment: .bottom, spacing: 8) {
-                TextField("Ask about this plan…", text: $discussText, axis: .vertical)
-                    .lineLimit(1...6)
-                    .textFieldStyle(.plain)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .disabled(isBusy)
-                    .onSubmit { submitDiscussion(row) }
 
-                // #114: Apply changes — a SECOND, deliberate send that routes
-                // through the write-capable apply path. Rendered only when the plan
-                // is eligible (`canApply`); the default Send stays read-only Q&A.
-                if canApply, !Self.composerShowsStop(isBusy: isBusy) {
-                    Button {
-                        submitApplyDiscussion(row)
-                    } label: {
-                        Image(systemName: "square.and.pencil")
-                            .foregroundStyle(.secondary)
-                    }
-                    .buttonStyle(.plain)
-                    .disabled(!canSend)
-                    .opacity(canSend ? 1 : 0.4)
-                    .help("Apply changes to this plan")
-                }
 
-                if Self.composerShowsStop(isBusy: isBusy) {
-                    Button {
-                        runner.cancelDiscussionTurn(projectPath: row.projectPath,
-                                                    taskID: row.task.id)
-                    } label: {
-                        Image(systemName: "stop.circle.fill")
-                            .foregroundStyle(.secondary)
-                    }
-                    .buttonStyle(.plain)
-                    .help("Stop")
-                } else {
-                    Button {
-                        submitDiscussion(row)
-                    } label: {
-                        Image(systemName: "return")
-                            .foregroundStyle(.secondary)
-                    }
-                    .buttonStyle(.plain)
-                    .disabled(!canSend)
-                    .opacity(canSend ? 1 : 0.4)
-                    .help("Send")
-                }
-            }
-            .padding(.horizontal, 12)
-            .padding(.vertical, 10)
-            .background(
-                RoundedRectangle(cornerRadius: 12)
-                    .fill(Color(nsColor: .textBackgroundColor))
-            )
-            .overlay(
-                RoundedRectangle(cornerRadius: 12)
-                    .strokeBorder(Color.primary.opacity(0.1), lineWidth: 1)
-            )
-            .padding(.horizontal, 16)
-            .padding(.vertical, 12)
-        }
-    }
 
-    /// Asks this view's question in the plan's discussion thread. Guards the
-    /// same `canDiscuss` gate the composer renders behind (so a stale Return
-    /// can't fire for a now-blocked/backlogged plan) and the send predicate
-    /// (blank input or a pending turn never fires). The turn renders inline in
-    /// the transcript — no progress sheet. Discussion is read-only: the runner
-    /// restricts the agent to read tools, so the plan file is never changed.
-    private func submitDiscussion(_ row: TaskRow) {
-        guard Self.canDiscuss(status: row.task.status,
-                              isBlocked: row.task.isBlocked,
-                              isBacklogged: row.task.isBacklogged) else { return }
-        let isBusy = runner.discussion(projectPath: row.projectPath, taskID: row.task.id)?.isBusy ?? false
-        guard Self.canSendDiscussion(discussText, isBusy: isBusy),
-              let text = Self.discussSubmission(discussText) else { return }
-        runner.ask(projectPath: row.projectPath, taskID: row.task.id, question: text)
-        discussText = ""
-    }
-
-    /// #114: the APPLYING variant of `submitDiscussion`. Routes the same question
-    /// through the write-capable apply path (`apply: true`) and reloads the store
-    /// once the turn finishes cleanly, so edits the agent wrote show up. Guarded by
-    /// the same `canApplyViaDiscussion` gate the Apply control renders behind (so a
-    /// stale Return/click can't fire for a now-ineligible plan), plus the usual
-    /// blank-input / busy guard. Unlike `submitDiscussion`, this deliberately opts
-    /// into mutation — it is only reachable from the explicit Apply control.
-    private func submitApplyDiscussion(_ row: TaskRow) {
-        guard Self.canApplyViaDiscussion(status: row.task.status,
-                                         isBlocked: row.task.isBlocked,
-                                         isBacklogged: row.task.isBacklogged) else { return }
-        let isBusy = runner.discussion(projectPath: row.projectPath, taskID: row.task.id)?.isBusy ?? false
-        guard Self.canSendDiscussion(discussText, isBusy: isBusy),
-              let text = Self.discussSubmission(discussText) else { return }
-        runner.ask(projectPath: row.projectPath, taskID: row.task.id, question: text,
-                   apply: true, onApplied: { [store] in store.reload() })
-        discussText = ""
-    }
-
-    /// Scrolls the transcript so the newest turn's bottom edge is visible.
-    private func scrollToLatestTurn(_ thread: DiscussionThread, proxy: ScrollViewProxy) {
-        guard let target = Self.discussionScrollTarget(for: thread.turns) else { return }
-        withAnimation { proxy.scrollTo(target, anchor: .bottom) }
-    }
 
     /// #105: the in-progress progress panel — a slim band between the header's
     /// full-bleed Divider and the body, so an active plan reads its progress at a
@@ -1104,120 +770,14 @@ struct PlanDetailView: View {
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 
-    /// #107: the inline progress DRAWER — the de-modalized run log that replaces
-    /// the old `RunProgressSheet`, rendered full-bleed below the #105
-    /// `progressPanel` (same double-`.frame` full-bleed convention: inner content,
-    /// outer `.frame(maxWidth: .infinity, alignment: .leading)`, trailing
-    /// `Divider()` seam). A tappable header row shows the mode-aware run title
-    /// (`progressDrawerTitle`), a live spinner while the run runs, a Stop button
-    /// while running, and a chevron disclosure reflecting the `showProgress`
-    /// expanded state — tapping the row (or the chevron) toggles expansion. When
-    /// expanded, `expandedRunLog` shows the shared `RunLogContents` (error banner,
-    /// auto-scrolling log, denial note, cost/turns summary) at the top of the
-    /// scrolling body. Collapsing only hides the log
-    /// — it never stops the run; Stop ends it. Once the run has ENDED the header
-    /// shows a "Done" button in place of Stop — the finished-run dismissal that
-    /// replaces the old sheet's Done: it drops the finished run, reloads the store
-    /// so the new status surfaces, and collapses the drawer. A live run is never
-    /// dismissed by drawer interaction.
-    ///
-    /// Wired into `planScrollView` directly after the `progressPanel` block, gated
-    /// by `showsProgressDrawer(hasRun:)`. It is passed the resolved `TaskRow`.
-    ///
-    /// Only the header row lives in the pinned banner. The expanded log is
-    /// rendered separately by `expandedRunLog` at the top of the scrolling body,
-    /// so expanding it never grows the banner's height.
-    private func progressDrawer(_ row: TaskRow) -> some View {
-        let run = runner.run(for: row.task.id, in: row.projectPath)
-        return VStack(spacing: 0) {
-            progressDrawerHeader(row, run: run)
-            Divider()
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-    }
 
-    /// The expanded run log, shown full-bleed as the first thing in the
-    /// scrolling body while the drawer is expanded. Capped at a fixed height so
-    /// it scrolls within its own band (auto-scrolling to the newest line);
-    /// nothing measures its own size (#096). A trailing Divider seams it off
-    /// from the plan sections below.
-    private func expandedRunLog(_ row: TaskRow) -> some View {
-        VStack(spacing: 0) {
-            RunLogContents(run: runner.run(for: row.task.id, in: row.projectPath),
-                           edgeToEdge: true,
-                           horizontalPadding: Self.drawerGutter,
-                           topPadding: Self.drawerLogTopInset)
-                .frame(maxHeight: 360)
-            Divider()
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-    }
 
-    /// Pure predicate for whether the expanded run log renders in the body:
-    /// there must be a run to show AND the drawer must be expanded.
-    static func showsExpandedRunLog(hasRun: Bool, isExpanded: Bool) -> Bool {
-        hasRun && isExpanded
-    }
 
-    /// Horizontal gutter for the drawer header and edge-to-edge log — matches
-    /// the detail header's 28pt padding so everything lines up on one edge.
-    private static let drawerGutter: CGFloat = 28
 
-    /// Fixed top inset for the expanded log. It sits directly below the pinned
-    /// header (no overlay to clear), so a small constant is enough; never a
-    /// measured height (#096).
-    static let drawerLogTopInset: CGFloat = 12
 
     /// Maximum lines for the pinned header's title before it truncates.
     static let titleLineLimit = 3
 
-    /// The drawer's disclosure header: chevron + title + spinner, with Stop
-    /// (live run) or Done (finished run) trailing. The whole row toggles
-    /// expansion; Stop/Done are their own buttons so they don't toggle.
-    private func progressDrawerHeader(_ row: TaskRow, run: TaskRun?) -> some View {
-        Button {
-            withAnimation(.snappy(duration: 0.2)) { showProgress.toggle() }
-        } label: {
-            HStack(spacing: 10) {
-                Image(systemName: "chevron.right")
-                    .imageScale(.small)
-                    .foregroundStyle(.secondary)
-                    .rotationEffect(.degrees(showProgress ? 90 : 0))
-                Text(PlanDetailView.progressDrawerTitle(mode: run?.mode, taskID: row.task.id))
-                    .font(.subheadline.weight(.medium))
-                    .foregroundStyle(.primary)
-                if run?.isRunning == true {
-                    ProgressView().controlSize(.small)
-                }
-                Spacer(minLength: 8)
-                if run?.isRunning == true {
-                    Button(role: .destructive) {
-                        run?.stop()
-                    } label: {
-                        Label("Stop", systemImage: "stop.fill")
-                    }
-                    .controlSize(.small)
-                } else if run != nil {
-                    // #107: the finished-run dismissal affordance (replaces the
-                    // old sheet's Done). A LIVE run is never dropped here.
-                    Button("Done") {
-                        if let run = runner.run(for: row.task.id, in: row.projectPath),
-                           !run.isRunning {
-                            runner.dismiss(taskID: row.task.id, in: row.projectPath)
-                            store.reload()
-                        }
-                        showProgress = false
-                    }
-                    .controlSize(.small)
-                }
-            }
-            .padding(.horizontal, Self.drawerGutter)
-            .padding(.vertical, 10)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-    }
 
     /// A PINNED top banner (header + full-bleed rule + in-progress progress
     /// panel + #107 run-log drawer header row) above a scrolling plan body (the
@@ -1246,16 +806,8 @@ struct PlanDetailView: View {
                                            howProgress: row.task.howProgress) {
                     progressPanel(row)
                 }
-                // #107: the inline run-log DRAWER, rendered full-bleed in the same
-                // seam'd region directly below the step-count panel — the
-                // de-modalized replacement for the old `RunProgressSheet`. Present
-                // whenever there is a run to show (live OR finished-not-yet-
-                // dismissed); collapsed by default unless a run was already live on
-                // appear. Its own trailing Divider seams it off from the body.
-                if Self.showsProgressDrawer(
-                    hasRun: runner.run(for: row.task.id, in: row.projectPath) != nil) {
-                    progressDrawer(row)
-                }
+                // #117: the former inline run-log DRAWER is gone — the live log now
+                // lives in the always-present `AgentDock` below the plan body.
             }
             .background(.bar)
             // Sized ahead of the ScrollView: the banner keeps its natural
@@ -1268,14 +820,6 @@ struct PlanDetailView: View {
 
             ScrollView {
                 VStack(alignment: .leading, spacing: 0) {
-                    // The expanded run log leads the scrolling body, full-bleed
-                    // (outside the padded reading-width column), so expanding it
-                    // never grows the pinned banner.
-                    if Self.showsExpandedRunLog(
-                        hasRun: runner.run(for: row.task.id, in: row.projectPath) != nil,
-                        isExpanded: showProgress) {
-                        expandedRunLog(row)
-                    }
                     VStack(alignment: .leading, spacing: 28) {
                         // #079: a PERSISTENT failure section (not a transient
                         // banner) when the latest run for this task failed. Reuses
@@ -1311,107 +855,7 @@ struct PlanDetailView: View {
         }
     }
 
-    /// The conversation half of the discussion panel: a compact header with a
-    /// close control, then the scrolling transcript — each question as a
-    /// right-aligned neutral bubble, each reply rendered as compact markdown, a
-    /// live "Thinking…" row while a turn is pending, and per-turn errors or a
-    /// "Cancelled" note. Closing drops the thread (and stops any in-flight
-    /// turn), collapsing the panel back to the composer; the next question
-    /// starts a fresh agent session.
-    private func conversationTranscript(_ row: TaskRow, thread: DiscussionThread) -> some View {
-        VStack(spacing: 0) {
-            HStack(alignment: .firstTextBaseline) {
-                Text("Discussion")
-                    .font(.headline)
-                Spacer()
-                Button {
-                    runner.resetDiscussion(projectPath: row.projectPath, taskID: row.task.id)
-                } label: {
-                    Image(systemName: "xmark")
-                        .foregroundStyle(.secondary)
-                }
-                .buttonStyle(.plain)
-                .help("Close conversation")
-            }
-            .padding(.horizontal, 16)
-            .padding(.vertical, 8)
 
-            ScrollViewReader { proxy in
-                ScrollView {
-                    VStack(alignment: .leading, spacing: 20) {
-                        ForEach(thread.turns) { turn in
-                            discussionTurnView(turn)
-                                .id(turn.id)
-                        }
-                    }
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(.horizontal, 16)
-                    .padding(.bottom, 8)
-                }
-                .textSelection(.enabled)
-                .frame(maxHeight: .infinity)
-                // Keep the newest turn in view as questions are asked and
-                // replies land. Scrolls by id only — nothing is measured.
-                .onAppear { scrollToLatestTurn(thread, proxy: proxy) }
-                .onChange(of: thread.turns.count) { scrollToLatestTurn(thread, proxy: proxy) }
-                .onChange(of: thread.turns.last?.reply) { scrollToLatestTurn(thread, proxy: proxy) }
-                .onChange(of: thread.turns.last?.isPending) { scrollToLatestTurn(thread, proxy: proxy) }
-            }
-        }
-    }
-
-    private func discussionTurnView(_ turn: DiscussionTurn) -> some View {
-        VStack(alignment: .leading, spacing: 12) {
-            HStack {
-                Spacer(minLength: 60)
-                Text(turn.question)
-                    .font(.system(size: MarkdownStyle.compact.bodySize))
-                    .foregroundStyle(.primary)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 8)
-                    .background(
-                        RoundedRectangle(cornerRadius: 12)
-                            .fill(Color.primary.opacity(0.12))
-                    )
-            }
-
-            if let reply = turn.reply {
-                markdownBlockView(reply, style: .compact)
-            }
-
-            if turn.isCancelled {
-                Text("Cancelled")
-                    .font(.callout)
-                    .foregroundStyle(.secondary)
-            }
-
-            if turn.isPending {
-                HStack(alignment: .firstTextBaseline, spacing: 6) {
-                    ProgressView().controlSize(.small)
-                    Text("Thinking…")
-                        .foregroundStyle(.secondary)
-                    if let activity = turn.activity {
-                        Text(activity)
-                            .foregroundStyle(.tertiary)
-                            .lineLimit(1)
-                            .truncationMode(.middle)
-                    }
-                }
-                .font(.callout)
-            }
-
-            if let error = turn.error {
-                Text(error)
-                    .font(.callout)
-                    .foregroundStyle(.white)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(8)
-                    .background(Color.red.opacity(0.85))
-                    .clipShape(RoundedRectangle(cornerRadius: 6))
-            }
-        }
-    }
 
     /// The PERSISTENT run-failure section (#079), shown only when `row.task`
     /// carries a `TaskFailure` overlay. Unlike the transient `errorBanner` in the
@@ -1685,15 +1129,6 @@ struct PlanDetailView: View {
         }
     }
 
-    /// Whether the review panel REPLACES the Discuss composer: while an
-    /// interactive run is live for this task, or after a guided review finished
-    /// cleanly (until the user dismisses it or moves on). The discussion thread
-    /// itself stays (the panel sits where the composer was). Pure so the swap is
-    /// testable.
-    static func showsReviewPanel(hasLiveReviewRun: Bool,
-                                 hasFinishedReviewRun: Bool = false) -> Bool {
-        hasLiveReviewRun || hasFinishedReviewRun
-    }
 
     /// Pure predicate for the "Complete" action: an `in-review` plan with a
     /// branch to merge, not blocked, not backlogged, and with no live run.
@@ -1915,19 +1350,6 @@ struct PlanDetailView: View {
         }
     }
 
-    /// Decides whether the progress sheet should auto-open, gated to the single
-    /// case where the task is ALREADY running as the window appears (e.g. the
-    /// user clicked the card spinner to come here). A fresh run started from THIS
-    /// view must NOT auto-open the sheet — the dashboard doesn't, and neither
-    /// should the detail pop-up (#061); the header's "Show progress" button is the
-    /// deliberate re-entry path. `onAppearRunning` is `runner.isRunning(taskID:in:)`
-    /// evaluated in `.onAppear`; this returns it unchanged, encoding the rule as a
-    /// pure, testable decision.
-    /// A `.discuss` run never auto-opens the sheet: discussion replies render
-    /// inline in the detail column.
-    static func shouldAutoOpenProgress(onAppearRunning: Bool, mode: RunMode? = nil) -> Bool {
-        onAppearRunning && mode != .discuss
-    }
 
     /// Pure predicate for the in-progress progress panel's visibility (#105).
     /// The panel — a step count + progress bar pushed down from the header — is
@@ -1953,30 +1375,7 @@ struct PlanDetailView: View {
         return Double(done) / Double(total)
     }
 
-    /// Pure predicate for the inline progress drawer's presence (#107). The
-    /// drawer — the de-modalized run log that replaces `RunProgressSheet` — is
-    /// rendered ONLY when there is a `TaskRun` to display for this task: one that
-    /// is still live OR finished-but-not-yet-dismissed. With no run there is
-    /// nothing to chart, so the drawer is absent. Callers pass
-    /// `runner.run(for:in:) != nil`; keeping the signature a plain `Bool` keeps
-    /// the predicate pure/view-free and unit-testable without a `TaskRun`, in
-    /// keeping with #105's helper style.
-    static func showsProgressDrawer(hasRun: Bool) -> Bool {
-        hasRun
-    }
 
-    /// Decides whether the progress drawer starts EXPANDED when the detail view
-    /// appears (#107). Encodes the same auto-open-on-appear rule the modal sheet
-    /// used — delegating to `shouldAutoOpenProgress` — but named for the drawer's
-    /// initial expanded state: a run that is ALREADY live as the view appears
-    /// auto-expands the drawer, a fresh run started from this view does not (the
-    /// header's "Show progress" toggle is the deliberate re-entry), and a
-    /// `.discuss` run never auto-expands (its reply renders inline in the
-    /// conversation panel). Pure/static so the rule is unit-testable without the
-    /// view.
-    static func progressDrawerStartsExpanded(onAppearRunning: Bool, mode: RunMode? = nil) -> Bool {
-        shouldAutoOpenProgress(onAppearRunning: onAppearRunning, mode: mode)
-    }
 
     /// The progress drawer's header title (#107), matching the old
     /// `RunProgressSheet.title`/`modeVerb` logic so the de-modalized log keeps
@@ -2077,145 +1476,10 @@ struct PlanDetailView: View {
     /// `.equatable()` lets a parent re-evaluation (every store poll, every run
     /// update) skip this subtree when the body and style are unchanged.
     private func markdownBlockView(_ body: String, style: MarkdownStyle = .plan) -> some View {
-        PreparedMarkdownBlockView(bodyText: body, style: style)
+        MarkdownBlockView(body: body, style: style)
             .equatable()
     }
 
-    /// A section body rendered from `PreparedMarkdownCache`. The final content
-    /// is there on the first frame: a loading placeholder made the section's
-    /// height jump when the real text replaced it, and preparing a whole plan
-    /// costs only a few milliseconds, once per body.
-    private struct PreparedMarkdownBlockView: View, Equatable {
-        let bodyText: String
-        let style: MarkdownStyle
-
-        nonisolated static func == (lhs: Self, rhs: Self) -> Bool {
-            lhs.bodyText == rhs.bodyText && lhs.style == rhs.style
-        }
-
-        var body: some View {
-            let blocks = PreparedMarkdownCache.shared.preparedBlocks(forBody: bodyText, style: style)
-            VStack(alignment: .leading, spacing: style.blockSpacing) {
-                ForEach(Array(blocks.enumerated()), id: \.offset) { _, block in
-                    renderBlock(block)
-                }
-            }
-        }
-
-        /// Renders a single prepared block with restrained, readable styling.
-        @ViewBuilder
-        private func renderBlock(_ block: PreparedMarkdownBlock) -> some View {
-            switch block {
-            case let .paragraph(text):
-                Text(text)
-                    .lineSpacing(style.lineSpacing)
-                    .fixedSize(horizontal: false, vertical: true)
-
-            case let .heading(level, text):
-                Text(text)
-                    .font(headingFont(forLevel: level))
-                    .foregroundStyle(headingColor(forLevel: level))
-                    .padding(.top, style.headingTopPadding)
-
-            case let .bulletList(items):
-                VStack(alignment: .leading, spacing: style.listSpacing) {
-                    ForEach(Array(items.enumerated()), id: \.offset) { _, item in
-                        HStack(alignment: .firstTextBaseline, spacing: style.markerSpacing) {
-                            Text("•")
-                                .font(.system(size: style.bodySize))
-                                .foregroundStyle(.secondary)
-                            Text(item)
-                                .lineSpacing(style.lineSpacing)
-                                .fixedSize(horizontal: false, vertical: true)
-                        }
-                        .padding(.leading, 4)
-                    }
-                }
-
-            case let .numberedList(items):
-                VStack(alignment: .leading, spacing: style.listSpacing) {
-                    ForEach(Array(items.enumerated()), id: \.offset) { index, item in
-                        HStack(alignment: .firstTextBaseline, spacing: style.markerSpacing) {
-                            Text("\(index + 1).")
-                                .font(.system(size: style.bodySize))
-                                .monospacedDigit()
-                                .foregroundStyle(.secondary)
-                            Text(item)
-                                .lineSpacing(style.lineSpacing)
-                                .fixedSize(horizontal: false, vertical: true)
-                        }
-                        .padding(.leading, 4)
-                    }
-                }
-
-            case let .codeBlock(highlighted):
-                Text(highlighted)
-                    .font(.system(size: style.bodySize - 1, design: .monospaced))
-                    .lineSpacing(style.lineSpacing - 1)
-                    .textSelection(.enabled)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(style.codePadding)
-                    .background(
-                        RoundedRectangle(cornerRadius: 8)
-                            .fill(Color(nsColor: .textBackgroundColor))
-                            .overlay(
-                                RoundedRectangle(cornerRadius: 8)
-                                    .strokeBorder(Color.primary.opacity(0.08), lineWidth: 1)
-                            )
-                    )
-
-            case let .blockquote(text):
-                HStack(spacing: 12) {
-                    RoundedRectangle(cornerRadius: 2)
-                        .fill(Color.accentColor.opacity(0.65))
-                        .frame(width: 3)
-                    Text(text)
-                        .foregroundStyle(.secondary)
-                        .lineSpacing(style.lineSpacing)
-                        .fixedSize(horizontal: false, vertical: true)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                }
-                .padding(.vertical, 10)
-                .padding(.horizontal, 12)
-                .background(
-                    RoundedRectangle(cornerRadius: 8)
-                        .fill(Color.accentColor.opacity(0.06))
-                )
-            }
-        }
-
-        /// The emphasized font for a sub-heading, scaling down with nesting depth:
-        /// level 1/2 read as section-ish, level 3+ as a smaller bold subhead.
-        private func headingFont(forLevel level: Int) -> Font {
-            if let size = style.headingSize(forLevel: level) {
-                return .system(size: size, weight: .semibold)
-            }
-            switch level {
-            case 1: return .largeTitle.bold()
-            case 2: return .title.bold()
-            default: return .title2.bold()
-            }
-        }
-
-        /// Tints sub-headings by depth so the hierarchy reads through color as well
-        /// as size: the biggest headings take the accent, the next level a cooler
-        /// teal, and deeper levels settle to primary so it never becomes a rainbow.
-        private func headingColor(forLevel level: Int) -> Color {
-            guard style.tintsHeadings else { return .primary }
-            switch level {
-            case 1: return .accentColor
-            case 2: return .teal
-            default: return .primary
-            }
-        }
-    }
-
-    /// Renders the `## How` body as a READ-ONLY checklist. Lines matching
-    /// `- [ ]` / `- [x]` / `- [X]` become a `Label` with `square` /
-    /// `checkmark.square`; the checkbox prefix is stripped from the step text.
-    /// These are never interactive (§2): no `Toggle`, no `Button`, no binding,
-    /// no writes.
-    @ViewBuilder
     /// #105: the plans-cc "to be filled" stub for a section that a later
     /// lifecycle stage writes (`_To be filled during elaboration_`, …), with its
     /// emphasis markers stripped, or `nil` when the body is real content. Only a
@@ -2275,6 +1539,143 @@ struct PlanDetailView: View {
     }
 }
 
+/// A section/reply body rendered from `PreparedMarkdownCache`. Lifted to a
+/// top-level `internal` struct (#117) so BOTH the plan-detail body and the agent
+/// dock's discuss turns (`AgentTurnView`) render markdown through one renderer at
+/// different `MarkdownStyle` scales. The final content is there on the first
+/// frame: a loading placeholder made the section's height jump when the real text
+/// replaced it, and preparing a whole plan costs only a few milliseconds, once
+/// per body.
+struct MarkdownBlockView: View, Equatable {
+    let bodyText: String
+    let style: MarkdownStyle
+
+    init(body: String, style: MarkdownStyle = .plan) {
+        self.bodyText = body
+        self.style = style
+    }
+
+    nonisolated static func == (lhs: Self, rhs: Self) -> Bool {
+        lhs.bodyText == rhs.bodyText && lhs.style == rhs.style
+    }
+
+    var body: some View {
+        let blocks = PreparedMarkdownCache.shared.preparedBlocks(forBody: bodyText, style: style)
+        return VStack(alignment: .leading, spacing: style.blockSpacing) {
+            ForEach(Array(blocks.enumerated()), id: \.offset) { _, block in
+                renderBlock(block)
+            }
+        }
+    }
+
+    /// Renders a single prepared block with restrained, readable styling.
+    @ViewBuilder
+    private func renderBlock(_ block: PreparedMarkdownBlock) -> some View {
+        switch block {
+        case let .paragraph(text):
+            Text(text)
+                .lineSpacing(style.lineSpacing)
+                .fixedSize(horizontal: false, vertical: true)
+
+        case let .heading(level, text):
+            Text(text)
+                .font(headingFont(forLevel: level))
+                .foregroundStyle(headingColor(forLevel: level))
+                .padding(.top, style.headingTopPadding)
+
+        case let .bulletList(items):
+            VStack(alignment: .leading, spacing: style.listSpacing) {
+                ForEach(Array(items.enumerated()), id: \.offset) { _, item in
+                    HStack(alignment: .firstTextBaseline, spacing: style.markerSpacing) {
+                        Text("•")
+                            .font(.system(size: style.bodySize))
+                            .foregroundStyle(.secondary)
+                        Text(item)
+                            .lineSpacing(style.lineSpacing)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    .padding(.leading, 4)
+                }
+            }
+
+        case let .numberedList(items):
+            VStack(alignment: .leading, spacing: style.listSpacing) {
+                ForEach(Array(items.enumerated()), id: \.offset) { index, item in
+                    HStack(alignment: .firstTextBaseline, spacing: style.markerSpacing) {
+                        Text("\(index + 1).")
+                            .font(.system(size: style.bodySize))
+                            .monospacedDigit()
+                            .foregroundStyle(.secondary)
+                        Text(item)
+                            .lineSpacing(style.lineSpacing)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    .padding(.leading, 4)
+                }
+            }
+
+        case let .codeBlock(highlighted):
+            Text(highlighted)
+                .font(.system(size: style.bodySize - 1, design: .monospaced))
+                .lineSpacing(style.lineSpacing - 1)
+                .textSelection(.enabled)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(style.codePadding)
+                .background(
+                    RoundedRectangle(cornerRadius: 8)
+                        .fill(Color(nsColor: .textBackgroundColor))
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 8)
+                                .strokeBorder(Color.primary.opacity(0.08), lineWidth: 1)
+                        )
+                )
+
+        case let .blockquote(text):
+            HStack(spacing: 12) {
+                RoundedRectangle(cornerRadius: 2)
+                    .fill(Color.accentColor.opacity(0.65))
+                    .frame(width: 3)
+                Text(text)
+                    .foregroundStyle(.secondary)
+                    .lineSpacing(style.lineSpacing)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .padding(.vertical, 10)
+            .padding(.horizontal, 12)
+            .background(
+                RoundedRectangle(cornerRadius: 8)
+                    .fill(Color.accentColor.opacity(0.06))
+            )
+        }
+    }
+
+    /// The emphasized font for a sub-heading, scaling down with nesting depth:
+    /// level 1/2 read as section-ish, level 3+ as a smaller bold subhead.
+    private func headingFont(forLevel level: Int) -> Font {
+        if let size = style.headingSize(forLevel: level) {
+            return .system(size: size, weight: .semibold)
+        }
+        switch level {
+        case 1: return .largeTitle.bold()
+        case 2: return .title.bold()
+        default: return .title2.bold()
+        }
+    }
+
+    /// Tints sub-headings by depth so the hierarchy reads through color as well
+    /// as size: the biggest headings take the accent, the next level a cooler
+    /// teal, and deeper levels settle to primary so it never becomes a rainbow.
+    private func headingColor(forLevel level: Int) -> Color {
+        guard style.tintsHeadings else { return .primary }
+        switch level {
+        case 1: return .accentColor
+        case 2: return .teal
+        default: return .primary
+        }
+    }
+}
+
 /// The shared, host-agnostic run-log body (#107): the error banner, the
 /// auto-scrolling activity/text log, the denial note, and the cost/turns summary
 /// for a single `TaskRun`. Factored out of `RunProgressSheet` so BOTH the modal
@@ -2287,6 +1688,43 @@ struct RunLogContents: View {
     /// The run to render, or `nil` when there is none (e.g. it was dropped) — the
     /// log then shows nothing.
     let run: TaskRun?
+
+    /// The id of the line to scroll into view on first appearance: the last
+    /// (newest) line, or `nil` when there are no lines yet. Pure so it's unit
+    /// testable without constructing the view. (#117: moved here from the
+    /// deleted `RunProgressSheet` — the log now lives wholly in `RunLogContents`.)
+    static func scrollTarget(for lines: [LoggedEvent]) -> UUID? {
+        lines.last?.id
+    }
+
+    /// Whether the red failure banner should be shown. Pure so it's unit
+    /// testable without constructing the view. (#117: moved here from the
+    /// deleted `RunProgressSheet`.)
+    ///
+    /// A `done`-derived failure (a budget/turn cap or the #058 stranded signal)
+    /// latches `run.error` the moment the terminal `done` line is ingested — but
+    /// a `done` does NOT clear `isRunning` (only `finish()` does). So without a
+    /// liveness check the banner armed mid-run and stayed armed while the run was
+    /// still live (spinner up, turns climbing) — the #081 false positive. Such a
+    /// `done`-derived failure is only meaningful once the run has actually ended,
+    /// so it is suppressed while `isRunning`.
+    ///
+    /// A genuine mid-run `.error(message)` event (a real crash / launch failure)
+    /// is a different animal: it means the run is broken now, so it must surface
+    /// immediately even while `isRunning`. We tell the two apart by comparing the
+    /// error text to `TaskRun.truncationError(for: stopReason)`: when they match,
+    /// the error came from the `done` classification and gets the liveness gate;
+    /// otherwise it's a genuine error and shows right away.
+    static func shouldShowFailureBanner(
+        error: String?,
+        isRunning: Bool,
+        stopReason: String?,
+        mode: RunMode = .execute
+    ) -> Bool {
+        guard let error else { return false }
+        guard isRunning else { return true }
+        return TaskRun.truncationError(for: stopReason, mode: mode) != error
+    }
 
     /// `false` (default): the inset rounded log field used by the popover.
     /// `true`: the drawer's edge-to-edge treatment — no rounded field, content
@@ -2318,7 +1756,7 @@ struct RunLogContents: View {
 
     private var failureMessage: String? {
         guard let error = run?.error,
-              RunProgressSheet.shouldShowFailureBanner(
+              Self.shouldShowFailureBanner(
                   error: error,
                   isRunning: run?.isRunning == true,
                   stopReason: run?.lastStopReason,
@@ -2405,7 +1843,7 @@ struct RunLogContents: View {
             // straight to the newest line — instantly, no animation — so the
             // view opens at the bottom instead of the top.
             .onAppear {
-                if let target = RunProgressSheet.scrollTarget(for: lines) {
+                if let target = Self.scrollTarget(for: lines) {
                     proxy.scrollTo(target, anchor: .bottom)
                 }
             }
@@ -2510,139 +1948,5 @@ struct RunLogContents: View {
             .padding(8)
             .background(Color.red.opacity(0.85))
             .clipShape(RoundedRectangle(cornerRadius: 6))
-    }
-}
-
-/// The modal progress dialog for a single task's run. Renders that run's live
-/// NDJSON stream via the shared `RunLogContents` (#107): a scrolling
-/// activity/text log, a cost/turns summary once the run reports `done`, an error
-/// banner on a streamed/terminal error, plus its own title header and a Stop
-/// button wired to the run's `stop()`. It dismisses via `@Environment(\.dismiss)`,
-/// so it works whether presented as a `.sheet` (the detail view) or a `.popover`
-/// (the card spinner) — the Done/Close button can close it either way; closing
-/// does NOT stop the run (it keeps going in the background).
-struct RunProgressSheet: View {
-    /// The specific run to render, or `nil` if there is none (e.g. the run was
-    /// dropped). When nil the sheet shows a minimal "no active run" state.
-    let run: TaskRun?
-
-    /// The task id being worked, for the header (e.g. "Working task #019").
-    let taskID: String?
-
-    @Environment(\.dismiss) private var dismiss
-
-    /// The id of the line to scroll into view on first appearance: the last
-    /// (newest) line, or `nil` when there are no lines yet. Pure so it's unit
-    /// testable without constructing the view.
-    static func scrollTarget(for lines: [LoggedEvent]) -> UUID? {
-        lines.last?.id
-    }
-
-    /// Whether the red failure banner should be shown. Pure so it's unit
-    /// testable without constructing the view.
-    ///
-    /// A `done`-derived failure (a budget/turn cap or the #058 stranded signal)
-    /// latches `run.error` the moment the terminal `done` line is ingested — but
-    /// a `done` does NOT clear `isRunning` (only `finish()` does). So without a
-    /// liveness check the banner armed mid-run and stayed armed while the run was
-    /// still live (spinner up, turns climbing) — the #081 false positive. Such a
-    /// `done`-derived failure is only meaningful once the run has actually ended,
-    /// so it is suppressed while `isRunning`.
-    ///
-    /// A genuine mid-run `.error(message)` event (a real crash / launch failure)
-    /// is a different animal: it means the run is broken now, so it must surface
-    /// immediately even while `isRunning`. We tell the two apart by comparing the
-    /// error text to `TaskRun.truncationError(for: stopReason)`: when they match,
-    /// the error came from the `done` classification and gets the liveness gate;
-    /// otherwise it's a genuine error and shows right away.
-    static func shouldShowFailureBanner(
-        error: String?,
-        isRunning: Bool,
-        stopReason: String?,
-        mode: RunMode = .execute
-    ) -> Bool {
-        guard let error else { return false }
-        // Ended runs always show whatever error latched.
-        guard isRunning else { return true }
-        // Still running: suppress only a `done`-derived truncation/stranded
-        // failure (its text equals the mapping for the current stop reason).
-        // Any other error (a genuine mid-run crash/launch failure) shows now.
-        return TaskRun.truncationError(for: stopReason, mode: mode) != error
-    }
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            header
-
-            // The shared run-log body (#107) — error banner, auto-scrolling log,
-            // denial note, and cost/turns summary — one source of truth with the
-            // inline progress drawer.
-            RunLogContents(run: run)
-
-            footer
-        }
-        .padding(12)
-        // Cap the height so a long run log can't grow the dialog unbounded.
-        // This matters most when presented as a popover from the card spinner,
-        // which has no enclosing window to bound it; the `logList` ScrollView
-        // scrolls any overflow within the cap.
-        .frame(minWidth: 480, minHeight: 360, maxHeight: 520)
-    }
-
-    /// The verb for this run's mode ("Executing" / "Elaborating" / "Capturing"
-    /// / "Capturing & elaborating" / "Capturing & executing" / "Deleting" /
-    /// "Backlogging" / "Restoring").
-    private var modeVerb: String {
-        run?.mode.activityVerb ?? RunMode.execute.activityVerb
-    }
-
-    /// The dialog title. Capture / captureElaborate / executeYolo runs have no
-    /// real task id yet — they're keyed by a synthetic `"capture:<path>"`
-    /// identity — so they show only the verb ("Capturing", "Capturing &
-    /// elaborating", "Capturing & executing") rather than "Capturing task
-    /// #capture:/…". Real runs keep the "verb task #NNN" form.
-    private var title: String {
-        switch run?.mode {
-        case .capture, .captureElaborate, .executeYolo:
-            return modeVerb
-        default:
-            return taskID.map { "\(modeVerb) task #\($0)" } ?? modeVerb
-        }
-    }
-
-    private var header: some View {
-        HStack {
-            Text(title)
-                .font(.headline)
-            if run?.isRunning == true {
-                ProgressView()
-                    .controlSize(.small)
-            }
-            Spacer()
-        }
-    }
-
-    private var footer: some View {
-        HStack {
-            Spacer()
-            if run?.isRunning == true {
-                // While running: Stop ends the run; Close just backgrounds the
-                // sheet (the run keeps going, reachable again via the card
-                // spinner or the detail's "Show progress").
-                Button(role: .destructive) {
-                    run?.stop()
-                } label: {
-                    Label("Stop", systemImage: "stop.fill")
-                }
-                .keyboardShortcut(".", modifiers: .command)
-
-                Button("Close") { dismiss() }
-                    .keyboardShortcut(.defaultAction)
-            } else {
-                // Finished: Done dismisses (and drops the finished run).
-                Button("Done") { dismiss() }
-                    .keyboardShortcut(.defaultAction)
-            }
-        }
     }
 }

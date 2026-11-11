@@ -124,7 +124,7 @@ final class PlanDetailViewTests: XCTestCase {
         XCTAssertNil(url)
     }
 
-    // MARK: - RunProgressSheet.scrollTarget
+    // MARK: - RunLogContents.scrollTarget
 
     func testScrollTargetReturnsLastLineIDForNonEmptyList() {
         let lines = [
@@ -134,16 +134,16 @@ final class PlanDetailViewTests: XCTestCase {
         ]
 
         XCTAssertEqual(
-            RunProgressSheet.scrollTarget(for: lines),
+            RunLogContents.scrollTarget(for: lines),
             lines.last?.id
         )
     }
 
     func testScrollTargetReturnsNilForEmptyList() {
-        XCTAssertNil(RunProgressSheet.scrollTarget(for: []))
+        XCTAssertNil(RunLogContents.scrollTarget(for: []))
     }
 
-    // MARK: - RunProgressSheet.shouldShowFailureBanner (#081)
+    // MARK: - RunLogContents.shouldShowFailureBanner (#081)
 
     /// A `done`-derived failure (stranded/truncation) latches `error` mid-run
     /// while `isRunning` stays true. The banner must NOT fire in that state —
@@ -155,7 +155,7 @@ final class PlanDetailViewTests: XCTestCase {
         XCTAssertNotNil(message)
 
         XCTAssertFalse(
-            RunProgressSheet.shouldShowFailureBanner(
+            RunLogContents.shouldShowFailureBanner(
                 error: message,
                 isRunning: true,
                 stopReason: stopReason
@@ -170,7 +170,7 @@ final class PlanDetailViewTests: XCTestCase {
         let message = TaskRun.truncationError(for: stopReason)
 
         XCTAssertTrue(
-            RunProgressSheet.shouldShowFailureBanner(
+            RunLogContents.shouldShowFailureBanner(
                 error: message,
                 isRunning: false,
                 stopReason: stopReason
@@ -186,14 +186,14 @@ final class PlanDetailViewTests: XCTestCase {
         XCTAssertNotNil(message)
 
         XCTAssertFalse(
-            RunProgressSheet.shouldShowFailureBanner(
+            RunLogContents.shouldShowFailureBanner(
                 error: message,
                 isRunning: true,
                 stopReason: stopReason
             )
         )
         XCTAssertTrue(
-            RunProgressSheet.shouldShowFailureBanner(
+            RunLogContents.shouldShowFailureBanner(
                 error: message,
                 isRunning: false,
                 stopReason: stopReason
@@ -207,7 +207,7 @@ final class PlanDetailViewTests: XCTestCase {
     func testFailureBannerShownForGenuineErrorWhileRunning() {
         // No stop reason yet (no `done` seen) and a crash-style message.
         XCTAssertTrue(
-            RunProgressSheet.shouldShowFailureBanner(
+            RunLogContents.shouldShowFailureBanner(
                 error: "Failed to launch node: executable not found",
                 isRunning: true,
                 stopReason: nil
@@ -218,14 +218,14 @@ final class PlanDetailViewTests: XCTestCase {
     /// No error → never show the banner, regardless of running state.
     func testFailureBannerHiddenWhenNoError() {
         XCTAssertFalse(
-            RunProgressSheet.shouldShowFailureBanner(
+            RunLogContents.shouldShowFailureBanner(
                 error: nil,
                 isRunning: true,
                 stopReason: nil
             )
         )
         XCTAssertFalse(
-            RunProgressSheet.shouldShowFailureBanner(
+            RunLogContents.shouldShowFailureBanner(
                 error: nil,
                 isRunning: false,
                 stopReason: "stranded_at_in_progress"
@@ -506,16 +506,6 @@ final class PlanDetailViewTests: XCTestCase {
         }
     }
 
-    // MARK: - PlanDetailView.shouldAutoOpenProgress
-
-    func testAutoOpensProgressWhenAlreadyRunningOnAppear() {
-        XCTAssertTrue(PlanDetailView.shouldAutoOpenProgress(onAppearRunning: true))
-    }
-
-    func testDoesNotAutoOpenProgressWhenNotRunningOnAppear() {
-        XCTAssertFalse(PlanDetailView.shouldAutoOpenProgress(onAppearRunning: false))
-    }
-
     // MARK: - PlanDetailView.canDiscuss (#099 — Discuss footer gating)
 
     /// Discuss is available for a real plan at ANY lifecycle status, including an
@@ -654,18 +644,6 @@ final class PlanDetailViewTests: XCTestCase {
     /// While a turn is pending the composer cannot send another question.
     func testCannotSendDiscussionWhileBusy() {
         XCTAssertFalse(PlanDetailView.canSendDiscussion("Follow-up?", isBusy: true))
-    }
-
-    // MARK: - PlanDetailView.shouldAutoOpenProgress (discussion)
-
-    /// A discussion turn never pops the progress sheet — its reply renders inline.
-    func testDoesNotAutoOpenProgressForDiscussRun() {
-        XCTAssertFalse(PlanDetailView.shouldAutoOpenProgress(onAppearRunning: true, mode: .discuss))
-    }
-
-    /// Any other live run still auto-opens on appear.
-    func testAutoOpensProgressForExecuteRun() {
-        XCTAssertTrue(PlanDetailView.shouldAutoOpenProgress(onAppearRunning: true, mode: .execute))
     }
 
     // MARK: - PlanDetailView.discussionScrollTarget
@@ -863,28 +841,6 @@ final class PlanDetailViewTests: XCTestCase {
         XCTAssertEqual(PlanDetailView.progressFraction(done: 0, total: 5), 0.0)
     }
 
-    // MARK: - PlanDetailView.showsProgressDrawer (#107 — drawer presence gating)
-
-    /// The inline progress drawer is present ONLY when there is a `TaskRun` to
-    /// show for this task — a run that is live OR finished-but-not-yet-dismissed.
-    /// With no run (nil) there is nothing to chart, so the drawer is absent.
-    @MainActor
-    func testShowsProgressDrawerWhenRunPresent() {
-        XCTAssertTrue(
-            PlanDetailView.showsProgressDrawer(hasRun: true),
-            "The drawer must be present whenever a run exists to display"
-        )
-    }
-
-    /// With no run, the drawer is absent.
-    @MainActor
-    func testHidesProgressDrawerWhenNoRun() {
-        XCTAssertFalse(
-            PlanDetailView.showsProgressDrawer(hasRun: false),
-            "The drawer must stay absent when there is no run to display"
-        )
-    }
-
     // MARK: - Pinned banner sizing (the banner must never pin the column's min height)
 
     /// The pinned header's title is capped to a few lines instead of growing to
@@ -893,58 +849,6 @@ final class PlanDetailViewTests: XCTestCase {
     @MainActor
     func testTitleLineLimitIsAFewLines() {
         XCTAssertEqual(PlanDetailView.titleLineLimit, 3)
-    }
-
-    /// The expanded run log renders in the scrolling body only when there is a
-    /// run AND the drawer is expanded; the pinned banner carries just the
-    /// drawer's header row.
-    @MainActor
-    func testShowsExpandedRunLogOnlyWhenRunPresentAndExpanded() {
-        XCTAssertTrue(PlanDetailView.showsExpandedRunLog(hasRun: true, isExpanded: true))
-        XCTAssertFalse(PlanDetailView.showsExpandedRunLog(hasRun: true, isExpanded: false))
-        XCTAssertFalse(PlanDetailView.showsExpandedRunLog(hasRun: false, isExpanded: true))
-        XCTAssertFalse(PlanDetailView.showsExpandedRunLog(hasRun: false, isExpanded: false))
-    }
-
-    /// The log sits directly under the pinned header (not under a floating
-    /// overlay), so it only needs a small fixed top inset.
-    @MainActor
-    func testDrawerLogTopInsetIsSmallFixedConstant() {
-        XCTAssertLessThanOrEqual(PlanDetailView.drawerLogTopInset, 16)
-        XCTAssertGreaterThan(PlanDetailView.drawerLogTopInset, 0)
-    }
-
-    // MARK: - PlanDetailView.progressDrawerStartsExpanded (#107 — initial expanded state)
-
-    /// The drawer auto-expands on appear under the SAME rule the sheet used to
-    /// auto-open (`shouldAutoOpenProgress`): a run already live as the view
-    /// appears expands the drawer.
-    @MainActor
-    func testProgressDrawerStartsExpandedWhenAlreadyRunningOnAppear() {
-        XCTAssertTrue(PlanDetailView.progressDrawerStartsExpanded(onAppearRunning: true))
-    }
-
-    /// Not running on appear → the drawer starts collapsed.
-    @MainActor
-    func testProgressDrawerStartsCollapsedWhenNotRunningOnAppear() {
-        XCTAssertFalse(PlanDetailView.progressDrawerStartsExpanded(onAppearRunning: false))
-    }
-
-    /// A discussion run never auto-expands the drawer — its reply renders inline
-    /// in the conversation panel, mirroring `shouldAutoOpenProgress`.
-    @MainActor
-    func testProgressDrawerStartsCollapsedForDiscussRun() {
-        XCTAssertFalse(
-            PlanDetailView.progressDrawerStartsExpanded(onAppearRunning: true, mode: .discuss)
-        )
-    }
-
-    /// Any other live run (e.g. execute) auto-expands the drawer on appear.
-    @MainActor
-    func testProgressDrawerStartsExpandedForExecuteRun() {
-        XCTAssertTrue(
-            PlanDetailView.progressDrawerStartsExpanded(onAppearRunning: true, mode: .execute)
-        )
     }
 
     // MARK: - MarkdownStyle
@@ -1192,15 +1096,6 @@ final class PlanDetailViewTests: XCTestCase {
         XCTAssertFalse(PlanDetailView.reviewNeedsInput(hasPendingQuestion: false))
     }
 
-    // MARK: - Review panel: replaces Discuss composer while live (#083 Step 6)
-
-    /// While a `.review` run is live the review panel REPLACES the Discuss
-    /// composer (the discussion thread stays).
-    func testReviewPanelReplacesComposerWhileReviewLive() {
-        XCTAssertTrue(PlanDetailView.showsReviewPanel(hasLiveReviewRun: true))
-        XCTAssertFalse(PlanDetailView.showsReviewPanel(hasLiveReviewRun: false))
-    }
-
     // MARK: - Interactive run panel: live and finished gating
 
     private func outcomeLog() -> RunOutcomeLog {
@@ -1223,15 +1118,6 @@ final class PlanDetailViewTests: XCTestCase {
 
     private let cleanFinish = #"{"kind":"reply","text":"Summary","sessionId":"s"}"# + "\n"
         + #"{"kind":"done","costUsd":0.1,"turns":2,"stopReason":"end_turn"}"# + "\n"
-
-    @MainActor
-    func testLiveInteractiveRunCoversReviewAndComplete() {
-        XCTAssertNotNil(PlanDetailView.liveInteractiveRun(interactiveRun(mode: .review, finish: false)))
-        XCTAssertNotNil(PlanDetailView.liveInteractiveRun(interactiveRun(mode: .complete, finish: false)))
-        XCTAssertNil(PlanDetailView.liveInteractiveRun(interactiveRun(mode: .execute, finish: false)))
-        XCTAssertNil(PlanDetailView.liveInteractiveRun(interactiveRun(mode: .review, ndjson: cleanFinish, finish: true)))
-        XCTAssertNil(PlanDetailView.liveInteractiveRun(nil))
-    }
 
     @MainActor
     func testFinishedReviewRunOnlyForCleanlyFinishedReview() {
@@ -1260,20 +1146,6 @@ final class PlanDetailViewTests: XCTestCase {
         XCTAssertNil(PlanDetailView.finishedReviewRun(
             interactiveRun(mode: .execute, ndjson: cleanFinish, finish: true)))
         XCTAssertNil(PlanDetailView.finishedReviewRun(nil))
-    }
-
-    func testReviewPanelAlsoShowsForFinishedReview() {
-        XCTAssertTrue(PlanDetailView.showsReviewPanel(hasLiveReviewRun: false,
-                                                      hasFinishedReviewRun: true))
-        XCTAssertTrue(PlanDetailView.showsReviewPanel(hasLiveReviewRun: true,
-                                                      hasFinishedReviewRun: false))
-        XCTAssertFalse(PlanDetailView.showsReviewPanel(hasLiveReviewRun: false,
-                                                       hasFinishedReviewRun: false))
-    }
-
-    func testInteractivePanelTitlePerMode() {
-        XCTAssertEqual(PlanDetailView.interactivePanelTitle(mode: .review), "Guided Review")
-        XCTAssertEqual(PlanDetailView.interactivePanelTitle(mode: .complete), "Complete Plan")
     }
 
     // MARK: - Complete action gating
@@ -1329,9 +1201,44 @@ final class PlanDetailViewTests: XCTestCase {
 
     func testFailureBannerSuppressesReviewTruncationWhileRunning() {
         let error = TaskRun.truncationError(for: "error_max_turns", mode: .review)
-        XCTAssertFalse(RunProgressSheet.shouldShowFailureBanner(
+        XCTAssertFalse(RunLogContents.shouldShowFailureBanner(
             error: error, isRunning: true, stopReason: "error_max_turns", mode: .review))
-        XCTAssertTrue(RunProgressSheet.shouldShowFailureBanner(
+        XCTAssertTrue(RunLogContents.shouldShowFailureBanner(
             error: error, isRunning: false, stopReason: "error_max_turns", mode: .review))
+    }
+
+    // MARK: - AgentDock.dockFooterMode (#117 — the docked agent panel footer)
+
+    /// An idle agent shows the composer, whatever `canDiscuss` says — the agent
+    /// is the single gate, and an idle agent accepts a fresh turn.
+    @MainActor
+    func testDockFooterModeIdleShowsComposer() {
+        XCTAssertEqual(AgentDock.dockFooterMode(state: .idle, canDiscuss: true), .composer)
+    }
+
+    /// An idle agent on a plan that can't be discussed (blocked / backlogged)
+    /// shows nothing in the footer — there is no turn to start.
+    @MainActor
+    func testDockFooterModeIdleWithoutDiscussShowsNothing() {
+        XCTAssertEqual(AgentDock.dockFooterMode(state: .idle, canDiscuss: false), .none)
+    }
+
+    /// A working agent (any mode) shows the disabled "stop to interrupt" footer.
+    @MainActor
+    func testDockFooterModeWorkingShowsDisabled() {
+        XCTAssertEqual(AgentDock.dockFooterMode(state: .working(.execute), canDiscuss: true),
+                       .disabled)
+        XCTAssertEqual(AgentDock.dockFooterMode(state: .working(.discuss), canDiscuss: true),
+                       .disabled)
+        // Working wins even when the plan can't be discussed.
+        XCTAssertEqual(AgentDock.dockFooterMode(state: .working(.review), canDiscuss: false),
+                       .disabled)
+    }
+
+    /// A needs-input agent shows the parked question form.
+    @MainActor
+    func testDockFooterModeNeedsInputShowsQuestion() {
+        XCTAssertEqual(AgentDock.dockFooterMode(state: .needsInput, canDiscuss: true), .question)
+        XCTAssertEqual(AgentDock.dockFooterMode(state: .needsInput, canDiscuss: false), .question)
     }
 }

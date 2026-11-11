@@ -134,7 +134,7 @@ struct TaskListRow: View {
                 .modifier(OpenDetailOnTap(row: row, onOpenDetail: onOpenDetail))
 
             // Trailing per-row action — the SAME shared control the card uses.
-            PlanRowActions(row: row)
+            PlanRowActions(row: row, onOpenDetail: onOpenDetail)
         }
         .padding(.vertical, 5)
         // #095/#105: the band runs flush to the content column's edges, so the
@@ -254,7 +254,9 @@ struct TaskListView: View {
             // never enters the sort/group/section pipeline or the detail-selection
             // invariant. Smart-view lists (`project == nil`) show no capture rows.
             if let project {
-                CaptureProgressRows(projectPath: project.projectPath)
+                CaptureProgressRows(projectPath: project.projectPath,
+                                    onOpenDetail: onOpenDetail,
+                                    selectedRowID: selectedRowID)
                     .padding(.horizontal, ProjectCard.rowColumns.cardHorizontalPadding)
             }
             if visibleRows.isEmpty {

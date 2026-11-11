@@ -20,29 +20,20 @@ struct CaptureProgressRows: View {
     /// into `runner.runningCaptures(projectPath:)`.
     let projectPath: String
 
+    /// #117: selects a capture's synthetic row (opening the "Capturing…"
+    /// placeholder detail + its dock) by its synthetic id. Replaces the former
+    /// per-row progress popover.
+    let onOpenDetail: (TaskRow.ID) -> Void
+
+    /// The currently selected detail-column row id, so a selected capture row
+    /// paints the shared selection background. `nil` when none is selected.
+    var selectedRowID: TaskRow.ID? = nil
+
     /// The shared "Work this task" runner — the live in-flight-capture registry.
     /// Read-only here; the run process is the sole writer of `.plans/` (§2).
     @Environment(TaskRunner.self) private var runner
 
-    /// The shared task store, reloaded after a run's progress popover closes so
-    /// the task's new status surfaces via the existing read path. Read-only (§2).
-    @Environment(PlansStore.self) private var store
-
-    /// Which run's progress popover is currently open, by task id, or `nil` when
-    /// none is. At most one is open at a time; the per-run `Binding<Bool>` from
-    /// `progressPopover(for:)` drives each row's `.popover`.
-    @State private var progressPopoverTaskID: String? = nil
-
-    /// A per-run `Binding<Bool>` for the run-progress popover: `true` only when
-    /// `progressPopoverTaskID` is this `taskID`, and on set assigns the id when
-    /// raised / clears it when lowered — so opening one row's popover (or its
-    /// self-dismiss) drives the single shared state.
-    private func progressPopover(for taskID: String) -> Binding<Bool> {
-        Binding(
-            get: { progressPopoverTaskID == taskID },
-            set: { progressPopoverTaskID = $0 ? taskID : nil }
-        )
-    }
+    @State private var hoveringTaskID: String? = nil
 
     var body: some View {
         let captures = runner.runningCaptures(projectPath: projectPath)
@@ -55,18 +46,18 @@ struct CaptureProgressRows: View {
         }
     }
 
-    /// A single capture row: a small spinner plus the run's description,
-    /// tappable (same `contentShape` + `onTapGesture` primitive as the per-row
-    /// spinner) to toggle that run's progress popover, anchored to the row bounds.
-    /// On the popover's close the finished run is dropped and the store reloaded
-    /// so the new task surfaces via the read path.
+    /// A single capture row: a small spinner plus the run's description. #117:
+    /// tapping it SELECTS the synthetic capture row — opening the "Capturing…"
+    /// placeholder detail and its always-present dock (which hosts the capture's
+    /// log and a Dismiss for an errored capture) — rather than a per-row popover.
     ///
     /// A capture that finished IN ERROR swaps the spinner for a warning glyph —
     /// reconciliation pins errored runs (they are never auto-dismissed), so this
-    /// row is how the failure is raised; closing its popover is what clears it.
+    /// row is how the failure is raised; the dock's Dismiss is what clears it.
     @ViewBuilder
     private func captureRow(_ run: TaskRun) -> some View {
         let failed = !run.isRunning && run.error != nil
+        let isSelected = selectedRowID == run.taskID
         HStack(spacing: 8) {
             if failed {
                 Image(systemName: "exclamationmark.triangle.fill")
@@ -84,20 +75,19 @@ struct CaptureProgressRows: View {
             Spacer(minLength: 0)
         }
         .padding(.vertical, 5)
+        .padding(.horizontal, 6)
+        .background(
+            RoundedRectangle(cornerRadius: 6)
+                .fill(isSelected ? Color.accentColor.opacity(0.18)
+                                 : (hoveringTaskID == run.taskID ? Color.primary.opacity(0.06)
+                                                                 : Color.clear))
+        )
         .contentShape(Rectangle())
         .onTapGesture {
-            progressPopoverTaskID = (progressPopoverTaskID == run.taskID) ? nil : run.taskID
+            onOpenDetail(run.taskID)
         }
-        .popover(isPresented: progressPopover(for: run.taskID),
-                 attachmentAnchor: .rect(.bounds)) {
-            RunProgressSheet(run: run, taskID: run.taskID)
-                .frame(width: 480)
-                .onDisappear {
-                    runner.dismiss(taskID: run.taskID, in: projectPath)
-                    store.reload()
-                }
-        }
-        .help(failed ? "Capture failed — click for details, close to dismiss"
-                     : "Show capture progress")
+        .onHover { hoveringTaskID = $0 ? run.taskID : nil }
+        .help(failed ? "Capture failed — open to see details and dismiss"
+                     : "Open capture progress")
     }
 }

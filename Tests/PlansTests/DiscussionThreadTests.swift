@@ -293,13 +293,21 @@ final class DiscussionThreadTests: XCTestCase {
         XCTAssertFalse(turn.isPending)
     }
 
-    func testLiveDiscussTurnIsExcludedFromRunningCounts() {
+    /// #117: a live discuss turn now COUNTS as agent activity everywhere — the
+    /// running count, the toolbar snapshots and `hasRunningRun` (so
+    /// `isProjectBusy` pauses sync) — because a plan has one gated agent and a
+    /// discuss turn is one of the things that agent can be doing. It still is NOT
+    /// a task run in `runs`, so `isRunning(taskID:in:)` (which reads `run(for:)`)
+    /// stays false.
+    func testLiveDiscussTurnCountsInRunningCountsAndSnapshots() {
         let (runner, recorder) = makeRunner()
         runner.ask(projectPath: "/p", taskID: "7", question: "q")
         recorder.runs[0].markRunningForTesting(projectPath: "/p")
-        XCTAssertEqual(runner.runningRunCount, 0)
-        XCTAssertTrue(runner.runningSnapshots.isEmpty)
-        XCTAssertFalse(runner.hasRunningRun(inProject: "/p"))
+        XCTAssertEqual(runner.runningRunCount, 1)
+        XCTAssertEqual(runner.runningSnapshots.count, 1)
+        XCTAssertEqual(runner.runningSnapshots.first?.mode, .discuss)
+        XCTAssertTrue(runner.hasRunningRun(inProject: "/p"))
+        XCTAssertNil(runner.run(for: "7", in: "/p"), "a discuss turn is not a task run")
         XCTAssertFalse(runner.isRunning(taskID: "7", in: "/p"))
     }
 

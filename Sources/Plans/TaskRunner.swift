@@ -1500,32 +1500,111 @@ final class TaskRun {
 @MainActor
 @Observable
 final class TaskRunner {
-    /// Active and recently-finished runs, keyed by `runKey(projectPath:taskID:)`
-    /// — the owning project path plus the FULL task id — so the same id in two
+    /// The single per-plan agents, keyed by `runKey(projectPath:taskID:)` — the
+    /// owning project path plus the FULL task id — so the same id in two
     /// projects, or `1000` vs `100` (#090), never share an entry. A capture's
     /// synthetic `capture:<path>:<UUID>` id is already project-scoped and unique,
-    /// so it is its own key. A run stays in the map after finishing so the UI
-    /// can still show its summary/error until the user dismisses it; launching
-    /// the same task again replaces the entry.
-    private(set) var runs: [String: TaskRun] = [:]
+    /// so it is its own key. ONE agent per plan (#117) owns the exclusive gate,
+    /// the unified transcript, and the session lineage; every launch — execute,
+    /// elaborate, review, complete, capture AND discuss — routes through it, so a
+    /// plan has at most one thing working on it at a time. An agent stays in the
+    /// map after finishing so the UI can still show its transcript/summary/error
+    /// until the user dismisses it.
+    private(set) var agents: [String: PlanAgent] = [:]
+
+    /// Active and recently-finished NON-discuss runs, derived from `agents`'
+    /// `currentRun`s and keyed by the same `runKey`. Preserves the historical
+    /// `runner.runs[key]` / `.values` / `.isEmpty` surface callers rely on while
+    /// `agents` is the real registry. A discuss turn's `TaskRun` is held on its
+    /// agent's thread, never here, so it never reads as a task run (#117).
+    var runs: [String: TaskRun] {
+        var result: [String: TaskRun] = [:]
+        for (key, agent) in agents {
+            if let run = agent.currentRun { result[key] = run }
+        }
+        return result
+    }
 
     /// A callback invoked whenever any run finishes, with the project path the
     /// run worked in, so the app can reload the store, surface the task's new
     /// status and sync that project's plans. Set by the app at injection.
     var onAnyRunFinished: ((_ projectPath: String) -> Void)?
 
-    /// Per-plan discussion threads, keyed by `runKey(projectPath:taskID:)`. Kept
-    /// apart from `runs` so a discuss turn never collides with an execute or
-    /// elaborate run for the same task, and never counts as a running task.
-    private(set) var discussions: [String: DiscussionThread] = [:]
+    /// Capture hand-offs applied since launch (#117): maps a synthetic capture
+    /// key (`capture:<path>:<uuid>`) to the real `TaskRow.ID` (`path + "/" + id`)
+    /// its agent migrated to. The browser's capture-aware selection invariant
+    /// consults this to REMAP a synthetic `capture:` detail selection to the real
+    /// plan row once reconciliation migrates the agent — so the placeholder dock
+    /// follows the plan instead of closing. Observable so the remap fires on the
+    /// same reload that surfaces the new row.
+    private(set) var captureMigrations: [String: String] = [:]
+
+    /// The synthetic capture keys the runner currently HOLDS (an in-flight or
+    /// finished-but-not-reconciled capture agent). The selection invariant keeps
+    /// a synthetic `capture:` selection alive while its id is here, so the
+    /// "Capturing…" placeholder dock stays open across reloads.
+    var heldCaptureIDs: Set<String> {
+        Set(agents.keys.filter(Self.isSyntheticCaptureID))
+    }
+
+    /// Per-plan discussion threads, derived from the owning agents and keyed by
+    /// the same `runKey`. Preserves the historical `runner.discussions` surface;
+    /// each thread is now OWNED by the plan's single agent (#117), so a discuss
+    /// turn goes through the same gate as every run.
+    var discussions: [String: DiscussionThread] {
+        agents.mapValues(\.thread)
+    }
 
     #if DEBUG
     /// Test seam: when set, `ask` hands the discuss run and its finish callback
     /// here instead of spawning a process. DEBUG-only.
     var discussLauncherForTesting: ((TaskRun, String, @escaping () -> Void) -> Void)?
+
+    /// Test seam mirroring `discussLauncherForTesting` for NON-discuss runs
+    /// (#117): when set, every `run`/`review`/`complete`/`capture` launch hands
+    /// its `TaskRun`, project path and finish callback here instead of spawning a
+    /// `node` process, so every mode is testable. DEBUG-only.
+    var runLauncherForTesting: ((TaskRun, String, @escaping () -> Void) -> Void)?
     #endif
 
     init() {}
+
+    /// The agent for `key`, created on first access. Stable across plan switches
+    /// so an in-flight run/turn still lands when the user navigates away.
+    private func agentOrCreate(key: String) -> PlanAgent {
+        if let existing = agents[key] { return existing }
+        let agent = PlanAgent()
+        agents[key] = agent
+        return agent
+    }
+
+    /// The agent for `taskID` in `projectPath`, or `nil` (never creates one).
+    func agent(for taskID: String, in projectPath: String) -> PlanAgent? {
+        agents[Self.runKey(projectPath: projectPath, taskID: taskID)]
+    }
+
+    /// Starts `run`'s process (or hands it to the test seam) and wires its finish
+    /// callback so the agent returns to idle, lineage is recorded, the capture
+    /// reconcile fires, and `onAnyRunFinished` reloads the store. Shared by every
+    /// non-discuss launch so the gate/transcript bookkeeping lives in one place.
+    private func launchRun(_ run: TaskRun, agent: PlanAgent, projectPath: String) {
+        let onFinish: () -> Void = { [weak self, weak agent, weak run] in
+            guard let agent, let run else { return }
+            agent.completeRunSegment(run)
+            self?.onAnyRunFinished?(projectPath)
+        }
+        run.onEvent = { [weak agent, weak run] _ in
+            guard let agent, let run else { return }
+            agent.syncStateFromRun(run)
+        }
+        #if DEBUG
+        if let launcher = runLauncherForTesting {
+            launcher(run, projectPath, onFinish)
+            return
+        }
+        #endif
+        run.start(projectPath: projectPath, onFinish: onFinish)
+    }
 
     /// The `runs` key for `taskID` in `projectPath`: the path and full id joined
     /// by a NUL (which can appear in neither), so distinct pairs never collide.
@@ -1555,17 +1634,32 @@ final class TaskRunner {
         run(for: taskID, in: projectPath)?.isRunning ?? false
     }
 
+    /// Every live `TaskRun` across all agents, of EVERY kind — the non-discuss
+    /// `currentRun` AND the agent's live discuss turn (#117). This is the single
+    /// basis for the running counts/snapshots/`hasRunningRun` so a discuss turn
+    /// now counts as agent activity everywhere (quit guard, toolbar indicator,
+    /// `isProjectBusy`). Only in-flight runs are returned.
+    private var liveRuns: [TaskRun] {
+        var result: [TaskRun] = []
+        for agent in agents.values {
+            if let run = agent.currentRun, run.isRunning { result.append(run) }
+            if let discuss = agent.activeDiscussRun, discuss.isRunning { result.append(discuss) }
+        }
+        return result
+    }
+
     /// How many runs are currently in flight across all tasks. This is the single
     /// source of truth the quit-confirmation hook (`applicationShouldTerminate`)
     /// queries to decide whether to prompt before terminating — so the alert and
-    /// the live spinner state never disagree. Finished-but-not-dismissed runs stay
-    /// in `runs` but are not counted (their `isRunning` is false).
-    var runningRunCount: Int { runs.values.filter { $0.isRunning }.count }
+    /// the live spinner state never disagree. Finished-but-not-dismissed runs are
+    /// not counted. Discuss turns DO count (#117).
+    var runningRunCount: Int { liveRuns.count }
 
     /// Snapshots of every run currently in flight (finished runs excluded), for
-    /// the browser toolbar's live-runs indicator.
+    /// the browser toolbar's live-runs indicator. Discuss turns are included so
+    /// the indicator reflects every busy agent (#117).
     var runningSnapshots: [RunSnapshot] {
-        runs.values.compactMap(Self.snapshot(of:))
+        liveRuns.compactMap(Self.snapshot(of:))
     }
 
     /// The snapshot of one run, or `nil` when it is not running (or has no
@@ -1582,12 +1676,13 @@ final class TaskRunner {
     var hasRunningRuns: Bool { runningRunCount > 0 }
 
     /// True when any run of any mode is currently in flight in the project at
-    /// `projectPath`. Paths are compared after standardization, so a trailing
-    /// slash or `.` component does not split one project in two.
+    /// `projectPath` — including a discuss turn (#117), so `isProjectBusy` pauses
+    /// sync while an agent talks. Paths are compared after standardization, so a
+    /// trailing slash or `.` component does not split one project in two.
     func hasRunningRun(inProject projectPath: String) -> Bool {
         let target = Self.standardizedPath(projectPath)
-        return runs.values.contains { run in
-            guard run.isRunning, let path = run.runProjectPath else { return false }
+        return liveRuns.contains { run in
+            guard let path = run.runProjectPath else { return false }
             return Self.standardizedPath(path) == target
         }
     }
@@ -1615,16 +1710,15 @@ final class TaskRunner {
     func run(projectPath: String, taskID: String, mode: RunMode = .execute,
              description: String? = nil, deep: Bool = false, keep: Bool = false) {
         let key = Self.runKey(projectPath: projectPath, taskID: taskID)
-        if let existing = runs[key], existing.isRunning {
-            runnerLog.notice("run ignored: task \(taskID, privacy: .public) is already running")
+        let agent = agentOrCreate(key: key)
+        guard agent.canStartNow else {
+            runnerLog.notice("run ignored: agent for task \(taskID, privacy: .public) is busy")
             return
         }
         let taskRun = TaskRun(taskID: taskID, mode: mode, description: description,
                               deep: deep, keep: keep)
-        runs[key] = taskRun
-        taskRun.start(projectPath: projectPath) { [weak self] in
-            self?.onAnyRunFinished?(projectPath)
-        }
+        guard agent.beginRunSegment(taskRun) else { return }
+        launchRun(taskRun, agent: agent, projectPath: projectPath)
     }
 
     /// Launches a GUIDED `.review` run for `taskID` in `projectPath` at
@@ -1635,15 +1729,14 @@ final class TaskRunner {
     /// threads the `ReviewLocation` through to the `--review-location` flag.
     func review(projectPath: String, taskID: String, location: ReviewLocation) {
         let key = Self.runKey(projectPath: projectPath, taskID: taskID)
-        if let existing = runs[key], existing.isRunning {
-            runnerLog.notice("review ignored: task \(taskID, privacy: .public) is already running")
+        let agent = agentOrCreate(key: key)
+        guard agent.canStartNow else {
+            runnerLog.notice("review ignored: agent for task \(taskID, privacy: .public) is busy")
             return
         }
         let taskRun = TaskRun(taskID: taskID, mode: .review, reviewLocation: location)
-        runs[key] = taskRun
-        taskRun.start(projectPath: projectPath) { [weak self] in
-            self?.onAnyRunFinished?(projectPath)
-        }
+        guard agent.beginRunSegment(taskRun) else { return }
+        launchRun(taskRun, agent: agent, projectPath: projectPath)
     }
 
     /// Launches an interactive `.complete` run for `taskID` in `projectPath`,
@@ -1668,15 +1761,18 @@ final class TaskRunner {
     /// No-op when there is no finished review run for the task, or the thread is
     /// mid-turn.
     func continueReviewInDiscussion(projectPath: String, taskID: String) {
-        guard let run = run(for: taskID, in: projectPath),
+        guard let agent = agent(for: taskID, in: projectPath),
+              let run = agent.currentRun,
               run.mode == .review, !run.isRunning else { return }
-        let thread = thread(projectPath: projectPath, taskID: taskID)
-        guard !thread.isBusy else { return }
-        thread.seedFromReview(
+        guard agent.canStartNow, !agent.thread.isBusy else { return }
+        agent.thread.seedFromReview(
             sessionID: Self.resumableReviewSession(sessionID: run.sessionID,
                                                    location: run.reviewLocation),
             summary: run.reply)
-        dismiss(taskID: taskID, in: projectPath)
+        // The finished review segment hands off to the discussion: drop its run
+        // so the dock collapses back to the composer (the thread now carries the
+        // reviewer's summary / resumable session).
+        agent.dismissCurrentRun()
     }
 
     /// The review session a discussion may resume, or `nil` when it can't be
@@ -1764,10 +1860,10 @@ final class TaskRunner {
         let taskRun = TaskRun(taskID: key, mode: mode, description: description,
                               projectPath: projectPath, baselineTaskIDs: knownTaskIDs,
                               deep: deep, keep: keep)
-        runs[key] = taskRun
-        taskRun.start(projectPath: projectPath) { [weak self] in
-            self?.onAnyRunFinished?(projectPath)
-        }
+        // A fresh synthetic key means a fresh agent, so the gate is always open.
+        let agent = agentOrCreate(key: key)
+        guard agent.beginRunSegment(taskRun) else { return }
+        launchRun(taskRun, agent: agent, projectPath: projectPath)
     }
 
     /// The pure mode-selection behind `capture(...)`: Execute wins
@@ -1784,34 +1880,31 @@ final class TaskRunner {
         run(for: taskID, in: projectPath)?.stop()
     }
 
-    /// Stops every in-flight run (the quit-confirmation path). Finished runs are
-    /// left alone (their `stop()` is a no-op anyway).
+    /// Stops every in-flight run (the quit-confirmation path), covering EVERY
+    /// agent's live run of every kind — the non-discuss `currentRun` and the
+    /// live discuss turn (#117). Finished runs are left alone (their `stop()` is
+    /// a no-op anyway).
     func stopAllRunning() {
-        for run in runs.values where run.isRunning {
-            run.stop()
-        }
-        for thread in discussions.values {
-            thread.activeRun?.stop()
+        for agent in agents.values {
+            agent.currentRun?.stop()
+            agent.activeDiscussRun?.stop()
         }
     }
 
     // MARK: - Discussion
 
     /// The discussion thread for `taskID` in `projectPath`, created on first
-    /// access. Stable across plan switches so an in-flight reply still lands.
+    /// access. Owned by the plan's single agent (#117); stable across plan
+    /// switches so an in-flight reply still lands.
     func thread(projectPath: String, taskID: String) -> DiscussionThread {
-        let key = Self.runKey(projectPath: projectPath, taskID: taskID)
-        if let existing = discussions[key] { return existing }
-        let thread = DiscussionThread()
-        discussions[key] = thread
-        return thread
+        agentOrCreate(key: Self.runKey(projectPath: projectPath, taskID: taskID)).thread
     }
 
     /// The existing discussion thread for `taskID` in `projectPath`, or `nil`.
-    /// Never creates one, so views can read it during rendering without
-    /// mutating observable state.
+    /// Never creates one (nor its agent), so views can read it during rendering
+    /// without mutating observable state.
     func discussion(projectPath: String, taskID: String) -> DiscussionThread? {
-        discussions[Self.runKey(projectPath: projectPath, taskID: taskID)]
+        agent(for: taskID, in: projectPath)?.thread
     }
 
     /// The whole-project discussion thread for `projectPath`, or `nil` (#110).
@@ -1819,7 +1912,7 @@ final class TaskRunner {
     /// for the same project. Read-only: never creates one, mirroring
     /// `discussion(projectPath:taskID:)`.
     func projectThread(projectPath: String) -> DiscussionThread? {
-        discussions[Self.runKey(projectPath: projectPath, taskID: "")]
+        discussion(projectPath: projectPath, taskID: "")
     }
 
     /// The whole-project discussion thread for `projectPath`, created on first
@@ -1842,21 +1935,59 @@ final class TaskRunner {
     /// thread.
     func ask(projectPath: String, taskID: String, question: String,
              apply: Bool = false, onApplied: (() -> Void)? = nil) {
-        let thread = thread(projectPath: projectPath, taskID: taskID)
-        launchDiscuss(thread: thread, projectPath: projectPath, taskID: taskID,
+        let agent = agentOrCreate(key: Self.runKey(projectPath: projectPath, taskID: taskID))
+        launchDiscuss(agent: agent, projectPath: projectPath, taskID: taskID,
                       question: question, apply: apply, onApplied: onApplied)
     }
 
     /// Asks `question` about the WHOLE project (no task), launching a `.discuss`
     /// run with an EMPTY task id (#110). The project-scoped analogue of `ask`:
-    /// it resolves/creates the project thread (keyed on an empty id) and reuses
+    /// it resolves/creates the project agent (keyed on an empty id) and reuses
     /// the exact same launch plumbing, so the run is held by the thread, never
     /// enters `runs`, and triggers no store reload. No-op for a blank question
     /// or a busy thread.
-    func askProject(projectPath: String, question: String) {
-        let thread = projectThreadOrCreate(projectPath: projectPath)
-        launchDiscuss(thread: thread, projectPath: projectPath, taskID: "",
-                      question: question)
+    ///
+    /// `apply` (#117): a WRITE-CAPABLE project-discuss turn is REFUSED while ANY
+    /// plan agent in `projectPath` is working, so an `--apply` project turn can
+    /// never race a plan agent's execute/elaborate/apply. A read-only project
+    /// turn (`apply: false`, every existing call site) is never gated by other
+    /// agents.
+    func askProject(projectPath: String, question: String, apply: Bool = false,
+                    onApplied: (() -> Void)? = nil) {
+        if apply, anyPlanAgentWorking(inProject: projectPath) {
+            runnerLog.notice("apply project ask refused: a plan agent in \(projectPath, privacy: .public) is working")
+            return
+        }
+        let agent = projectAgentOrCreate(projectPath: projectPath)
+        launchDiscuss(agent: agent, projectPath: projectPath, taskID: "",
+                      question: question, apply: apply, onApplied: onApplied)
+    }
+
+    /// The project-level agent for `projectPath` (keyed on an empty task id),
+    /// created on first access.
+    private func projectAgentOrCreate(projectPath: String) -> PlanAgent {
+        agentOrCreate(key: Self.runKey(projectPath: projectPath, taskID: ""))
+    }
+
+    /// True when any PLAN agent (a real task id, not the project agent) in
+    /// `projectPath` is currently working or awaiting input. The project agent
+    /// itself (empty task id) is excluded. Used to gate an `--apply` project turn.
+    func anyPlanAgentWorking(inProject projectPath: String) -> Bool {
+        let projectKey = Self.runKey(projectPath: projectPath, taskID: "")
+        let standardized = Self.standardizedPath(projectPath)
+        for (key, agent) in agents where key != projectKey && agent.isBusy {
+            // Resolve the agent's project from its live run, or fall back to the
+            // key prefix. A capture agent's key already embeds the project path.
+            let path = agent.currentRun?.runProjectPath
+                ?? agent.activeDiscussRun?.runProjectPath
+            if let path, Self.standardizedPath(path) == standardized { return true }
+            // Keyed on `projectPath + NUL + taskID`, or a synthetic capture key
+            // `capture:<path>:<uuid>`: either way the project path is a prefix.
+            if key.hasPrefix(projectPath + "\u{0}") || key.hasPrefix(Self.captureKey(projectPath: projectPath) + ":") {
+                return true
+            }
+        }
+        return false
     }
 
     /// Shared body of `ask` / `askProject`: trims the question, begins a turn on
@@ -1872,15 +2003,21 @@ final class TaskRunner {
     /// the caller can reconcile the store with any edits the agent wrote. A plain
     /// read-only turn (`apply: false`) never touches `onApplied` — its finish is
     /// reload-free, exactly as before.
-    private func launchDiscuss(thread: DiscussionThread, projectPath: String,
+    private func launchDiscuss(agent: PlanAgent, projectPath: String,
                                taskID: String, question: String,
                                apply: Bool = false,
                                onApplied: (() -> Void)? = nil) {
         let trimmed = question.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
-        guard !thread.isBusy else { return }
+        // The single gate: a discuss turn is refused while the agent is working
+        // an execute/elaborate/review/complete run OR another discuss turn (#117).
+        guard agent.canStartNow else { return }
 
-        let resume = thread.beginTurn(question: trimmed)
+        let thread = agent.thread
+        // `beginDiscussTurn` appends the pending turn to the thread, mirrors it
+        // into the agent's transcript and enters `working(.discuss)`; it returns
+        // the session id to resume (`nil` for a fresh conversation).
+        let resume = agent.beginDiscussTurn(question: trimmed, apply: apply)
         guard let turnID = thread.turns.last?.id else { return }
         // A discussion continued from a review whose session can't be resumed
         // carries the review summary as context on its first fresh turn.
@@ -1890,15 +2027,15 @@ final class TaskRunner {
         let taskRun = TaskRun(taskID: taskID, mode: .discuss, description: outgoing,
                               resume: resume, apply: apply)
         thread.activeRun = taskRun
-        taskRun.onEvent = { [weak thread, weak taskRun] event in
-            guard let thread, let taskRun, thread.activeRun === taskRun else { return }
-            thread.apply(event)
+        taskRun.onEvent = { [weak agent, weak taskRun] event in
+            guard let agent, let taskRun, agent.thread.activeRun === taskRun else { return }
+            agent.applyDiscussEvent(event)
         }
-        let onFinish: () -> Void = { [weak thread, weak taskRun] in
-            guard let thread, let taskRun, thread.activeRun === taskRun else { return }
+        let onFinish: () -> Void = { [weak agent, weak taskRun] in
+            guard let agent, let taskRun, agent.thread.activeRun === taskRun else { return }
             let error = taskRun.error
-            thread.completeTurn(id: turnID, error: error)
-            thread.activeRun = nil
+            agent.completeDiscussTurn(error: error)
+            agent.thread.activeRun = nil
             if apply, error == nil {
                 onApplied?()
             }
@@ -1913,41 +2050,54 @@ final class TaskRunner {
     }
 
     /// Starts a fresh conversation for `taskID` in `projectPath`, terminating
-    /// any in-flight turn. Its late events and finish are ignored.
+    /// any in-flight turn. Its late events and finish are ignored. Clears the
+    /// agent's transcript/lineage only when it is idle (a reset mid-turn first
+    /// stops that turn, returning the agent to idle via the thread reset).
     func resetDiscussion(projectPath: String, taskID: String) {
-        let key = Self.runKey(projectPath: projectPath, taskID: taskID)
-        guard let thread = discussions[key] else { return }
-        let inFlight = thread.activeRun
-        thread.reset()
+        guard let agent = agent(for: taskID, in: projectPath) else { return }
+        let inFlight = agent.thread.activeRun
+        agent.thread.reset()
+        agent.transcriptReset()
         inFlight?.onEvent = nil
         inFlight?.stop()
     }
 
     /// Ends the whole-project conversation for `projectPath` (#110): stops any
-    /// in-flight turn and drops the thread, so the next one starts empty.
+    /// in-flight turn and drops the project agent, so the next one starts empty.
     func endProjectDiscussion(projectPath: String) {
         resetDiscussion(projectPath: projectPath, taskID: "")
-        discussions[Self.runKey(projectPath: projectPath, taskID: "")] = nil
+        agents[Self.runKey(projectPath: projectPath, taskID: "")] = nil
     }
 
     /// Stops the in-flight turn of the discussion for `taskID` in `projectPath`,
     /// marking it cancelled while keeping the conversation and its session.
     /// The stopped run's late events and finish are ignored.
     func cancelDiscussionTurn(projectPath: String, taskID: String) {
-        guard let thread = discussion(projectPath: projectPath, taskID: taskID) else { return }
-        let inFlight = thread.activeRun
-        thread.cancelPendingTurn()
+        guard let agent = agent(for: taskID, in: projectPath) else { return }
+        let inFlight = agent.thread.activeRun
+        agent.cancelDiscussTurn()
         inFlight?.onEvent = nil
         inFlight?.stop()
     }
 
-    /// Drops a finished run for `taskID` in `projectPath` from the map (e.g. when
-    /// the user closes its progress sheet). No-op if the run is still in flight.
+    /// Drops a finished run for `taskID` in `projectPath` (e.g. when the user
+    /// closes its progress sheet / dismisses an errored capture). No-op if the
+    /// run is still in flight.
+    ///
+    /// For a SYNTHETIC capture key the whole agent is removed once its run is
+    /// finished — a dismissed capture placeholder has no conversation to keep. A
+    /// real plan's agent is kept (only its current run segment is dropped) so its
+    /// transcript/discussion survives.
     func dismiss(taskID: String, in projectPath: String) {
         let key = Self.runKey(projectPath: projectPath, taskID: taskID)
-        if let run = runs[key], !run.isRunning {
-            runs[key] = nil
+        guard let agent = agents[key] else { return }
+        if Self.isSyntheticCaptureID(taskID) {
+            if !(agent.currentRun?.isRunning ?? false) {
+                agents[key] = nil
+            }
+            return
         }
+        agent.dismissCurrentRun()
     }
 
     // MARK: - Hand-off reconciliation
@@ -1989,8 +2139,19 @@ final class TaskRunner {
     /// finished-path and running-path decisions can't disagree about which ids
     /// are already claimed.
     struct CaptureReconciliation: Equatable {
+        /// Synthetic capture keys whose run should be dropped (no new id appeared
+        /// and the bounded fallback elapsed, so the placeholder clears). Errored
+        /// captures are NEVER here — they stay pinned until manually dismissed.
         var toDismiss: Set<String> = []
+        /// Still-RUNNING captures to re-key in place: `[syntheticKey: realID]`.
+        /// The live run (and its agent + transcript) moves to the real task id
+        /// while the process keeps running.
         var toRekey: [String: String] = [:]
+        /// FINISHED captures whose real id is now known (#117): `[syntheticKey:
+        /// realID]`. The agent and its transcript MIGRATE to the real key instead
+        /// of being dropped, so the placeholder dock's history follows the plan.
+        /// Distinct from `toRekey` only in that the run already finished.
+        var toMigrate: [String: String] = [:]
     }
 
     /// The pure matching core behind `reconcileFinishedCaptures(against:)`,
@@ -2086,8 +2247,27 @@ final class TaskRunner {
             // popover and closes it (the manual `dismiss(taskID:in:)` path).
             if run.error != nil { continue }
 
+            // A finished capture whose real id is now KNOWN migrates its agent
+            // (with its transcript) to the real key instead of being dropped
+            // (#117): the placeholder dock's history follows the plan. Prefer the
+            // run's authoritative `reportedTaskID` (task #100); otherwise accept a
+            // single unambiguous new id. When the new id is ambiguous (several new
+            // ids, no reported id) fall back to the historical dismiss so the row
+            // still clears rather than mis-attributing a transcript.
+            if let reportedID = run.reportedTaskID,
+               currentIDs.contains(reportedID), newIDs.contains(reportedID) {
+                result.toMigrate[run.taskID] = reportedID
+                claimedByProject[projectPath, default: []].insert(reportedID)
+                continue
+            }
+            if newIDs.count == 1, let realID = newIDs.first {
+                result.toMigrate[run.taskID] = realID
+                claimedByProject[projectPath, default: []].insert(realID)
+                continue
+            }
             if !newIDs.isEmpty {
-                // A genuinely new task id appeared — the captured plan is present.
+                // Several new ids and no reported id: can't attribute a transcript
+                // safely, so drop the placeholder (prior behaviour).
                 result.toDismiss.insert(run.taskID)
                 continue
             }
@@ -2118,25 +2298,30 @@ final class TaskRunner {
     func reconcileFinishedCaptures(against projects: [ProjectTasks]) {
         let decision = Self.reconcile(runs: runs, projects: projects)
 
-        // Apply re-keys FIRST and atomically: move each still-running capture's
-        // live run from its synthetic key to the real task id, so the spinner
-        // hands off to the real plan row while the process stays tracked.
-        // The re-keyed run's map key is its project path + the real id (the
-        // run's `taskID` itself becomes the bare real id, which is what the UI
-        // labels and the runner passes as `--task-id`).
-        for (syntheticKey, realID) in decision.toRekey {
-            guard let run = runs[syntheticKey], let projectPath = run.projectPath else { continue }
+        // Apply re-keys / migrations FIRST and atomically: move each capture's
+        // AGENT (with its transcript) from its synthetic key to the real task id,
+        // so the placeholder dock hands off to the real plan row. A running
+        // re-key and a finished migration are the same map move — the run's
+        // `taskID` becomes the bare real id (what the UI labels and the runner
+        // passes as `--task-id`); a running re-key also keeps the process tracked.
+        for (syntheticKey, realID) in decision.toRekey.merging(decision.toMigrate, uniquingKeysWith: { a, _ in a }) {
+            guard let agent = agents[syntheticKey], let run = agent.currentRun,
+                  let projectPath = run.projectPath else { continue }
             let realKey = Self.runKey(projectPath: projectPath, taskID: realID)
-            guard runs[realKey] == nil else { continue }
+            guard agents[realKey] == nil else { continue }
             run.rekey(to: realID)
-            runs[realKey] = run
-            runs[syntheticKey] = nil
+            agents[realKey] = agent
+            agents[syntheticKey] = nil
+            // Record the hand-off so a synthetic `capture:` detail selection
+            // remaps to the real `path/id` row (#117).
+            captureMigrations[syntheticKey] = projectPath + "/" + realID
         }
 
         // `toDismiss` holds synthetic capture ids, which are their own map keys.
+        // Dropping the agent clears its placeholder row.
         for key in decision.toDismiss {
-            if let run = runs[key], !run.isRunning {
-                runs[key] = nil
+            if let agent = agents[key], !(agent.currentRun?.isRunning ?? false) {
+                agents[key] = nil
             }
         }
     }
@@ -2150,7 +2335,13 @@ final class TaskRunner {
     /// Keyed like a live run: on the run's project path (`runProjectPath`, set
     /// for captures and by `markRunningForTesting`/`finishForTesting`) + id.
     func ingestRunForTesting(_ run: TaskRun) {
-        runs[Self.runKey(projectPath: run.runProjectPath ?? "", taskID: run.taskID)] = run
+        let key = Self.runKey(projectPath: run.runProjectPath ?? "", taskID: run.taskID)
+        let agent = PlanAgent()
+        agent.adoptRunForTesting(run)
+        agents[key] = agent
     }
+
+    /// Test seam: the agent for `key`, if present. DEBUG-only.
+    func agentForTesting(key: String) -> PlanAgent? { agents[key] }
     #endif
 }
