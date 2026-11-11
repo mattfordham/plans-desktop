@@ -705,22 +705,34 @@ struct PlanDetailView: View {
             // and auto-scrolls to the newest output (RunLogContents). Nothing
             // here measures its own size (#096).
             RunLogContents(run: run, edgeToEdge: true, horizontalPadding: 16, topPadding: 10)
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .frame(maxWidth: .infinity, minHeight: 0, maxHeight: .infinity)
 
-            // A parked question takes a section beneath the transcript that
-            // scrolls on its own when tall, so neither half clips the other.
+            // A parked question sits beneath the transcript at its natural
+            // height and wins the layout, so the card (and its Send button) is
+            // never clipped — the transcript yields the space instead. Only
+            // when the questions alone outgrow the panel does the built-in
+            // ViewThatFits fall back to a scrolling card. No self-measuring
+            // (#096).
             if let pending = run.pendingQuestion {
                 Divider()
-                ScrollView {
-                    reviewQuestionsView(row, run: run, pending: pending)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .padding(.horizontal, 16)
-                        .padding(.vertical, 12)
+                ViewThatFits(in: .vertical) {
+                    reviewQuestionsSection(row, run: run, pending: pending)
+                    ScrollView {
+                        reviewQuestionsSection(row, run: run, pending: pending)
+                    }
                 }
-                .frame(maxHeight: .infinity)
+                .layoutPriority(1)
             }
         }
         .frame(maxHeight: .infinity)
+    }
+
+    private func reviewQuestionsSection(_ row: TaskRow, run: TaskRun,
+                                        pending: TaskRun.PendingReviewQuestion) -> some View {
+        reviewQuestionsView(row, run: run, pending: pending)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, 16)
+            .padding(.vertical, 12)
     }
 
     /// The panel shown after a guided review finished cleanly: the reviewer's
@@ -929,6 +941,28 @@ struct PlanDetailView: View {
 
     /// Whether the Send button is enabled: at least one question must have either
     /// a picked option or a non-empty "Other" answer.
+    /// Builds the `answers` payload for a parked `AskUserQuestion`. The UI keeps
+    /// selection state per question `header`, but the SDK reads answers keyed by
+    /// the question TEXT — so the payload is re-keyed here. Each value is the
+    /// picked labels (joined per `multiSelect`) with any non-empty "Other" text
+    /// appended.
+    static func reviewAnswers(questions: [ReviewQuestion],
+                              selections: [String: [String]],
+                              otherText: [String: String]) -> [String: String] {
+        var answers: [String: String] = [:]
+        for question in questions {
+            var value = reviewAnswerValue(selected: selections[question.header] ?? [],
+                                          multiSelect: question.multiSelect)
+            let other = (otherText[question.header] ?? "")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            if !other.isEmpty {
+                value = value.isEmpty ? other : "\(value), \(other)"
+            }
+            answers[question.question] = value
+        }
+        return answers
+    }
+
     private func reviewCanSend(pending: TaskRun.PendingReviewQuestion) -> Bool {
         pending.questions.contains { question in
             let hasPick = !(reviewSelections[question.header] ?? []).isEmpty
@@ -944,17 +978,9 @@ struct PlanDetailView: View {
     /// "Other" text appended, via the tested pure helpers. Clears the in-progress
     /// selection/other state once sent.
     private func sendReviewAnswer(run: TaskRun, pending: TaskRun.PendingReviewQuestion) {
-        var answers: [String: String] = [:]
-        for question in pending.questions {
-            let selected = reviewSelections[question.header] ?? []
-            var value = Self.reviewAnswerValue(selected: selected, multiSelect: question.multiSelect)
-            let other = (reviewOtherText[question.header] ?? "")
-                .trimmingCharacters(in: .whitespacesAndNewlines)
-            if !other.isEmpty {
-                value = value.isEmpty ? other : "\(value), \(other)"
-            }
-            answers[question.header] = value
-        }
+        let answers = Self.reviewAnswers(questions: pending.questions,
+                                         selections: reviewSelections,
+                                         otherText: reviewOtherText)
         run.answer(toolUseId: pending.toolUseId, answers: answers)
         reviewSelections = [:]
         reviewOtherText = [:]

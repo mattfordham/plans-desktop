@@ -1137,6 +1137,30 @@ final class PlanDetailViewTests: XCTestCase {
             "A, B")
     }
 
+    /// The SDK's AskUserQuestion reads answers keyed by the QUESTION TEXT, not
+    /// the header — keying by header leaves the agent seeing no answer.
+    func testReviewAnswersAreKeyedByQuestionText() {
+        let q = ReviewQuestion(question: "Have the criteria been met?", header: "Verification",
+                               options: [ReviewQuestionOption(label: "Yes, met"),
+                                         ReviewQuestionOption(label: "No, not met")])
+        let answers = PlanDetailView.reviewAnswers(
+            questions: [q],
+            selections: ["Verification": ["Yes, met"]],
+            otherText: [:])
+        XCTAssertEqual(answers, ["Have the criteria been met?": "Yes, met"])
+    }
+
+    /// Non-empty "Other" text is appended to (or replaces an empty) picked value.
+    func testReviewAnswersAppendOtherText() {
+        let q1 = ReviewQuestion(question: "Q1?", header: "H1", options: [ReviewQuestionOption(label: "A")])
+        let q2 = ReviewQuestion(question: "Q2?", header: "H2", options: [ReviewQuestionOption(label: "B")])
+        let answers = PlanDetailView.reviewAnswers(
+            questions: [q1, q2],
+            selections: ["H1": ["A"]],
+            otherText: ["H1": " also this ", "H2": "free text only"])
+        XCTAssertEqual(answers, ["Q1?": "A, also this", "Q2?": "free text only"])
+    }
+
     /// No selection yields an empty answer value (callers gate send on non-empty).
     func testReviewAnswerValueEmptyWhenNoneSelected() {
         XCTAssertEqual(PlanDetailView.reviewAnswerValue(selected: [], multiSelect: true), "")
