@@ -65,6 +65,11 @@ struct BrowserWindow: View {
     /// re-presents even for the same project path.
     @State private var newPlanRequest: NewPlanRequest? = nil
 
+    /// The parked run whose question is open in the answer sheet, picked from
+    /// the active-runs popover. Holds the item (not the run) so the sheet looks
+    /// the live run up by key and closes itself once the question is answered.
+    @State private var answeringRun: ActiveRunItem? = nil
+
     /// #095: the plan shown in the split view's detail column, keyed on the
     /// selected row's composite `TaskRow.ID`, or `nil` for the empty placeholder.
     /// ONE selection shared by the card stack (`ProjectCard.onOpenDetail`) and the
@@ -140,6 +145,11 @@ struct BrowserWindow: View {
             // or a card's "+" glyph via the `onNewPlan` closure passed into each
             // `ProjectCard`). `.sheet(item:)` so a fresh request id re-presents
             // even for the same project path.
+            .sheet(item: $answeringRun) { item in
+                ParkedQuestionSheet(item: item, run: runner.runs[item.id]) {
+                    answeringRun = nil
+                }
+            }
             .sheet(item: $newPlanRequest) { request in
                 // #064: niling the `item:` binding is the AUTHORITATIVE dismissal
                 // for `.sheet(item:)` — the sheet stays presented until this
@@ -213,10 +223,17 @@ struct BrowserWindow: View {
                 if !activeRuns.isEmpty {
                     ToolbarItem {
                         ActiveRunsIndicator(items: activeRuns) { item in
-                            // Show the run's project; for a run on an existing
-                            // plan, also open that plan in the detail column.
-                            store.browserSelection = .project(item.projectPath)
-                            selectedRowID = item.rowID
+                            switch BrowserViewModel.activeRunRowAction(item) {
+                            case .answerQuestion:
+                                // A parked run answers in a sheet, which works
+                                // even when its plan has left the list.
+                                answeringRun = item
+                            case .openPlan:
+                                // Show the run's project; for a run on an
+                                // existing plan, also open that plan.
+                                store.browserSelection = .project(item.projectPath)
+                                selectedRowID = item.rowID
+                            }
                         }
                     }
                 }
@@ -693,6 +710,17 @@ struct ActiveRunItem: Identifiable, Equatable {
     /// The plan row to open on click, or `nil` for a capture (no plan yet) or a
     /// task not currently listed.
     let rowID: TaskRow.ID?
+    /// True while the run is parked on a question only the user can answer.
+    var needsInput: Bool = false
+}
+
+/// What clicking a row in the active-runs popover does.
+enum ActiveRunRowAction: Equatable {
+    /// Open the parked question in a sheet — works even when the plan is no
+    /// longer listed (e.g. `/plan-complete` archived it before asking).
+    case answerQuestion
+    /// Show the run's project and open its plan in the detail column.
+    case openPlan
 }
 
 /// The toolbar's active-runs indicator (#101): a spinner-style glyph plus the
@@ -705,14 +733,16 @@ private struct ActiveRunsIndicator: View {
     @State private var isOpen = false
 
     var body: some View {
+        let waiting = items.contains(where: \.needsInput)
         Button {
             isOpen.toggle()
         } label: {
-            Label("\(items.count)", systemImage: TaskStatus.inProgress.symbolName)
+            Label("\(items.count)",
+                  systemImage: waiting ? "questionmark.bubble.fill" : TaskStatus.inProgress.symbolName)
                 .labelStyle(.titleAndIcon)
         }
-        .foregroundStyle(TaskStatus.inProgress.glanceColor)
-        .help("Work the app is running right now")
+        .foregroundStyle(waiting ? Color.orange : TaskStatus.inProgress.glanceColor)
+        .help(waiting ? "A run is waiting for your answer" : "Work the app is running right now")
         .popover(isPresented: $isOpen, arrowEdge: .bottom) {
             ScrollView {
                 VStack(alignment: .leading, spacing: 2) {
@@ -742,15 +772,22 @@ private struct ActiveRunRow: View {
     var body: some View {
         Button(action: onOpen) {
             HStack(alignment: .firstTextBaseline, spacing: 8) {
-                ProgressView()
-                    .controlSize(.mini)
+                if item.needsInput {
+                    Image(systemName: "questionmark.bubble.fill")
+                        .foregroundStyle(.orange)
+                } else {
+                    ProgressView()
+                        .controlSize(.mini)
+                }
                 VStack(alignment: .leading, spacing: 2) {
                     Text(item.title)
                         .fixedSize(horizontal: false, vertical: true)
                         .multilineTextAlignment(.leading)
-                    Text("\(item.verb) · \(item.projectName)")
+                    Text(item.needsInput
+                         ? "\(item.verb) · needs your answer · \(item.projectName)"
+                         : "\(item.verb) · \(item.projectName)")
                         .font(.caption)
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(item.needsInput ? AnyShapeStyle(.orange) : AnyShapeStyle(.secondary))
                 }
                 Spacer(minLength: 0)
             }
@@ -764,6 +801,55 @@ private struct ActiveRunRow: View {
         }
         .buttonStyle(.plain)
         .onHover { isHovered = $0 }
+    }
+}
+
+/// The answer sheet for a run parked on a question, opened from the
+/// active-runs popover. It looks the run up live, so it closes itself once the
+/// question is answered (or the run ends) and never depends on the plan still
+/// being listed.
+private struct ParkedQuestionSheet: View {
+    let item: ActiveRunItem
+    let run: TaskRun?
+    let onClose: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(item.title)
+                    .font(.headline)
+                    .fixedSize(horizontal: false, vertical: true)
+                Text("\(item.verb) · \(item.projectName)")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            if let run, let pending = run.pendingQuestion {
+                ScrollView {
+                    ParkedQuestionForm(pending: pending) { answers in
+                        run.answer(toolUseId: pending.toolUseId, answers: answers)
+                        onClose()
+                    }
+                    .id(pending.toolUseId)
+                }
+            } else {
+                Text("This run is no longer waiting for an answer.")
+                    .foregroundStyle(.secondary)
+            }
+            HStack {
+                if let run, run.isRunning {
+                    Button("Stop Run", role: .destructive) {
+                        run.stop()
+                        onClose()
+                    }
+                }
+                Spacer(minLength: 0)
+                Button("Close") { onClose() }
+                    .keyboardShortcut(.cancelAction)
+            }
+        }
+        .padding(16)
+        .frame(width: 520)
+        .frame(minHeight: 240, maxHeight: 560)
     }
 }
 
@@ -1221,12 +1307,21 @@ enum BrowserViewModel {
                 title: title,
                 projectName: projectName,
                 projectPath: run.projectPath,
-                rowID: task.map { _ in run.projectPath + "/" + run.taskID }
+                rowID: task.map { _ in run.projectPath + "/" + run.taskID },
+                needsInput: run.needsInput
             )
         }
+        // Runs waiting on the user come first; then project name, then title.
         return items.sorted {
-            ($0.projectName, $0.title) < ($1.projectName, $1.title)
+            if $0.needsInput != $1.needsInput { return $0.needsInput }
+            return ($0.projectName, $0.title) < ($1.projectName, $1.title)
         }
+    }
+
+    /// What clicking an active-run row does: a parked run always opens its
+    /// question (the plan may have left the list); anything else opens the plan.
+    static func activeRunRowAction(_ item: ActiveRunItem) -> ActiveRunRowAction {
+        item.needsInput ? .answerQuestion : .openPlan
     }
 
     // MARK: - Task staleness / sorting / grouping (#094)

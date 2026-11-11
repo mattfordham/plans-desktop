@@ -2569,6 +2569,23 @@ final class TaskRunnerTests: XCTestCase {
                      "non-review run never gets a stdin pipe")
     }
 
+    /// A running run's snapshot reports whether it is parked on a question, so
+    /// the toolbar's active-runs popover can surface it even when the plan has
+    /// left the list (e.g. /plan-complete archived it before asking).
+    @MainActor
+    func testRunSnapshotReportsNeedsInputWhileParked() {
+        let run = TaskRun(taskID: "078", mode: .complete, outcomeLog: tempOutcomeLog())
+        run.markRunningForTesting(projectPath: "/proj")
+        XCTAssertEqual(TaskRunner.snapshot(of: run)?.needsInput, false)
+
+        let json = #"{"kind":"question","toolUseId":"tu-1","questions":[{"question":"Merge?","header":"Merge branch","options":[{"label":"Merge"}]}]}"#
+        run.ingestForTesting(json + "\n")
+        XCTAssertEqual(TaskRunner.snapshot(of: run)?.needsInput, true)
+
+        run.finishForTesting(projectPath: "/proj")
+        XCTAssertNil(TaskRunner.snapshot(of: run), "a finished run has no snapshot")
+    }
+
     /// A `.question` event sets `pendingQuestion`; `finish` clears it.
     @MainActor
     func testPendingQuestionSetOnQuestionAndClearedOnFinish() {

@@ -401,6 +401,8 @@ struct RunSnapshot: Equatable {
     let taskID: String
     let mode: RunMode
     let description: String?
+    /// True while an interactive run is parked on an `AskUserQuestion`.
+    var needsInput: Bool = false
 }
 
 /// A `RunEvent` paired with a fresh `UUID` so the SwiftUI log list can iterate
@@ -1563,11 +1565,16 @@ final class TaskRunner {
     /// Snapshots of every run currently in flight (finished runs excluded), for
     /// the browser toolbar's live-runs indicator.
     var runningSnapshots: [RunSnapshot] {
-        runs.values.compactMap { run in
-            guard run.isRunning, let path = run.runProjectPath else { return nil }
-            return RunSnapshot(projectPath: path, taskID: run.taskID,
-                               mode: run.mode, description: run.description)
-        }
+        runs.values.compactMap(Self.snapshot(of:))
+    }
+
+    /// The snapshot of one run, or `nil` when it is not running (or has no
+    /// project yet). `needsInput` reflects a parked question.
+    static func snapshot(of run: TaskRun) -> RunSnapshot? {
+        guard run.isRunning, let path = run.runProjectPath else { return nil }
+        return RunSnapshot(projectPath: path, taskID: run.taskID,
+                           mode: run.mode, description: run.description,
+                           needsInput: run.pendingQuestion != nil)
     }
 
     /// Convenience over `runningRunCount` for the common "is anything running?"

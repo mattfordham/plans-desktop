@@ -171,18 +171,6 @@ struct PlanDetailView: View {
     /// the conversation itself lives on the runner's `DiscussionThread`.
     @State private var discussText = ""
 
-    /// #083: the user's in-progress selection for each parked review question,
-    /// keyed by the question's `header` (unique within one `AskUserQuestion`
-    /// payload). Each value is the list of picked option labels, honouring
-    /// `multiSelect`. Cleared when the answer is sent (and naturally reset when a
-    /// new question arrives under different headers).
-    @State private var reviewSelections: [String: [String]] = [:]
-
-    /// #083: the "Other" free-text answer for each parked review question, keyed
-    /// by the question's `header`. When non-empty it is sent in place of (or
-    /// appended to) the option selection.
-    @State private var reviewOtherText: [String: String] = [:]
-
     /// The resolved row for `rowID` across all projects' active rows, or `nil`
     /// when absent. Re-derived from the live store on each render.
     private var row: TaskRow? {
@@ -849,98 +837,17 @@ struct PlanDetailView: View {
         }
     }
 
-    /// Renders one-to-four parked review questions (#083): each shows its header
-    /// and question text, an option button per choice INCLUDING the
-    /// "Resolve for me" sentinel (honouring `multiSelect`), an "Other" free-text
-    /// field, and a Send button that writes the answer back over the run's stdin
-    /// via `TaskRun.answer`. Plain stacks only (#096).
+    /// The parked question(s) for an interactive run, answered back over the
+    /// run's stdin via `TaskRun.answer`. Rendered by the shared
+    /// `ParkedQuestionForm` (also used by the active-runs popover's sheet).
     private func reviewQuestionsView(_ row: TaskRow, run: TaskRun,
                                      pending: TaskRun.PendingReviewQuestion) -> some View {
-        VStack(alignment: .leading, spacing: 16) {
-            ForEach(Array(pending.questions.enumerated()), id: \.offset) { _, question in
-                reviewQuestionView(question)
-            }
-            HStack {
-                Spacer(minLength: 0)
-                Button("Send") {
-                    sendReviewAnswer(run: run, pending: pending)
-                }
-                .keyboardShortcut(.return, modifiers: .command)
-                .disabled(!reviewCanSend(pending: pending))
-            }
+        ParkedQuestionForm(pending: pending) { answers in
+            run.answer(toolUseId: pending.toolUseId, answers: answers)
         }
-        .padding(12)
-        .background(
-            RoundedRectangle(cornerRadius: 10)
-                .fill(Color.accentColor.opacity(0.06))
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: 10)
-                .strokeBorder(Color.accentColor.opacity(0.25), lineWidth: 1)
-        )
+        .id(pending.toolUseId)
     }
 
-    /// A single parked question: header + question text, the option buttons
-    /// (with the "Resolve for me" sentinel appended), and the "Other" field.
-    private func reviewQuestionView(_ question: ReviewQuestion) -> some View {
-        let selected = reviewSelections[question.header] ?? []
-        return VStack(alignment: .leading, spacing: 8) {
-            Text(question.header)
-                .font(.subheadline.weight(.semibold))
-            Text(question.question)
-                .font(.callout)
-                .fixedSize(horizontal: false, vertical: true)
-
-            VStack(alignment: .leading, spacing: 6) {
-                ForEach(reviewOptionLabels(question), id: \.self) { label in
-                    let isOn = selected.contains(label)
-                    Button {
-                        reviewSelections[question.header] = Self.reviewToggleSelection(
-                            current: selected, choice: label, multiSelect: question.multiSelect)
-                    } label: {
-                        HStack(spacing: 8) {
-                            Image(systemName: optionGlyph(isOn: isOn, multiSelect: question.multiSelect))
-                                .foregroundStyle(isOn ? Color.accentColor : Color.secondary)
-                            Text(label)
-                                .fixedSize(horizontal: false, vertical: true)
-                            Spacer(minLength: 0)
-                        }
-                        .contentShape(Rectangle())
-                    }
-                    .buttonStyle(.plain)
-                }
-            }
-
-            HStack(spacing: 6) {
-                Text("Other:")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                TextField("Type a free-text answer…",
-                          text: Binding(
-                            get: { reviewOtherText[question.header] ?? "" },
-                            set: { reviewOtherText[question.header] = $0 }))
-                    .textFieldStyle(.roundedBorder)
-            }
-        }
-    }
-
-    /// The option labels shown for a question: the skill's own options plus the
-    /// "Resolve for me" sentinel appended last.
-    private func reviewOptionLabels(_ question: ReviewQuestion) -> [String] {
-        question.options.map(\.label) + [Self.resolveForMeLabel]
-    }
-
-    /// The per-option glyph: a checkbox for multi-select, a radio for
-    /// single-select; filled when selected.
-    private func optionGlyph(isOn: Bool, multiSelect: Bool) -> String {
-        if multiSelect {
-            return isOn ? "checkmark.square.fill" : "square"
-        }
-        return isOn ? "largecircle.fill.circle" : "circle"
-    }
-
-    /// Whether the Send button is enabled: at least one question must have either
-    /// a picked option or a non-empty "Other" answer.
     /// Builds the `answers` payload for a parked `AskUserQuestion`. The UI keeps
     /// selection state per question `header`, but the SDK reads answers keyed by
     /// the question TEXT — so the payload is re-keyed here. Each value is the
@@ -961,29 +868,6 @@ struct PlanDetailView: View {
             answers[question.question] = value
         }
         return answers
-    }
-
-    private func reviewCanSend(pending: TaskRun.PendingReviewQuestion) -> Bool {
-        pending.questions.contains { question in
-            let hasPick = !(reviewSelections[question.header] ?? []).isEmpty
-            let hasOther = !(reviewOtherText[question.header] ?? "")
-                .trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-            return hasPick || hasOther
-        }
-    }
-
-    /// Assembles and sends the user's answers back over the review run's stdin
-    /// (#083), keyed by the parked `toolUseId`. Per question the answer value is
-    /// the picked options (joined, honouring `multiSelect`) with any non-empty
-    /// "Other" text appended, via the tested pure helpers. Clears the in-progress
-    /// selection/other state once sent.
-    private func sendReviewAnswer(run: TaskRun, pending: TaskRun.PendingReviewQuestion) {
-        let answers = Self.reviewAnswers(questions: pending.questions,
-                                         selections: reviewSelections,
-                                         otherText: reviewOtherText)
-        run.answer(toolUseId: pending.toolUseId, answers: answers)
-        reviewSelections = [:]
-        reviewOtherText = [:]
     }
 
     /// Opens `directory` in Terminal via `open -a Terminal <dir>` (#083). A plain

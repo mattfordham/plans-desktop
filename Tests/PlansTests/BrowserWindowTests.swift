@@ -1384,6 +1384,35 @@ final class BrowserWindowTests: XCTestCase {
         XCTAssertEqual(items.map(\.title), ["Apple", "Zed", "Mid"])
     }
 
+    /// A run parked on a question carries `needsInput` and sorts to the top, so
+    /// a waiting question is the first thing the popover shows.
+    func testActiveRunItemsSurfaceNeedsInputFirst() {
+        let a = makeProject(path: "/a", name: "Alpha",
+                            activeTasks: [makeTask(id: "001", title: "Apple")])
+        let items = BrowserViewModel.activeRunItems(
+            from: [RunSnapshot(projectPath: "/a", taskID: "001", mode: .execute, description: nil),
+                   RunSnapshot(projectPath: "/z", taskID: "078", mode: .complete,
+                               description: nil, needsInput: true)],
+            projects: [a]
+        )
+        XCTAssertEqual(items.map(\.title), ["#078", "Apple"])
+        XCTAssertEqual(items.map(\.needsInput), [true, false])
+    }
+
+    /// Clicking a parked run answers its question — even when its plan is no
+    /// longer listed; otherwise the row opens the plan (or just its project).
+    func testActiveRunRowActionAnswersParkedRunsEvenWithoutARow() {
+        let parked = ActiveRunItem(id: "k", verb: "Completing", title: "#078", projectName: "P",
+                                   projectPath: "/p", rowID: nil, needsInput: true)
+        let parkedListed = ActiveRunItem(id: "k2", verb: "Reviewing", title: "T", projectName: "P",
+                                         projectPath: "/p", rowID: "/p/001", needsInput: true)
+        let busy = ActiveRunItem(id: "k3", verb: "Executing", title: "T", projectName: "P",
+                                 projectPath: "/p", rowID: "/p/002", needsInput: false)
+        XCTAssertEqual(BrowserViewModel.activeRunRowAction(parked), .answerQuestion)
+        XCTAssertEqual(BrowserViewModel.activeRunRowAction(parkedListed), .answerQuestion)
+        XCTAssertEqual(BrowserViewModel.activeRunRowAction(busy), .openPlan)
+    }
+
     /// Every run mode has a present-participle verb for the indicator.
     func testRunModeActivityVerbs() {
         XCTAssertEqual(RunMode.execute.activityVerb, "Executing")
