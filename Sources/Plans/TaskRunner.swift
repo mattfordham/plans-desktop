@@ -280,6 +280,14 @@ enum RunMode: String {
     /// the prompt. The only mode whose runner parks on `AskUserQuestion` and is
     /// unblocked by a user answer; every other mode runs fully autonomously.
     case review
+    /// Drives an INTERACTIVE `plan-complete` of an `in-review` plan: merges its
+    /// branch into the target branch and archives the task. Names an EXISTING
+    /// task but carries NO description — the prompt must be a bare
+    /// `/plan-complete NNN` because any trailing text would be read as skill
+    /// arguments (several of which are auto-accept keywords). Like `.review` it
+    /// parks on `AskUserQuestion` (merge choice, confirmations) and is answered
+    /// over the run's stdin. Always runs from the project root.
+    case complete
     case delete
     /// Defers a pending/elaborated task by driving `plan-backlog` to move its
     /// file from `.plans/pending/` into `.plans/backlog/` (#077 follow-up).
@@ -309,7 +317,7 @@ enum RunMode: String {
     /// can emit `--task-id` AND `--description` for them.
     var usesTaskID: Bool {
         switch self {
-        case .execute, .elaborate, .reElaborate, .reElaborateReview, .review, .delete, .backlog, .restore, .discuss:
+        case .execute, .elaborate, .reElaborate, .reElaborateReview, .review, .complete, .delete, .backlog, .restore, .discuss:
             return true
         case .capture, .captureElaborate, .executeYolo:
             return false
@@ -344,7 +352,20 @@ enum RunMode: String {
         switch self {
         case .capture, .captureElaborate, .executeYolo, .reElaborate, .reElaborateReview, .elaborate, .execute, .discuss:
             return true
-        case .delete, .backlog, .restore, .review:
+        case .delete, .backlog, .restore, .review, .complete:
+            return false
+        }
+    }
+
+    /// Whether this mode's runner may park on `AskUserQuestion` and wait for the
+    /// user's answer over stdin. Only the guided `.review` and `.complete` runs
+    /// do; every other mode runs fully autonomously and never gets a stdin pipe.
+    var isInteractive: Bool {
+        switch self {
+        case .review, .complete:
+            return true
+        case .execute, .elaborate, .capture, .captureElaborate, .executeYolo,
+             .reElaborate, .reElaborateReview, .delete, .backlog, .restore, .discuss:
             return false
         }
     }
@@ -360,6 +381,7 @@ extension RunMode {
         case .elaborate: return "Elaborating"
         case .reElaborate, .reElaborateReview: return "Refining"
         case .review: return "Reviewing"
+        case .complete: return "Completing"
         case .capture: return "Capturing"
         case .captureElaborate: return "Capturing & elaborating"
         case .executeYolo: return "Capturing & executing"
@@ -623,9 +645,10 @@ final class TaskRun {
         let questions: [ReviewQuestion]
     }
 
-    /// The write end of the `.review` run's stdin pipe (#083), used by
+    /// The write end of an interactive run's stdin pipe (#083), used by
     /// `answer(...)` to feed the agent the user's selection. Created ONLY for a
-    /// `.review` run in `spawn`; closed in `finish`. `nil` for every other mode.
+    /// `.review` / `.complete` run in `spawn` (`RunMode.isInteractive`); closed
+    /// in `finish`. `nil` for every other mode.
     private var standardInput: Pipe?
 
     /// Serial queue guarding writes to the review stdin pipe (#083) so overlapping
@@ -880,10 +903,11 @@ final class TaskRun {
         proc.standardOutput = stdoutPipe
         proc.standardError = stderrPipe
 
-        // #083: a guided review answers `AskUserQuestion` over stdin. Only a
-        // `.review` run gets a stdin pipe; every other mode leaves `standardInput`
-        // nil (and the child inherits/ignores stdin as before).
-        if mode == .review {
+        // #083: a guided review (and an interactive complete) answers
+        // `AskUserQuestion` over stdin. Only those modes get a stdin pipe; every
+        // other mode leaves `standardInput` nil (and the child inherits/ignores
+        // stdin as before).
+        if mode.isInteractive {
             let stdinPipe = Pipe()
             proc.standardInput = stdinPipe
             standardInput = stdinPipe
@@ -1025,7 +1049,27 @@ final class TaskRun {
     /// finish (including a missing/normal reason). Pure so the mapping is
     /// unit-testable without spawning a process.
     nonisolated static func truncationError(for stopReason: String?) -> String? {
+        truncationError(for: stopReason, mode: .execute)
+    }
+
+    /// Mode-aware variant of `truncationError(for:)`. A guided review or complete
+    /// run that hits a cap gets copy naming its own skill to re-run, rather than
+    /// the execute wording (which would wrongly point at `/plan-execute`). Every
+    /// other mode keeps the execute copy unchanged.
+    nonisolated static func truncationError(for stopReason: String?, mode: RunMode) -> String? {
         guard let stopReason else { return nil }
+        switch mode {
+        case .review:
+            guard truncatingStopReasons.contains(stopReason) else { return nil }
+            return "Review cut short — agent budget/turn cap hit before it finished. "
+                + "Re-run the review (/plan-review) to pick up where it left off."
+        case .complete:
+            guard truncatingStopReasons.contains(stopReason) else { return nil }
+            return "Completion cut short — agent budget/turn cap hit before it finished. "
+                + "Check the task's status and branch, then re-run /plan-complete."
+        default:
+            break
+        }
         if truncatingStopReasons.contains(stopReason) {
             return "Run cut short — agent budget/turn cap hit before completion. "
                 + "The task was left at in-progress (it did not reach review). "
@@ -1051,7 +1095,7 @@ final class TaskRun {
             // re-run to finish it.
             summary = (costUsd: costUsd, turns: turns)
             lastStopReason = stopReason
-            if let failureMessage = Self.truncationError(for: stopReason), error == nil {
+            if let failureMessage = Self.truncationError(for: stopReason, mode: mode), error == nil {
                 error = failureMessage
             }
         case let .error(message):
@@ -1126,7 +1170,7 @@ final class TaskRun {
     /// Test seam: runs the review-only stdin-pipe creation path (`spawn`'s
     /// `mode == .review` branch) WITHOUT spawning a process. DEBUG-only.
     func makeStandardInputForTesting() {
-        if mode == .review {
+        if mode.isInteractive {
             standardInput = Pipe()
         }
     }
@@ -1595,6 +1639,49 @@ final class TaskRunner {
         }
     }
 
+    /// Launches an interactive `.complete` run for `taskID` in `projectPath`,
+    /// driving `/plan-complete NNN` from the project root. The caller must have
+    /// already obtained the user's explicit confirmation — completing merges the
+    /// branch and archives the task. Keyed like any other run (a no-op while a
+    /// run for this task is in flight); its questions arrive as `.question`
+    /// events and are answered over stdin exactly like a guided review.
+    func complete(projectPath: String, taskID: String) {
+        run(projectPath: projectPath, taskID: taskID, mode: .complete)
+    }
+
+    /// Hands a FINISHED guided review over to the plan's discussion so the user
+    /// can keep talking to the reviewer. Seeds the task's `DiscussionThread`
+    /// with the review's summary and, when the review's Agent SDK session can be
+    /// resumed from the project root, its session id — so the next Discuss turn
+    /// continues the reviewer's conversation via `--resume`. A `kept` review ran
+    /// with the kept worktree as its working directory, and the CLI stores
+    /// sessions per working directory, so it cannot be resumed from the project
+    /// root; its summary is carried as context on the first question instead.
+    /// Then drops the finished run so the panel collapses back to the composer.
+    /// No-op when there is no finished review run for the task, or the thread is
+    /// mid-turn.
+    func continueReviewInDiscussion(projectPath: String, taskID: String) {
+        guard let run = run(for: taskID, in: projectPath),
+              run.mode == .review, !run.isRunning else { return }
+        let thread = thread(projectPath: projectPath, taskID: taskID)
+        guard !thread.isBusy else { return }
+        thread.seedFromReview(
+            sessionID: Self.resumableReviewSession(sessionID: run.sessionID,
+                                                   location: run.reviewLocation),
+            summary: run.reply)
+        dismiss(taskID: taskID, in: projectPath)
+    }
+
+    /// The review session a discussion may resume, or `nil` when it can't be
+    /// resumed from the project root (a `kept` review, whose session lives under
+    /// the kept worktree's directory) or there is no session. Pure so the rule
+    /// is testable.
+    nonisolated static func resumableReviewSession(sessionID: String?,
+                                                   location: ReviewLocation?) -> String? {
+        guard let sessionID, !sessionID.isEmpty, location != .kept else { return nil }
+        return sessionID
+    }
+
     /// The synthetic run-identity PREFIX for description-driven runs (capture or
     /// executeYolo) in `projectPath`. There is no real task id at this point, so
     /// each run is keyed under this prefix plus a unique suffix (see
@@ -1788,7 +1875,12 @@ final class TaskRunner {
 
         let resume = thread.beginTurn(question: trimmed)
         guard let turnID = thread.turns.last?.id else { return }
-        let taskRun = TaskRun(taskID: taskID, mode: .discuss, description: trimmed,
+        // A discussion continued from a review whose session can't be resumed
+        // carries the review summary as context on its first fresh turn.
+        let outgoing = resume == nil
+            ? DiscussionThread.question(trimmed, withReviewContext: thread.takeReviewContext())
+            : trimmed
+        let taskRun = TaskRun(taskID: taskID, mode: .discuss, description: outgoing,
                               resume: resume, apply: apply)
         thread.activeRun = taskRun
         taskRun.onEvent = { [weak thread, weak taskRun] event in

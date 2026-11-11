@@ -361,4 +361,61 @@ final class DiscussionThreadTests: XCTestCase {
         runner.cancelDiscussionTurn(projectPath: "/p", taskID: "7")
         XCTAssertNil(runner.discussion(projectPath: "/p", taskID: "7"))
     }
+
+    // MARK: - Seeding from a finished review
+
+    func testSeedFromReviewWithSessionResumesItAndShowsSummary() {
+        let thread = DiscussionThread()
+        thread.seedFromReview(sessionID: "s-rev", summary: "Review summary")
+        XCTAssertEqual(thread.sessionID, "s-rev")
+        XCTAssertEqual(thread.turns.count, 1)
+        XCTAssertEqual(thread.turns[0].reply, "Review summary")
+        XCTAssertTrue(thread.turns[0].isReviewSummary)
+        XCTAssertFalse(thread.isBusy)
+        XCTAssertEqual(thread.beginTurn(question: "next"), "s-rev")
+        XCTAssertNil(thread.takeReviewContext(), "a resumed session needs no extra context")
+    }
+
+    func testSeedFromReviewWithoutSessionCarriesContextOnce() {
+        let thread = DiscussionThread()
+        thread.seedFromReview(sessionID: nil, summary: "Review summary")
+        XCTAssertNil(thread.sessionID)
+        XCTAssertNil(thread.beginTurn(question: "next"))
+        XCTAssertEqual(thread.takeReviewContext(), "Review summary")
+        XCTAssertNil(thread.takeReviewContext(), "context is consumed by the first fresh turn")
+    }
+
+    func testSeedFromReviewIsIgnoredWhileBusy() {
+        let thread = DiscussionThread()
+        thread.beginTurn(question: "pending")
+        thread.seedFromReview(sessionID: "s-rev", summary: "Review summary")
+        XCTAssertNil(thread.sessionID)
+        XCTAssertEqual(thread.turns.count, 1)
+    }
+
+    /// If resuming the review session fails, the next ask starts fresh — and the
+    /// review summary comes back as context so it isn't lost.
+    func testFailedResumeOfReviewSessionFallsBackToSummaryContext() {
+        let thread = DiscussionThread()
+        thread.seedFromReview(sessionID: "s-rev", summary: "Review summary")
+        thread.beginTurn(question: "q")
+        thread.apply(.error(message: "No conversation found"))
+        XCTAssertNil(thread.sessionID)
+        XCTAssertEqual(thread.takeReviewContext(), "Review summary")
+    }
+
+    func testResetClearsReviewContext() {
+        let thread = DiscussionThread()
+        thread.seedFromReview(sessionID: nil, summary: "Review summary")
+        thread.reset()
+        XCTAssertNil(thread.takeReviewContext())
+    }
+
+    func testQuestionWithReviewContext() {
+        XCTAssertEqual(DiscussionThread.question("Why?", withReviewContext: nil), "Why?")
+        let combined = DiscussionThread.question("Why?", withReviewContext: "Summary text")
+        XCTAssertTrue(combined.contains("Summary text"))
+        XCTAssertTrue(combined.hasSuffix("Why?"))
+        XCTAssertNotEqual(combined, "Why?")
+    }
 }

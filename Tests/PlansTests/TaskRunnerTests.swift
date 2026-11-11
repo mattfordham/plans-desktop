@@ -2604,4 +2604,145 @@ final class TaskRunnerTests: XCTestCase {
         XCTAssertNotNil(run, "review run is keyed in runs like any other")
         XCTAssertEqual(run?.mode, .review)
     }
+
+    // MARK: - Complete mode (interactive plan-complete)
+
+    func testCompleteModeFlags() {
+        XCTAssertTrue(RunMode.complete.usesTaskID, "complete names an existing task")
+        XCTAssertFalse(RunMode.complete.usesDescription,
+                       "complete carries no --description; a trailer would become skill arguments")
+        XCTAssertEqual(RunMode.complete.activityVerb, "Completing")
+    }
+
+    /// Only review and complete answer questions over stdin; every other mode is
+    /// autonomous.
+    func testOnlyReviewAndCompleteAreInteractive() {
+        XCTAssertTrue(RunMode.review.isInteractive)
+        XCTAssertTrue(RunMode.complete.isInteractive)
+        for mode in [RunMode.execute, .elaborate, .capture, .captureElaborate, .executeYolo,
+                     .reElaborate, .reElaborateReview, .delete, .backlog, .restore, .discuss] {
+            XCTAssertFalse(mode.isInteractive, "\(mode) must stay autonomous")
+        }
+    }
+
+    func testArgumentsForComplete() {
+        let args = TaskRun.arguments(
+            scriptPath: "/s", projectPath: "/p", taskID: "083",
+            mode: .complete, description: "ignored", deep: false, keep: false,
+            resume: "ignored", reviewLocation: .kept
+        )
+        XCTAssertEqual(args, [
+            "/s", "--project-root", "/p", "--task-id", "083", "--mode", "complete",
+        ])
+    }
+
+    @MainActor
+    func testStandardInputPipeCreatedForComplete() {
+        let run = TaskRun(taskID: "083", mode: .complete)
+        run.makeStandardInputForTesting()
+        XCTAssertNotNil(run.standardInputForTesting, "complete answers questions over stdin")
+    }
+
+    @MainActor
+    func testCompleteLauncherKeysRunNormally() {
+        let runner = TaskRunner()
+        runner.complete(projectPath: "/proj", taskID: "083")
+        let run = runner.run(for: "083", in: "/proj")
+        XCTAssertEqual(run?.mode, .complete)
+    }
+
+    // MARK: - Mode-specific truncation copy
+
+    func testTruncationErrorCopyIsModeSpecific() {
+        let execute = TaskRun.truncationError(for: "error_max_budget_usd", mode: .execute)
+        XCTAssertEqual(execute, TaskRun.truncationError(for: "error_max_budget_usd"),
+                       "execute keeps the existing copy")
+        let review = TaskRun.truncationError(for: "error_max_budget_usd", mode: .review)
+        XCTAssertNotNil(review)
+        XCTAssertTrue(review?.contains("/plan-review") == true)
+        XCTAssertFalse(review?.contains("/plan-execute") == true)
+        let complete = TaskRun.truncationError(for: "error_max_turns", mode: .complete)
+        XCTAssertTrue(complete?.contains("/plan-complete") == true)
+        XCTAssertFalse(complete?.contains("/plan-execute") == true)
+        XCTAssertNil(TaskRun.truncationError(for: "end_turn", mode: .review))
+    }
+
+    @MainActor
+    func testReviewRunTruncationUsesReviewCopy() {
+        let run = TaskRun(taskID: "083", mode: .review, outcomeLog: tempOutcomeLog())
+        run.markRunningForTesting(projectPath: "/proj")
+        run.ingestForTesting(#"{"kind":"done","costUsd":1,"turns":3,"stopReason":"error_max_turns"}"# + "\n")
+        XCTAssertEqual(run.error, TaskRun.truncationError(for: "error_max_turns", mode: .review))
+    }
+
+    // MARK: - Continuing a finished review as a discussion
+
+    @MainActor
+    private func finishedReviewRun(location: ReviewLocation,
+                                   sessionID: String = "s-rev",
+                                   reply: String = "All observations confirmed.") -> TaskRun {
+        let run = TaskRun(taskID: "083", mode: .review, reviewLocation: location,
+                          outcomeLog: tempOutcomeLog())
+        run.markRunningForTesting(projectPath: "/proj")
+        run.ingestForTesting(#"{"kind":"session","sessionId":"\#(sessionID)"}"# + "\n"
+            + #"{"kind":"reply","text":"\#(reply)","sessionId":"\#(sessionID)"}"# + "\n"
+            + #"{"kind":"done","costUsd":0.5,"turns":4,"stopReason":"end_turn"}"# + "\n")
+        run.finishForTesting(projectPath: "/proj")
+        return run
+    }
+
+    @MainActor
+    func testContinueReviewInDiscussionResumesReviewSession() {
+        let runner = TaskRunner()
+        var launched: [TaskRun] = []
+        runner.discussLauncherForTesting = { run, _, _ in launched.append(run) }
+        runner.ingestRunForTesting(finishedReviewRun(location: .worktree))
+
+        runner.continueReviewInDiscussion(projectPath: "/proj", taskID: "083")
+
+        let thread = runner.discussion(projectPath: "/proj", taskID: "083")
+        XCTAssertEqual(thread?.sessionID, "s-rev")
+        XCTAssertEqual(thread?.turns.count, 1)
+        XCTAssertEqual(thread?.turns.first?.reply, "All observations confirmed.")
+        XCTAssertTrue(thread?.turns.first?.isReviewSummary == true)
+        XCTAssertNil(runner.run(for: "083", in: "/proj"), "the finished review run is dismissed")
+
+        runner.ask(projectPath: "/proj", taskID: "083", question: "Why step 2?")
+        XCTAssertEqual(launched.last?.resume, "s-rev")
+        XCTAssertEqual(launched.last?.description, "Why step 2?")
+    }
+
+    /// A kept-worktree review ran with the worktree as its cwd, so its session
+    /// can't be resumed from the project root; the summary is carried as context
+    /// on the first question instead.
+    @MainActor
+    func testContinueKeptReviewInDiscussionCarriesSummaryAsContext() {
+        let runner = TaskRunner()
+        var launched: [TaskRun] = []
+        runner.discussLauncherForTesting = { run, _, _ in launched.append(run) }
+        runner.ingestRunForTesting(finishedReviewRun(location: .kept))
+
+        runner.continueReviewInDiscussion(projectPath: "/proj", taskID: "083")
+
+        let thread = runner.discussion(projectPath: "/proj", taskID: "083")
+        XCTAssertNil(thread?.sessionID)
+        runner.ask(projectPath: "/proj", taskID: "083", question: "Why step 2?")
+        XCTAssertNil(launched.last?.resume)
+        XCTAssertTrue(launched.last?.description?.contains("All observations confirmed.") == true)
+        XCTAssertTrue(launched.last?.description?.hasSuffix("Why step 2?") == true)
+        XCTAssertEqual(thread?.turns.last?.question, "Why step 2?",
+                       "the transcript shows the user's question, not the context")
+    }
+
+    @MainActor
+    func testContinueReviewInDiscussionIgnoresLiveOrNonReviewRuns() {
+        let runner = TaskRunner()
+        let live = TaskRun(taskID: "083", mode: .review, reviewLocation: .main,
+                           outcomeLog: tempOutcomeLog())
+        live.markRunningForTesting(projectPath: "/proj")
+        runner.ingestRunForTesting(live)
+        runner.continueReviewInDiscussion(projectPath: "/proj", taskID: "083")
+        XCTAssertNil(runner.discussion(projectPath: "/proj", taskID: "083"))
+        XCTAssertNotNil(runner.run(for: "083", in: "/proj"))
+    }
 }

@@ -244,6 +244,23 @@ struct PlanRowActions: View {
                         forReview: true
                     )
                 }
+                // An in-review plan can also be completed (merge + archive).
+                // It moves git state, so the glyph only ever opens the explicit
+                // confirmation — never a one-click run.
+                if PlanDetailView.canComplete(status: row.task.status,
+                                              branch: row.task.branch,
+                                              isBlocked: row.task.isBlocked,
+                                              isBacklogged: row.task.isBacklogged,
+                                              hasLiveRun: false),
+                   let branch = row.task.branch {
+                    RowActionGlyph(systemImage: "checkmark.seal", help: "Complete this plan…") {
+                        rowActionsLog.notice("row Complete clicked: task=\(row.task.id, privacy: .public)")
+                        if PlanDetailView.confirmComplete(taskID: row.task.id, title: row.title,
+                                                          branch: branch) {
+                            runner.complete(projectPath: row.projectPath, taskID: row.task.id)
+                        }
+                    }
+                }
             }
         } else {
             // No action for this status: an empty spacer of the same height so the

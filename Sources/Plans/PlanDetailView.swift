@@ -195,13 +195,16 @@ struct PlanDetailView: View {
             if let row {
                 let thread = runner.discussion(projectPath: row.projectPath, taskID: row.task.id)
                 let showsPanel = Self.showsConversationPanel(turnCount: thread?.turns.count ?? 0)
-                // #083: a LIVE guided-review run takes over the bottom panel,
-                // REPLACING the Discuss composer with the review panel (the
-                // discussion transcript above it stays). `reviewRun` is the live
-                // `.review` run for this task, or nil.
-                let reviewRun = Self.liveReviewRun(
-                    runner.run(for: row.task.id, in: row.projectPath))
-                let showsReview = Self.showsReviewPanel(hasLiveReviewRun: reviewRun != nil)
+                // #083: a LIVE interactive run (guided review or complete) takes
+                // over the bottom panel, REPLACING the Discuss composer with the
+                // question panel (the discussion transcript above it stays). A
+                // review that finished cleanly keeps the panel up with its
+                // summary and follow-up actions until dismissed.
+                let currentRun = runner.run(for: row.task.id, in: row.projectPath)
+                let liveRun = Self.liveInteractiveRun(currentRun)
+                let finishedReview = Self.finishedReviewRun(currentRun)
+                let showsReview = Self.showsReviewPanel(hasLiveReviewRun: liveRun != nil,
+                                                        hasFinishedReviewRun: finishedReview != nil)
                 // The plan on top; below it the discussion panel — the
                 // transcript (once a question has been asked) and the composer
                 // on one `.bar` surface. With a transcript, both halves take
@@ -218,11 +221,14 @@ struct PlanDetailView: View {
                             Divider()
                             conversationTranscript(row, thread: thread)
                         }
-                        if showsReview, let reviewRun {
-                            // The review panel REPLACES the composer while the
-                            // guided review runs.
+                        if showsReview, let liveRun {
+                            // The question panel REPLACES the composer while the
+                            // interactive run is live.
                             Divider()
-                            reviewPanel(row, run: reviewRun)
+                            reviewPanel(row, run: liveRun)
+                        } else if showsReview, let finishedReview {
+                            Divider()
+                            finishedReviewPanel(row, run: finishedReview)
                         } else if Self.canDiscuss(status: row.task.status,
                                                   isBlocked: row.task.isBlocked,
                                                   isBacklogged: row.task.isBacklogged) {
@@ -538,6 +544,27 @@ struct PlanDetailView: View {
                             Label("Review", systemImage: "checklist")
                         }
                     }
+
+                    // "Complete" — merges the branch and archives an in-review
+                    // plan by driving `plan-complete` interactively. Always behind
+                    // an explicit confirmation, since it moves git state.
+                    if Self.canComplete(status: row.task.status,
+                                        branch: row.task.branch,
+                                        isBlocked: row.task.isBlocked,
+                                        isBacklogged: row.task.isBacklogged,
+                                        hasLiveRun: runner.isRunning(taskID: row.task.id,
+                                                                     in: row.projectPath)),
+                       let branch = row.task.branch {
+                        Button {
+                            if Self.confirmComplete(taskID: row.task.id, title: row.title,
+                                                    branch: branch) {
+                                runner.complete(projectPath: row.projectPath,
+                                                taskID: row.task.id)
+                            }
+                        } label: {
+                            Label("Complete…", systemImage: "checkmark.seal")
+                        }
+                    }
                 }
 
                 Spacer(minLength: 8)
@@ -606,13 +633,30 @@ struct PlanDetailView: View {
         return project.tasks.filter { $0.id != row.task.id }
     }
 
-    /// The live `.review` run for this task (#083), or `nil` when the given run is
-    /// absent, not running, or not a review run. A FINISHED review run returns
-    /// `nil` so the panel collapses back to the Discuss composer once the guided
-    /// review ends. Pure so the gate is testable without a live run.
-    static func liveReviewRun(_ run: TaskRun?) -> TaskRun? {
-        guard let run, run.isRunning, run.mode == .review else { return nil }
+    /// The live interactive run for this task — a guided `.review` or a
+    /// `.complete` — or `nil` when the given run is absent, not running, or
+    /// autonomous. Both modes park on questions, so both drive the question
+    /// panel. Pure so the gate is testable without a live run.
+    static func liveInteractiveRun(_ run: TaskRun?) -> TaskRun? {
+        guard let run, run.isRunning, run.mode.isInteractive else { return nil }
         return run
+    }
+
+    /// The FINISHED guided review for this task, or `nil`. Only a review that
+    /// ran to a clean `done` qualifies — not one that is still running, was
+    /// stopped by the user (no `done`), errored, or hit a budget/turn cap — so
+    /// the follow-up actions (discuss with the reviewer, complete) are offered
+    /// only after a review that actually finished. Stays until dismissed. Pure so
+    /// the gate is testable.
+    static func finishedReviewRun(_ run: TaskRun?) -> TaskRun? {
+        guard let run, run.mode == .review, !run.isRunning,
+              run.error == nil, run.summary != nil else { return nil }
+        return run
+    }
+
+    /// The bottom panel's title for an interactive run.
+    static func interactivePanelTitle(mode: RunMode) -> String {
+        mode == .complete ? "Complete Plan" : "Guided Review"
     }
 
     /// The sentinel option label (#083) the guided review offers alongside the
@@ -623,21 +667,22 @@ struct PlanDetailView: View {
 
     // MARK: - Review panel (#083 guided in-app review)
 
-    /// The guided-review panel shown in place of the Discuss composer while a
-    /// `.review` run is live (#083). It keeps the discussion transcript above it,
-    /// then shows: the run transcript (reusing `RunLogContents`), the parked
-    /// question (one option button per choice INCLUDING "Resolve for me",
-    /// honouring `multiSelect`, plus an "Other" free-text field) when one is
-    /// pending, the review's final summary via `markdownBlockView` once replied,
-    /// and the open-in-Terminal / open-in-Editor actions for the review directory.
-    /// Plain stacks + `maxHeight: .infinity` only — NO GeometryReader / measured
-    /// heights (#096).
+    /// The question panel shown in place of the Discuss composer while an
+    /// interactive run (guided review or complete) is live (#083). It keeps the
+    /// discussion transcript above it, then shows: the run transcript (reusing
+    /// `RunLogContents`) filling the panel, and — when a question is parked — a
+    /// section beneath it with one option button per choice INCLUDING "Resolve
+    /// for me" (honouring `multiSelect`) plus an "Other" free-text field. The
+    /// final summary is shown by `finishedReviewPanel` once a review finishes.
+    /// The header carries the open-in-Terminal / open-in-Editor actions for a
+    /// review directory. Plain stacks + `maxHeight: .infinity` only — NO
+    /// GeometryReader / measured heights (#096).
     private func reviewPanel(_ row: TaskRow, run: TaskRun) -> some View {
         VStack(alignment: .leading, spacing: 0) {
             HStack(alignment: .firstTextBaseline, spacing: 8) {
-                Image(systemName: "checklist")
+                Image(systemName: run.mode == .complete ? "checkmark.seal" : "checklist")
                     .foregroundStyle(.secondary)
-                Text("Guided Review")
+                Text(Self.interactivePanelTitle(mode: run.mode))
                     .font(.headline)
                 if run.isRunning {
                     ProgressView().controlSize(.small)
@@ -656,29 +701,107 @@ struct PlanDetailView: View {
 
             Divider()
 
+            // The live transcript gets the panel's full height as its own band
+            // and auto-scrolls to the newest output (RunLogContents). Nothing
+            // here measures its own size (#096).
+            RunLogContents(run: run, edgeToEdge: true, horizontalPadding: 16, topPadding: 10)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+
+            // A parked question takes a section beneath the transcript that
+            // scrolls on its own when tall, so neither half clips the other.
+            if let pending = run.pendingQuestion {
+                Divider()
+                ScrollView {
+                    reviewQuestionsView(row, run: run, pending: pending)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.horizontal, 16)
+                        .padding(.vertical, 12)
+                }
+                .frame(maxHeight: .infinity)
+            }
+        }
+        .frame(maxHeight: .infinity)
+    }
+
+    /// The panel shown after a guided review finished cleanly: the reviewer's
+    /// final summary (markdown, scrolling in the panel's full height) and the
+    /// follow-up actions — continue the conversation with the reviewer, complete
+    /// the plan (behind an explicit confirmation), or dismiss back to the plain
+    /// Discuss composer. Plain stacks + `maxHeight: .infinity` only (#096).
+    private func finishedReviewPanel(_ row: TaskRow, run: TaskRun) -> some View {
+        let canDiscussNow = Self.canDiscuss(status: row.task.status,
+                                            isBlocked: row.task.isBlocked,
+                                            isBacklogged: row.task.isBacklogged)
+            && !(runner.discussion(projectPath: row.projectPath, taskID: row.task.id)?.isBusy ?? false)
+        let canCompleteNow = Self.canComplete(status: row.task.status,
+                                              branch: row.task.branch,
+                                              isBlocked: row.task.isBlocked,
+                                              isBacklogged: row.task.isBacklogged,
+                                              hasLiveRun: run.isRunning)
+        return VStack(alignment: .leading, spacing: 0) {
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                Image(systemName: "checkmark.circle")
+                    .foregroundStyle(.secondary)
+                Text("Review Finished")
+                    .font(.headline)
+                Spacer(minLength: 8)
+                reviewOpenInButtons(row, run: run)
+                Button("Done") {
+                    runner.dismiss(taskID: row.task.id, in: row.projectPath)
+                    store.reload()
+                }
+                .controlSize(.small)
+                .help("Close the review and return to the Discuss composer")
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 8)
+
+            Divider()
+
             ScrollView {
-                VStack(alignment: .leading, spacing: 16) {
-                    // The live run transcript (activity + text), reusing the
-                    // shared run-log body so the review stream reads like every
-                    // other run. It scrolls within its own band (#096).
-                    RunLogContents(run: run)
-                        .frame(maxHeight: 220)
-
-                    // The parked question, if any.
-                    if let pending = run.pendingQuestion {
-                        reviewQuestionsView(row, run: run, pending: pending)
-                    }
-
-                    // The final summary once the agent has replied.
+                Group {
                     if let reply = run.reply, !reply.isEmpty {
                         markdownBlockView(reply, style: .compact)
+                    } else {
+                        Text("The review finished without a summary.")
+                            .foregroundStyle(.secondary)
                     }
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(.horizontal, 16)
                 .padding(.vertical, 12)
             }
+            .textSelection(.enabled)
             .frame(maxHeight: .infinity)
+
+            Divider()
+
+            HStack(spacing: 8) {
+                Spacer(minLength: 0)
+                if canDiscussNow {
+                    Button {
+                        runner.continueReviewInDiscussion(projectPath: row.projectPath,
+                                                          taskID: row.task.id)
+                    } label: {
+                        Label("Discuss with Reviewer", systemImage: "bubble.left.and.bubble.right")
+                    }
+                    .help("Continue the conversation with the reviewing agent")
+                }
+                if canCompleteNow, let branch = row.task.branch {
+                    Button {
+                        if Self.confirmComplete(taskID: row.task.id, title: row.title,
+                                                branch: branch) {
+                            runner.complete(projectPath: row.projectPath, taskID: row.task.id)
+                        }
+                    } label: {
+                        Label("Complete…", systemImage: "checkmark.seal")
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .help("Merge the branch and archive this plan")
+                }
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 10)
         }
         .frame(maxHeight: .infinity)
     }
@@ -1652,11 +1775,57 @@ struct PlanDetailView: View {
         }
     }
 
-    /// Whether the review panel REPLACES the Discuss composer: only while a
-    /// `.review` run is live for this task. The discussion thread itself stays
-    /// (the panel sits where the composer was). Pure so the swap is testable.
-    static func showsReviewPanel(hasLiveReviewRun: Bool) -> Bool {
-        hasLiveReviewRun
+    /// Whether the review panel REPLACES the Discuss composer: while an
+    /// interactive run is live for this task, or after a guided review finished
+    /// cleanly (until the user dismisses it or moves on). The discussion thread
+    /// itself stays (the panel sits where the composer was). Pure so the swap is
+    /// testable.
+    static func showsReviewPanel(hasLiveReviewRun: Bool,
+                                 hasFinishedReviewRun: Bool = false) -> Bool {
+        hasLiveReviewRun || hasFinishedReviewRun
+    }
+
+    /// Pure predicate for the "Complete" action: an `in-review` plan with a
+    /// branch to merge, not blocked, not backlogged, and with no live run.
+    /// Completing merges the branch and archives the task, so it is only offered
+    /// once the plan has been through review; the action itself still requires
+    /// an explicit confirmation (`confirmComplete`).
+    static func canComplete(status: TaskStatus?, branch: String?,
+                            isBlocked: Bool, isBacklogged: Bool,
+                            hasLiveRun: Bool) -> Bool {
+        guard !isBacklogged, !isBlocked, !hasLiveRun else { return false }
+        guard let branch, !branch.isEmpty else { return false }
+        return status == .inReview
+    }
+
+    /// The wording of the Complete confirmation: names the task and its branch
+    /// and states that completing merges into the target branch and archives the
+    /// task. Pure so the copy is testable.
+    static func completeConfirmation(taskID: String, title: String?,
+                                     branch: String) -> (title: String, message: String) {
+        let name = title ?? "(untitled)"
+        return (
+            title: "Complete plan #\(taskID)?",
+            message: "\"\(name)\" will be completed: branch \(branch) will be merged "
+                + "into the target branch (the task's Base branch, or the repository's "
+                + "default branch) and the task will be archived to .plans/completed.\n\n"
+                + "plan-complete commits any uncommitted changes in the project checkout "
+                + "first, removes the task's kept worktree if it has one, and asks how to "
+                + "merge (keep or delete the branch, or skip the merge) before it changes git."
+        )
+    }
+
+    /// Runs the modal confirmation for "Complete", returning `true` only when the
+    /// user explicitly confirms. Completing moves git state, so it is never a
+    /// single click.
+    static func confirmComplete(taskID: String, title: String?, branch: String) -> Bool {
+        let copy = completeConfirmation(taskID: taskID, title: title, branch: branch)
+        let alert = NSAlert()
+        alert.messageText = copy.title
+        alert.informativeText = copy.message
+        alert.addButton(withTitle: "Complete")
+        alert.addButton(withTitle: "Cancel")
+        return alert.runModal() == .alertFirstButtonReturn
     }
 
     /// Whether the needs-input indicator lights on the plan's row (#083): true
@@ -2242,7 +2411,8 @@ struct RunLogContents: View {
               RunProgressSheet.shouldShowFailureBanner(
                   error: error,
                   isRunning: run?.isRunning == true,
-                  stopReason: run?.lastStopReason
+                  stopReason: run?.lastStopReason,
+                  mode: run?.mode ?? .execute
               ) else { return nil }
         return error
     }
@@ -2478,7 +2648,8 @@ struct RunProgressSheet: View {
     static func shouldShowFailureBanner(
         error: String?,
         isRunning: Bool,
-        stopReason: String?
+        stopReason: String?,
+        mode: RunMode = .execute
     ) -> Bool {
         guard let error else { return false }
         // Ended runs always show whatever error latched.
@@ -2486,7 +2657,7 @@ struct RunProgressSheet: View {
         // Still running: suppress only a `done`-derived truncation/stranded
         // failure (its text equals the mapping for the current stop reason).
         // Any other error (a genuine mid-run crash/launch failure) shows now.
-        return TaskRun.truncationError(for: stopReason) != error
+        return TaskRun.truncationError(for: stopReason, mode: mode) != error
     }
 
     var body: some View {

@@ -1176,4 +1176,138 @@ final class PlanDetailViewTests: XCTestCase {
         XCTAssertTrue(PlanDetailView.showsReviewPanel(hasLiveReviewRun: true))
         XCTAssertFalse(PlanDetailView.showsReviewPanel(hasLiveReviewRun: false))
     }
+
+    // MARK: - Interactive run panel: live and finished gating
+
+    private func outcomeLog() -> RunOutcomeLog {
+        RunOutcomeLog(fileURL: FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString)
+            .appendingPathComponent("run-outcomes.log"))
+    }
+
+    @MainActor
+    private func interactiveRun(mode: RunMode, ndjson: String = "", finish: Bool,
+                                stop: Bool = false) -> TaskRun {
+        let run = TaskRun(taskID: "083", mode: mode,
+                          reviewLocation: mode == .review ? .main : nil,
+                          outcomeLog: outcomeLog())
+        run.markRunningForTesting(projectPath: "/proj")
+        if !ndjson.isEmpty { run.ingestForTesting(ndjson) }
+        if stop { run.stop() } else if finish { run.finishForTesting(projectPath: "/proj") }
+        return run
+    }
+
+    private let cleanFinish = #"{"kind":"reply","text":"Summary","sessionId":"s"}"# + "\n"
+        + #"{"kind":"done","costUsd":0.1,"turns":2,"stopReason":"end_turn"}"# + "\n"
+
+    @MainActor
+    func testLiveInteractiveRunCoversReviewAndComplete() {
+        XCTAssertNotNil(PlanDetailView.liveInteractiveRun(interactiveRun(mode: .review, finish: false)))
+        XCTAssertNotNil(PlanDetailView.liveInteractiveRun(interactiveRun(mode: .complete, finish: false)))
+        XCTAssertNil(PlanDetailView.liveInteractiveRun(interactiveRun(mode: .execute, finish: false)))
+        XCTAssertNil(PlanDetailView.liveInteractiveRun(interactiveRun(mode: .review, ndjson: cleanFinish, finish: true)))
+        XCTAssertNil(PlanDetailView.liveInteractiveRun(nil))
+    }
+
+    @MainActor
+    func testFinishedReviewRunOnlyForCleanlyFinishedReview() {
+        // Clean finish -> shown.
+        XCTAssertNotNil(PlanDetailView.finishedReviewRun(
+            interactiveRun(mode: .review, ndjson: cleanFinish, finish: true)))
+        // Still running -> not finished.
+        XCTAssertNil(PlanDetailView.finishedReviewRun(
+            interactiveRun(mode: .review, ndjson: cleanFinish, finish: false)))
+        // Errored -> not shown.
+        XCTAssertNil(PlanDetailView.finishedReviewRun(
+            interactiveRun(mode: .review,
+                           ndjson: #"{"kind":"error","message":"boom"}"# + "\n",
+                           finish: true)))
+        // Truncated by a cap -> error latched -> not shown.
+        XCTAssertNil(PlanDetailView.finishedReviewRun(
+            interactiveRun(mode: .review,
+                           ndjson: #"{"kind":"done","costUsd":1,"turns":9,"stopReason":"error_max_turns"}"# + "\n",
+                           finish: true)))
+        // Stopped by the user (no done) -> not shown.
+        XCTAssertNil(PlanDetailView.finishedReviewRun(
+            interactiveRun(mode: .review, finish: false, stop: true)))
+        // Other modes -> not shown.
+        XCTAssertNil(PlanDetailView.finishedReviewRun(
+            interactiveRun(mode: .complete, ndjson: cleanFinish, finish: true)))
+        XCTAssertNil(PlanDetailView.finishedReviewRun(
+            interactiveRun(mode: .execute, ndjson: cleanFinish, finish: true)))
+        XCTAssertNil(PlanDetailView.finishedReviewRun(nil))
+    }
+
+    func testReviewPanelAlsoShowsForFinishedReview() {
+        XCTAssertTrue(PlanDetailView.showsReviewPanel(hasLiveReviewRun: false,
+                                                      hasFinishedReviewRun: true))
+        XCTAssertTrue(PlanDetailView.showsReviewPanel(hasLiveReviewRun: true,
+                                                      hasFinishedReviewRun: false))
+        XCTAssertFalse(PlanDetailView.showsReviewPanel(hasLiveReviewRun: false,
+                                                       hasFinishedReviewRun: false))
+    }
+
+    func testInteractivePanelTitlePerMode() {
+        XCTAssertEqual(PlanDetailView.interactivePanelTitle(mode: .review), "Guided Review")
+        XCTAssertEqual(PlanDetailView.interactivePanelTitle(mode: .complete), "Complete Plan")
+    }
+
+    // MARK: - Complete action gating
+
+    func testCanCompleteForInReviewPlanWithBranch() {
+        XCTAssertTrue(PlanDetailView.canComplete(status: .inReview, branch: "feature/x",
+                                                 isBlocked: false, isBacklogged: false,
+                                                 hasLiveRun: false))
+    }
+
+    func testCanCompleteFalseWhenGatesFail() {
+        XCTAssertFalse(PlanDetailView.canComplete(status: .inReview, branch: nil,
+                                                  isBlocked: false, isBacklogged: false,
+                                                  hasLiveRun: false))
+        XCTAssertFalse(PlanDetailView.canComplete(status: .inReview, branch: "",
+                                                  isBlocked: false, isBacklogged: false,
+                                                  hasLiveRun: false))
+        XCTAssertFalse(PlanDetailView.canComplete(status: .inReview, branch: "b",
+                                                  isBlocked: true, isBacklogged: false,
+                                                  hasLiveRun: false))
+        XCTAssertFalse(PlanDetailView.canComplete(status: .inReview, branch: "b",
+                                                  isBlocked: false, isBacklogged: true,
+                                                  hasLiveRun: false))
+        XCTAssertFalse(PlanDetailView.canComplete(status: .inReview, branch: "b",
+                                                  isBlocked: false, isBacklogged: false,
+                                                  hasLiveRun: true))
+        for status in [TaskStatus.pending, .elaborated, .inProgress, .review, .completed] {
+            XCTAssertFalse(PlanDetailView.canComplete(status: status, branch: "b",
+                                                      isBlocked: false, isBacklogged: false,
+                                                      hasLiveRun: false),
+                           "\(status) must not offer Complete")
+        }
+        XCTAssertFalse(PlanDetailView.canComplete(status: nil, branch: "b",
+                                                  isBlocked: false, isBacklogged: false,
+                                                  hasLiveRun: false))
+    }
+
+    /// The confirmation names the task and branch and states that it merges into
+    /// the target branch and archives the task.
+    func testCompleteConfirmationNamesTaskBranchAndConsequences() {
+        let text = PlanDetailView.completeConfirmation(taskID: "083",
+                                                       title: "Guided Review",
+                                                       branch: "feature/083-x")
+        XCTAssertTrue(text.title.contains("#083"))
+        XCTAssertTrue(text.message.contains("Guided Review"))
+        XCTAssertTrue(text.message.contains("feature/083-x"))
+        XCTAssertTrue(text.message.localizedCaseInsensitiveContains("merge"))
+        XCTAssertTrue(text.message.localizedCaseInsensitiveContains("target branch"))
+        XCTAssertTrue(text.message.localizedCaseInsensitiveContains("archive"))
+    }
+
+    // MARK: - Failure banner honours mode-specific truncation copy
+
+    func testFailureBannerSuppressesReviewTruncationWhileRunning() {
+        let error = TaskRun.truncationError(for: "error_max_turns", mode: .review)
+        XCTAssertFalse(RunProgressSheet.shouldShowFailureBanner(
+            error: error, isRunning: true, stopReason: "error_max_turns", mode: .review))
+        XCTAssertTrue(RunProgressSheet.shouldShowFailureBanner(
+            error: error, isRunning: false, stopReason: "error_max_turns", mode: .review))
+    }
 }
