@@ -168,18 +168,17 @@ struct PlanDetailView: View {
     var body: some View {
         Group {
             if let row {
-                // #117: the plan on top, the always-present agent dock below, each
-                // taking `maxHeight: .infinity` so SwiftUI splits the column
-                // without anything measuring itself (#096). The dock REPLACES the
+                // #117: the plan on top, the always-present agent dock below. The
+                // dock is user-resizable (`ResizableAgentDock`, a persisted height
+                // used as its `maxHeight`); the plan takes the rest. Nothing
+                // measures itself during layout (#096). The dock REPLACES the
                 // former top progress drawer, the review / finished-review panels,
                 // and the stand-alone Discuss composer with one surface driven by
                 // this plan's single `PlanAgent`.
                 VStack(spacing: 0) {
                     planScrollView(row)
-                        .frame(maxHeight: .infinity)
-                    Divider()
-                    AgentDock(row: row)
-                        .frame(maxHeight: .infinity)
+                        .frame(minHeight: 0, maxHeight: .infinity)
+                    ResizableAgentDock { AgentDock(row: row) }
                 }
             } else if let rowID, TaskRunner.isSyntheticCaptureID(rowID) {
                 // #117: a synthetic `capture:` selection has no backing plan yet.
@@ -297,10 +296,8 @@ struct PlanDetailView: View {
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(28)
-            Divider()
             Spacer(minLength: 0)
-            AgentDock(row: nil, captureRun: captureRun)
-                .frame(maxHeight: .infinity)
+            ResizableAgentDock { AgentDock(row: nil, captureRun: captureRun) }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }

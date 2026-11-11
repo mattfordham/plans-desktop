@@ -1207,6 +1207,36 @@ final class PlanDetailViewTests: XCTestCase {
             error: error, isRunning: false, stopReason: "error_max_turns", mode: .review))
     }
 
+    // MARK: - AgentDock.resizedHeight (vertical dock resizing)
+
+    /// Dragging the handle UP (negative translation) grows the dock by the drag
+    /// distance; dragging DOWN shrinks it.
+    @MainActor
+    func testResizedHeightFollowsDrag() {
+        XCTAssertEqual(AgentDock.resizedHeight(start: 300, dragTranslation: -100, maxHeight: 1000), 400)
+        XCTAssertEqual(AgentDock.resizedHeight(start: 300, dragTranslation: 50, maxHeight: 1000), 250)
+    }
+
+    /// The dock never shrinks below its minimum, so the header and footer stay usable.
+    @MainActor
+    func testResizedHeightClampsToMinimum() {
+        XCTAssertEqual(AgentDock.resizedHeight(start: 300, dragTranslation: 1000, maxHeight: 1000),
+                       AgentDock.minHeight)
+    }
+
+    /// The dock never grows past the supplied maximum.
+    @MainActor
+    func testResizedHeightClampsToMaximum() {
+        XCTAssertEqual(AgentDock.resizedHeight(start: 300, dragTranslation: -5000, maxHeight: 900), 900)
+    }
+
+    /// A degenerate maximum below the minimum still yields the minimum.
+    @MainActor
+    func testResizedHeightMinimumWinsOverTinyMaximum() {
+        XCTAssertEqual(AgentDock.resizedHeight(start: 300, dragTranslation: 0, maxHeight: 10),
+                       AgentDock.minHeight)
+    }
+
     // MARK: - AgentDock.dockFooterMode (#117 — the docked agent panel footer)
 
     /// An idle agent shows the composer, whatever `canDiscuss` says — the agent

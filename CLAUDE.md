@@ -75,9 +75,10 @@ swift test               # run the XCTest suite
   disappears (a synthetic `capture:` id is kept while the capture runs and
   remapped to the real row once it migrates). There is no separate detail window.
 - **Agent dock (#117).** The plan body is pinned at the top of the detail column
-  with an always-present **agent dock** (`AgentDock.swift`) docked beneath it,
-  each taking `maxHeight: .infinity` so the column splits without anything
-  measuring its own size (#096). The dock REPLACES the former top progress
+  with an always-present **agent dock** (`AgentDock.swift`) docked beneath it.
+  The dock is vertically resizable via `ResizableAgentDock`: a drag handle sets a
+  persisted point height (`agentDockHeight`) used as the dock's `maxHeight`; the
+  window height is read only when a drag begins, never during layout (#096). The dock REPLACES the former top progress
   drawer, the review / finished-review panels, and the stand-alone Discuss
   composer with ONE surface driven by the plan's single `PlanAgent`: a header
   (status pill + Stop / New conversation), a unified transcript (run logs via

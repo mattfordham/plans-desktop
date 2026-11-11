@@ -17,8 +17,9 @@ import AppKit
 ///   composer when idle, a disabled "Agent is <verb> — Stop to interrupt" band
 ///   while working, and the `ParkedQuestionForm` when the agent needs an answer.
 ///
-/// No measured sizes (#096): the dock reuses the `maxHeight: .infinity` split and
-/// the `ViewThatFits` question-card layout — nothing here measures its own size.
+/// No measured sizes (#096): the dock fills whatever height its
+/// `ResizableAgentDock` container gives it, and the question card uses
+/// `ViewThatFits`. Nothing here measures its own size.
 struct AgentDock: View {
     /// The row whose agent this dock surfaces, or `nil` for a synthetic capture
     /// placeholder (no backing plan yet).
@@ -68,6 +69,24 @@ struct AgentDock: View {
         case .idle:
             return canDiscuss ? .composer : .none
         }
+    }
+
+    // MARK: - Vertical sizing (pure)
+
+    /// The smallest height the dock can be dragged to. Keeps the header,
+    /// a sliver of transcript and the footer usable.
+    static let minHeight: CGFloat = 140
+
+    /// The dock height used until the user drags the resize handle.
+    static let defaultHeight: CGFloat = 320
+
+    /// The dock height after dragging its top-edge handle by `dragTranslation`
+    /// points from a drag that began at height `start`. Dragging up (negative
+    /// translation) grows the dock. Clamped to `minHeight...maxHeight`; the
+    /// minimum wins when `maxHeight` is smaller than it.
+    static func resizedHeight(start: CGFloat, dragTranslation: CGFloat, maxHeight: CGFloat) -> CGFloat {
+        let proposed = start - dragTranslation
+        return max(minHeight, min(proposed, maxHeight))
     }
 
     // MARK: - Body
@@ -517,5 +536,71 @@ struct AgentTurnView: View {
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
+
+// MARK: - Resizable dock container
+
+/// Hosts the agent dock under a draggable top-edge handle so it can be resized
+/// vertically. The height is stored in points (persisted across launches) and
+/// applied as the dock's `maxHeight`, with the dock taking layout priority so
+/// a window shorter than the stored height simply shrinks it — the window, not
+/// the view, decides the final size.
+///
+/// No measured sizes feed back into layout (#096): the window's content height
+/// is read only when a drag begins, to start the drag from the dock's real
+/// on-screen height and to cap how far it can grow. Nothing is read during layout.
+struct ResizableAgentDock<Dock: View>: View {
+    @ViewBuilder let dock: () -> Dock
+
+    /// How much of the content above the dock must stay visible.
+    static var reservedAboveDock: CGFloat { 120 }
+
+    /// The persisted dock height, shared by every plan.
+    @AppStorage("agentDockHeight") private var height: Double = Double(AgentDock.defaultHeight)
+
+    /// The drag's starting height and maximum, captured when it begins.
+    @State private var drag: (start: CGFloat, max: CGFloat)?
+
+    var body: some View {
+        VStack(spacing: 0) {
+            handle
+            dock()
+                .frame(minHeight: AgentDock.minHeight, maxHeight: CGFloat(height))
+        }
+        .layoutPriority(1)
+    }
+
+    private var handle: some View {
+        Divider()
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 3)
+            .contentShape(Rectangle())
+            .pointerStyle(.rowResize)
+            .gesture(
+                DragGesture(minimumDistance: 1, coordinateSpace: .global)
+                    .onChanged { value in
+                        let current = drag ?? beginDrag(atGlobalY: value.startLocation.y)
+                        drag = current
+                        height = Double(AgentDock.resizedHeight(
+                            start: current.start,
+                            dragTranslation: value.translation.height,
+                            maxHeight: current.max))
+                    }
+                    .onEnded { _ in drag = nil }
+            )
+            .onTapGesture(count: 2) { height = Double(AgentDock.defaultHeight) }
+            .help("Drag to resize the agent panel · double-click to reset")
+    }
+
+    /// The drag's starting height and maximum, from the window's content height
+    /// at the moment the drag begins. Falls back to the stored height when no
+    /// window is available.
+    private func beginDrag(atGlobalY y: CGFloat) -> (start: CGFloat, max: CGFloat) {
+        guard let contentHeight = NSApp.keyWindow?.contentView?.bounds.height else {
+            return (CGFloat(height), .greatestFiniteMagnitude)
+        }
+        let onScreen = max(AgentDock.minHeight, contentHeight - y)
+        return (min(CGFloat(height), onScreen), contentHeight - Self.reservedAboveDock)
     }
 }
