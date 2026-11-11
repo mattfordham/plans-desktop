@@ -1094,18 +1094,18 @@ struct PlanDetailView: View {
         return locations
     }
 
-    /// The sibling task (same project) that would be holding the MAIN checkout
-    /// during a review (#083), or `nil` when none would. A task holds the main
-    /// checkout when it is in `review` / `in-review` AND has NO kept worktree (a
-    /// kept-worktree review sits in its own worktree, freeing main). Used to warn
-    /// the user before a `main` review disturbs another in-flight review. The
-    /// `current` task is never its own occupant. Takes the sibling collection so
-    /// it is unit-testable without a live store.
-    static func mainCheckoutOccupant(current: Task, siblings: [Task]) -> Task? {
-        siblings.first { sibling in
-            sibling.id != current.id
-                && (sibling.status == .review || sibling.status == .inReview)
-                && !sibling.isKeptWorktree
+    /// The sibling task (same project) holding the MAIN checkout (#083), or `nil`
+    /// when none does. A sibling holds main only when the main checkout is
+    /// ACTUALLY on that sibling's branch, per git (`mainBranch`, read by the
+    /// review modal's preflight). Status alone is not evidence: a task "ready for
+    /// review" has not been checked out anywhere yet. An unknown `mainBranch`
+    /// (`nil`: git unavailable / preflight pending) never asserts an occupant.
+    /// The `current` task is never its own occupant. Pure so it is unit-testable.
+    static func mainCheckoutOccupant(current: Task, siblings: [Task],
+                                     mainBranch: String?) -> Task? {
+        guard let mainBranch, !mainBranch.isEmpty else { return nil }
+        return siblings.first { sibling in
+            sibling.id != current.id && sibling.branch == mainBranch
         }
     }
 

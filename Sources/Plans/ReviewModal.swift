@@ -63,10 +63,11 @@ struct ReviewModal: View {
         PlanDetailView.availableReviewLocations(for: task)
     }
 
-    /// The sibling (if any) holding the main checkout — disables the `main`
-    /// option when non-nil.
+    /// The sibling (if any) whose branch the main checkout is actually on, per
+    /// the preflight's git read — disables the `main` option when non-nil.
     private var mainOccupantTaskID: String? {
-        PlanDetailView.mainCheckoutOccupant(current: task, siblings: siblings)?.id
+        PlanDetailView.mainCheckoutOccupant(current: task, siblings: siblings,
+                                            mainBranch: preflight?.mainBranch)?.id
     }
 
     var body: some View {

@@ -962,29 +962,39 @@ final class PlanDetailViewTests: XCTestCase {
                        [.worktree, .main])
     }
 
-    /// `mainCheckoutOccupant` finds a sibling in review/in-review WITHOUT a kept
-    /// worktree (it would be holding the main checkout).
-    func testMainCheckoutOccupantFindsReviewSiblingWithoutKeptWorktree() {
-        let current = reviewTask(id: "001", status: .review, isKeptWorktree: true)
-        let occupant = reviewTask(id: "002", status: .inReview, isKeptWorktree: false)
-        let siblings = [current, occupant, reviewTask(id: "003", status: .pending)]
+    /// `mainCheckoutOccupant` is the sibling whose branch the MAIN checkout is
+    /// actually on (per git), not a guess from status.
+    func testMainCheckoutOccupantIsSiblingWhoseBranchMainHasCheckedOut() {
+        let current = reviewTask(id: "001", status: .review, branch: "task/001")
+        let occupant = reviewTask(id: "002", status: .inReview, branch: "task/002")
+        let siblings = [current, occupant, reviewTask(id: "003", status: .pending, branch: "task/003")]
 
-        let found = PlanDetailView.mainCheckoutOccupant(current: current, siblings: siblings)
+        let found = PlanDetailView.mainCheckoutOccupant(current: current, siblings: siblings,
+                                                        mainBranch: "task/002")
         XCTAssertEqual(found?.id, "002")
     }
 
-    /// No occupant when every review sibling has a kept worktree, or none is in
-    /// review, and the current task is never itself the occupant.
-    func testMainCheckoutOccupantNilWhenNoneHoldsMain() {
-        let current = reviewTask(id: "001", status: .review, isKeptWorktree: false)
-        // Sibling in review but kept → not holding main.
-        let kept = reviewTask(id: "002", status: .review, isKeptWorktree: true)
-        // Sibling not in review → irrelevant.
-        let pending = reviewTask(id: "003", status: .pending, isKeptWorktree: false)
-        let siblings = [current, kept, pending]
+    /// A sibling that is merely ready for review (status `review`, no kept
+    /// worktree) does NOT hold main when main is on its default branch.
+    func testMainCheckoutOccupantNilWhenMainIsOnDefaultBranch() {
+        let current = reviewTask(id: "1201", status: .review, branch: "task/1201")
+        let readyForReview = reviewTask(id: "1196", status: .review, branch: "task/1196")
+        let inReview = reviewTask(id: "1190", status: .inReview, branch: "task/1190")
 
-        XCTAssertNil(PlanDetailView.mainCheckoutOccupant(current: current, siblings: siblings),
-                     "current itself must not count; kept + non-review siblings don't hold main")
+        XCTAssertNil(PlanDetailView.mainCheckoutOccupant(
+            current: current, siblings: [current, readyForReview, inReview], mainBranch: "main"))
+    }
+
+    /// Unknown main branch (git unavailable) never asserts an occupant, and the
+    /// current task is never its own occupant.
+    func testMainCheckoutOccupantNilWhenUnknownOrSelf() {
+        let current = reviewTask(id: "001", status: .review, branch: "task/001")
+        let sibling = reviewTask(id: "002", status: .review, branch: "task/002")
+
+        XCTAssertNil(PlanDetailView.mainCheckoutOccupant(
+            current: current, siblings: [current, sibling], mainBranch: nil))
+        XCTAssertNil(PlanDetailView.mainCheckoutOccupant(
+            current: current, siblings: [current, sibling], mainBranch: "task/001"))
     }
 
     // MARK: - Review panel: open-in directory (#083 Step 6)
