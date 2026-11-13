@@ -1332,4 +1332,92 @@ final class PlanDetailViewTests: XCTestCase {
         XCTAssertEqual(AgentDock.dockFooterMode(state: .needsInput, canDiscuss: true), .question)
         XCTAssertEqual(AgentDock.dockFooterMode(state: .needsInput, canDiscuss: false), .question)
     }
+
+    // MARK: - Run-log `.text` chunks render as block markdown (#119)
+
+    /// The `.text(chunk)` run-log arm now renders through `MarkdownBlockView`,
+    /// which drives the same block engine (`MarkdownBlockRenderer.parse`) the
+    /// plan body and discuss replies use — not a bare `Text(chunk)`. These tests
+    /// pin the engine contract the fix relies on: the block kinds agents emit in
+    /// their streamed text (bold, `#` headings, bullet lists, ordered lists,
+    /// fenced code) parse into STRUCTURED blocks rather than being left as a
+    /// single literal paragraph. (The SwiftUI view path itself is not directly
+    /// unit-testable; this covers the parse layer beneath it.)
+
+    /// A `#`-prefixed line becomes a heading block, not literal "# Heading" prose.
+    func testAgentTextHeadingParsesAsHeadingBlock() {
+        XCTAssertEqual(
+            MarkdownBlockRenderer.parse("# Summary"),
+            [.heading(level: 1, text: "Summary")]
+        )
+    }
+
+    /// Bold inline markup survives into a paragraph block; the view's inline
+    /// preparer interprets the `**` runs (covered in MarkdownPreparerTests). What
+    /// matters here is that a bolded sentence is a single paragraph block, not a
+    /// list or code block.
+    func testAgentTextBoldStaysAParagraphBlock() {
+        XCTAssertEqual(
+            MarkdownBlockRenderer.parse("This is **important** text."),
+            [.paragraph("This is **important** text.")]
+        )
+    }
+
+    /// A dash bullet list parses into a single bulletList block with its items,
+    /// rather than three literal "- ..." paragraph lines.
+    func testAgentTextBulletListParsesAsBulletList() {
+        XCTAssertEqual(
+            MarkdownBlockRenderer.parse("- first\n- second\n- third"),
+            [.bulletList(["first", "second", "third"])]
+        )
+    }
+
+    /// A numbered list parses into a numberedList block with its items.
+    func testAgentTextOrderedListParsesAsNumberedList() {
+        XCTAssertEqual(
+            MarkdownBlockRenderer.parse("1. alpha\n2. beta"),
+            [.numberedList(["alpha", "beta"])]
+        )
+    }
+
+    /// A fenced code block parses into a codeBlock, preserving language and the
+    /// inner lines verbatim instead of showing the ``` fences as prose.
+    func testAgentTextFencedCodeParsesAsCodeBlock() {
+        XCTAssertEqual(
+            MarkdownBlockRenderer.parse("```swift\nlet x = 1\n```"),
+            [.codeBlock(language: "swift", code: "let x = 1")]
+        )
+    }
+
+    /// A realistic agent chunk interleaving a heading, bold prose, a bullet list,
+    /// an ordered list, and a fenced code block parses into the five structured
+    /// blocks in document order — the whole point of routing `.text` through the
+    /// markdown engine.
+    func testAgentTextMixedChunkParsesIntoStructuredBlocksInOrder() {
+        let chunk = """
+        # Done
+
+        I finished the **refactor**.
+
+        - renamed the helper
+        - added a test
+
+        1. build
+        2. run tests
+
+        ```swift
+        swift test
+        ```
+        """
+        XCTAssertEqual(
+            MarkdownBlockRenderer.parse(chunk),
+            [
+                .heading(level: 1, text: "Done"),
+                .paragraph("I finished the **refactor**."),
+                .bulletList(["renamed the helper", "added a test"]),
+                .numberedList(["build", "run tests"]),
+                .codeBlock(language: "swift", code: "swift test"),
+            ]
+        )
+    }
 }

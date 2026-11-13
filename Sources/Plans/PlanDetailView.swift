@@ -1868,8 +1868,7 @@ struct RunLogContents: View {
                 }
             }
         case let .text(chunk):
-            Text(chunk)
-                .font(.callout)
+            MarkdownBlockView(body: chunk, style: .compact)
         case let .denied(tool):
             // Task #092: a non-fatal denied tool call. Shown inline as a muted
             // warning line (NOT the red error banner) since the run continues.
