@@ -143,6 +143,52 @@ final class PlanDetailViewTests: XCTestCase {
         XCTAssertNil(RunLogContents.scrollTarget(for: []))
     }
 
+    // MARK: - AgentDock.transcriptScrollKey (#121)
+
+    /// The bug: the transcript auto-follow keyed on `segments.count` alone, so a
+    /// single live run whose one `.run` segment streams new lines never changed
+    /// the key — and the view never scrolled to the growing bottom. The key must
+    /// change when the LAST run segment gains a log line even though
+    /// `segments.count` is unchanged (the exact missing invariant).
+    @MainActor
+    func testTranscriptScrollKeyChangesWhenLastRunGainsALine() {
+        let run = TaskRun(taskID: "121", mode: .execute)
+        let segments: [AgentSegment] = [.run(run)]
+
+        let before = AgentDock.transcriptScrollKey(for: segments)
+
+        // Append one real log line through the production NDJSON path (not a
+        // fabricated internal mutation): `lines.count` goes 0 → 1 while the
+        // segment array identity and its `.count` stay fixed.
+        run.ingestForTesting(#"{"kind":"text","chunk":"hello"}"# + "\n")
+        XCTAssertEqual(run.lines.count, 1, "precondition: one log line ingested")
+        XCTAssertEqual(segments.count, 1, "precondition: segment count unchanged")
+
+        let after = AgentDock.transcriptScrollKey(for: segments)
+
+        XCTAssertNotEqual(
+            before, after,
+            "key must change when the active run streams a new line"
+        )
+    }
+
+    /// The key must ALSO change when a segment is added or removed, so a brand
+    /// new run/turn still scrolls into view.
+    @MainActor
+    func testTranscriptScrollKeyChangesWhenSegmentAddedOrRemoved() {
+        let first = TaskRun(taskID: "121", mode: .execute)
+        let second = TaskRun(taskID: "121", mode: .discuss, description: "q")
+
+        let one: [AgentSegment] = [.run(first)]
+        let two: [AgentSegment] = [.run(first), .run(second)]
+
+        XCTAssertNotEqual(
+            AgentDock.transcriptScrollKey(for: one),
+            AgentDock.transcriptScrollKey(for: two),
+            "key must change when a segment is added or removed"
+        )
+    }
+
     // MARK: - RunLogContents.shouldShowFailureBanner (#081)
 
     /// A `done`-derived failure (stranded/truncation) latches `error` mid-run

@@ -129,7 +129,15 @@ struct AgentDock: View {
                     .frame(maxWidth: .infinity, minHeight: 0, maxHeight: .infinity)
             }
             if Self.showsFooter(collapsed: collapsed) {
+                // #121: the footer is the protected band — it holds the composer /
+                // "Stop to interrupt" / parked question the user must always reach.
+                // Giving it a higher layout priority than the transcript (which
+                // keeps the default priority and its `minHeight: 0, maxHeight:
+                // .infinity`) means even a single tall run plus a tall footer makes
+                // the TRANSCRIPT yield its height, never clipping the footer. Pure
+                // priority — no size measurement during layout (#096).
                 footer
+                    .layoutPriority(1)
             }
         }
         .frame(maxHeight: Self.bodyMaxHeight(collapsed: collapsed))
@@ -245,6 +253,21 @@ struct AgentDock: View {
 
     // MARK: - Transcript
 
+    /// A value that changes both when a segment is added/removed AND when the
+    /// last run segment streams new lines (#121). The outer transcript scroll
+    /// auto-follows on `.onChange(of:)` this key, so a single live `.run` segment
+    /// whose `segments.count` is invariant still scrolls to the bottom as its
+    /// log grows. Pure (no size measurement, #096), mirroring
+    /// `RunLogContents.scrollTarget(for:)`.
+    static func transcriptScrollKey(for segments: [AgentSegment]) -> Int {
+        var hasher = Hasher()
+        hasher.combine(segments.count)
+        if case let .run(run)? = segments.last {
+            hasher.combine(run.lines.count)
+        }
+        return hasher.finalize()
+    }
+
     @ViewBuilder
     private var transcript: some View {
         let segments = agent?.transcript ?? []
@@ -260,7 +283,10 @@ struct AgentDock: View {
                 .padding(.vertical, 12)
             }
             .textSelection(.enabled)
-            .onChange(of: segments.count) {
+            // #121: key on content length, not just `segments.count`, so a live
+            // run whose single segment streams new lines keeps scrolling to the
+            // bottom (the count is invariant while one run runs).
+            .onChange(of: Self.transcriptScrollKey(for: segments)) {
                 if let last = segments.last {
                     withAnimation { proxy.scrollTo(last.id, anchor: .bottom) }
                 }

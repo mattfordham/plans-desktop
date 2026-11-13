@@ -14,9 +14,12 @@ import Observation
 ///   the gate and its tooltip copy are unit-testable.
 /// - **A unified transcript** of `AgentSegment`s: each run is a `.run(TaskRun)`
 ///   segment, each discuss turn a `.turn(DiscussionTurn)` segment, in arrival
-///   order. A finished segment stays in the transcript (the agent returns to
-///   `idle`), so one continuous history accumulates across a capture → elaborate
-///   → execute → review → discuss sequence.
+///   order. Starting a NEW action refreshes the run view: prior FINISHED `.run`
+///   segments are pruned so the transcript shows only the active/most-recent run
+///   (this keeps the dock from accumulating stacked run logs that overflow its
+///   height cap, #121). Discuss `.turn` segments are orthogonal — they persist
+///   until "New conversation" clears them — so a capture → elaborate → execute →
+///   review → discuss sequence keeps the conversation while showing one run.
 /// - **Session lineage** (`lastSession`): the last run/turn's resumable session
 ///   plus the directory it ran in, generalising `resumableReviewSession`. The
 ///   composer resumes that session when it would run in the SAME directory, else
@@ -119,9 +122,20 @@ final class PlanAgent {
     /// Appends `run` as a `.run` segment and enters `working(run.mode)`, unless
     /// the gate refuses (not idle). Returns whether it was accepted. The caller
     /// starts the process after a `true`.
+    ///
+    /// Before appending, prior FINISHED `.run` segments are pruned (#121) so the
+    /// transcript renders only the active/most-recent run instead of a growing
+    /// stack of logs that overflows the dock's height cap. Discuss `.turn`
+    /// segments are left untouched — they persist until "New conversation". A
+    /// still-live run cannot be here (the gate would have refused), so this never
+    /// drops an in-flight run.
     @discardableResult
     func beginRunSegment(_ run: TaskRun) -> Bool {
         guard canStartNow else { return false }
+        transcript.removeAll {
+            if case let .run(existing) = $0 { return !existing.isRunning }
+            return false
+        }
         transcript.append(.run(run))
         currentRun = run
         state = .working(run.mode)

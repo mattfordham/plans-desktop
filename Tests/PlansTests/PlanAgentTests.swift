@@ -99,7 +99,7 @@ final class PlanAgentTests: XCTestCase {
     }
 
     /// A run that finishes returns the agent to idle and leaves its segment in
-    /// the transcript.
+    /// the transcript until the NEXT run prunes it.
     func testFinishedRunReturnsToIdleAndKeepsSegment() {
         let agent = PlanAgent()
         let run = TaskRun(taskID: "7", mode: .execute)
@@ -108,6 +108,47 @@ final class PlanAgentTests: XCTestCase {
         XCTAssertEqual(agent.state, .idle)
         XCTAssertEqual(agent.transcript.count, 1)
         XCTAssertTrue(agent.canStartNow)
+    }
+
+    /// Starting a NEW run after a prior run finished prunes the finished run
+    /// (#121): the transcript holds exactly the new `.run` segment, not a stack.
+    func testBeginningNewRunPrunesPriorFinishedRun() {
+        let agent = PlanAgent()
+        let first = TaskRun(taskID: "7", mode: .elaborate)
+        _ = agent.beginRunSegment(first)
+        agent.completeRunSegment(first)
+
+        let second = TaskRun(taskID: "7", mode: .execute)
+        XCTAssertTrue(agent.beginRunSegment(second))
+        XCTAssertEqual(agent.transcript.count, 1, "prior finished run is pruned")
+        guard case let .run(segmentRun) = agent.transcript[0] else {
+            return XCTFail("expected the new run segment")
+        }
+        XCTAssertTrue(segmentRun === second, "only the new run remains")
+    }
+
+    /// Pruning finished runs on a new run leaves discuss `.turn` segments from
+    /// the current conversation untouched (#121): they persist until "New
+    /// conversation", orthogonal to the run view.
+    func testBeginningNewRunPreservesTurnSegments() {
+        let agent = PlanAgent()
+        // A completed discuss turn, then a finished run.
+        _ = agent.beginDiscussTurn(question: "why?", apply: false)
+        agent.applyDiscussEvent(.reply(text: "because", sessionID: "s1"))
+        agent.applyDiscussEvent(.done(costUsd: 0, turns: 1, stopReason: "end_turn"))
+        agent.completeDiscussTurn(error: nil)
+        let first = TaskRun(taskID: "7", mode: .elaborate)
+        _ = agent.beginRunSegment(first)
+        agent.completeRunSegment(first)
+
+        let second = TaskRun(taskID: "7", mode: .execute)
+        XCTAssertTrue(agent.beginRunSegment(second))
+
+        // The turn survives; exactly one run remains (the new one).
+        let turns = agent.transcript.filter { if case .turn = $0 { return true }; return false }
+        let runs = agent.transcript.filter { if case .run = $0 { return true }; return false }
+        XCTAssertEqual(turns.count, 1, "discuss turn persists through run pruning")
+        XCTAssertEqual(runs.count, 1, "only the new run remains")
     }
 
     // MARK: - Discuss turns via the owned thread (segment ported from DiscussionThreadTests)
