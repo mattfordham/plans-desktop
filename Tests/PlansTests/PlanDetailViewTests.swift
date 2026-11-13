@@ -1333,6 +1333,30 @@ final class PlanDetailViewTests: XCTestCase {
         XCTAssertEqual(AgentDock.dockFooterMode(state: .needsInput, canDiscuss: false), .question)
     }
 
+    // MARK: - AgentDock.shouldAutoExpand (#120 — collapsible dock auto-expand)
+
+    /// An idle agent should NOT auto-expand the collapsed dock — only live
+    /// activity pulls the panel open.
+    @MainActor
+    func testShouldAutoExpandIdleIsFalse() {
+        XCTAssertFalse(AgentDock.shouldAutoExpand(for: .idle))
+    }
+
+    /// Any working mode (execute / refine / review / discuss / …) auto-expands
+    /// the collapsed dock so the user sees the action it kicked off.
+    @MainActor
+    func testShouldAutoExpandWorkingIsTrue() {
+        XCTAssertTrue(AgentDock.shouldAutoExpand(for: .working(.execute)))
+        XCTAssertTrue(AgentDock.shouldAutoExpand(for: .working(.review)))
+        XCTAssertTrue(AgentDock.shouldAutoExpand(for: .working(.discuss)))
+    }
+
+    /// A needs-input agent auto-expands so the parked question is visible to answer.
+    @MainActor
+    func testShouldAutoExpandNeedsInputIsTrue() {
+        XCTAssertTrue(AgentDock.shouldAutoExpand(for: .needsInput))
+    }
+
     // MARK: - Run-log `.text` chunks render as block markdown (#119)
 
     /// The `.text(chunk)` run-log arm now renders through `MarkdownBlockView`,

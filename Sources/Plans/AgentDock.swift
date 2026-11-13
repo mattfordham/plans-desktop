@@ -30,6 +30,11 @@ struct AgentDock: View {
     /// capture. `nil` for a real plan.
     var captureRun: TaskRun? = nil
 
+    /// Whether the dock is collapsed to a header-only strip. Bound from
+    /// `ResizableAgentDock`'s persisted `agentDockCollapsed` so the leading
+    /// header chevron can toggle it (#120).
+    @Binding var collapsed: Bool
+
     @Environment(PlansStore.self) private var store
     @Environment(TaskRunner.self) private var runner
 
@@ -71,6 +76,15 @@ struct AgentDock: View {
         }
     }
 
+    // MARK: - Collapse (pure)
+
+    /// Whether the collapsed dock should auto-expand for the agent `state`:
+    /// true for any live activity (`.working`/`.needsInput`), false when `.idle`.
+    /// Pure so the auto-expand rule is unit-testable without the view (#120).
+    static func shouldAutoExpand(for state: PlanAgent.AgentState) -> Bool {
+        state != .idle
+    }
+
     // MARK: - Vertical sizing (pure)
 
     /// The smallest height the dock can be dragged to. Keeps the header,
@@ -94,13 +108,22 @@ struct AgentDock: View {
     var body: some View {
         VStack(spacing: 0) {
             header
-            Divider()
-            transcript
-                .frame(maxWidth: .infinity, minHeight: 0, maxHeight: .infinity)
-            footer
+            if !collapsed {
+                Divider()
+                transcript
+                    .frame(maxWidth: .infinity, minHeight: 0, maxHeight: .infinity)
+                footer
+            }
         }
         .frame(maxHeight: .infinity)
         .background(.bar)
+        // #120: any agent action (execute/refine/review/discuss/capture/…) flips
+        // the agent state; auto-expand the collapsed dock so the user sees it.
+        .onChange(of: agentState) {
+            if Self.shouldAutoExpand(for: agentState) {
+                withAnimation(.snappy(duration: 0.2)) { collapsed = false }
+            }
+        }
     }
 
     /// The agent backing this dock: a real plan's agent, or the capture's agent
@@ -131,6 +154,17 @@ struct AgentDock: View {
     @ViewBuilder
     private var header: some View {
         HStack(spacing: 8) {
+            Button {
+                withAnimation(.snappy(duration: 0.2)) { collapsed.toggle() }
+            } label: {
+                Image(systemName: "chevron.right")
+                    .imageScale(.small)
+                    .foregroundStyle(.secondary)
+                    .rotationEffect(.degrees(collapsed ? 0 : 90))
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .help(collapsed ? "Expand the agent panel" : "Collapse the agent panel")
             statusPill
             Spacer(minLength: 8)
             switch agentState {
@@ -545,7 +579,9 @@ struct AgentTurnView: View {
 /// is read only when a drag begins, to start the drag from the dock's real
 /// on-screen height and to cap how far it can grow. Nothing is read during layout.
 struct ResizableAgentDock<Dock: View>: View {
-    @ViewBuilder let dock: () -> Dock
+    /// Builds the hosted dock, given a binding to its collapsed state so the
+    /// dock's header chevron can toggle it (#120).
+    @ViewBuilder let dock: (Binding<Bool>) -> Dock
 
     /// How much of the content above the dock must stay visible.
     static var reservedAboveDock: CGFloat { 120 }
@@ -553,14 +589,26 @@ struct ResizableAgentDock<Dock: View>: View {
     /// The persisted dock height, shared by every plan.
     @AppStorage("agentDockHeight") private var height: Double = Double(AgentDock.defaultHeight)
 
+    /// Whether the dock is collapsed to a header-only strip. A single GLOBAL
+    /// preference (not per-plan), collapsed by default. Kept orthogonal to
+    /// `agentDockHeight` so expanding restores the stored drag height (#120).
+    @AppStorage("agentDockCollapsed") private var collapsed: Bool = true
+
     /// The drag's starting height and maximum, captured when it begins.
     @State private var drag: (start: CGFloat, max: CGFloat)?
 
     var body: some View {
         VStack(spacing: 0) {
-            handle
-            dock()
-                .frame(minHeight: AgentDock.minHeight, maxHeight: CGFloat(height))
+            if collapsed {
+                // #120: a header-only strip. No drag handle and no `maxHeight`
+                // frame, so the dock takes its intrinsic header height. Never
+                // computed from a measurement (#096).
+                dock($collapsed)
+            } else {
+                handle
+                dock($collapsed)
+                    .frame(minHeight: AgentDock.minHeight, maxHeight: CGFloat(height))
+            }
         }
         .layoutPriority(1)
     }

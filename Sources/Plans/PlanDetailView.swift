@@ -178,7 +178,7 @@ struct PlanDetailView: View {
                 VStack(spacing: 0) {
                     planScrollView(row)
                         .frame(minHeight: 0, maxHeight: .infinity)
-                    ResizableAgentDock { AgentDock(row: row) }
+                    ResizableAgentDock { collapsed in AgentDock(row: row, collapsed: collapsed) }
                 }
             } else if let rowID, TaskRunner.isSyntheticCaptureID(rowID) {
                 // #117: a synthetic `capture:` selection has no backing plan yet.
@@ -297,7 +297,7 @@ struct PlanDetailView: View {
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(28)
             Spacer(minLength: 0)
-            ResizableAgentDock { AgentDock(row: nil, captureRun: captureRun) }
+            ResizableAgentDock { collapsed in AgentDock(row: nil, captureRun: captureRun, collapsed: collapsed) }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
