@@ -1749,32 +1749,6 @@ final class TaskRunner {
         run(projectPath: projectPath, taskID: taskID, mode: .complete)
     }
 
-    /// Hands a FINISHED guided review over to the plan's discussion so the user
-    /// can keep talking to the reviewer. Seeds the task's `DiscussionThread`
-    /// with the review's summary and, when the review's Agent SDK session can be
-    /// resumed from the project root, its session id — so the next Discuss turn
-    /// continues the reviewer's conversation via `--resume`. A `kept` review ran
-    /// with the kept worktree as its working directory, and the CLI stores
-    /// sessions per working directory, so it cannot be resumed from the project
-    /// root; its summary is carried as context on the first question instead.
-    /// Then drops the finished run so the panel collapses back to the composer.
-    /// No-op when there is no finished review run for the task, or the thread is
-    /// mid-turn.
-    func continueReviewInDiscussion(projectPath: String, taskID: String) {
-        guard let agent = agent(for: taskID, in: projectPath),
-              let run = agent.currentRun,
-              run.mode == .review, !run.isRunning else { return }
-        guard agent.canStartNow, !agent.thread.isBusy else { return }
-        agent.thread.seedFromReview(
-            sessionID: Self.resumableReviewSession(sessionID: run.sessionID,
-                                                   location: run.reviewLocation),
-            summary: run.reply)
-        // The finished review segment hands off to the discussion: drop its run
-        // so the dock collapses back to the composer (the thread now carries the
-        // reviewer's summary / resumable session).
-        agent.dismissCurrentRun()
-    }
-
     /// The review session a discussion may resume, or `nil` when it can't be
     /// resumed from the project root (a `kept` review, whose session lives under
     /// the kept worktree's directory) or there is no session. Pure so the rule
@@ -2014,16 +1988,20 @@ final class TaskRunner {
         guard agent.canStartNow else { return }
 
         let thread = agent.thread
+        // #118: the composer always continues from the plan's single agent
+        // conversation via session LINEAGE, not the thread's own session. Resume
+        // the last segment's session when it ran in THIS directory, else start a
+        // fresh turn carrying the prior segment's summary as context.
+        let resume = agent.resumeSession(forCwd: projectPath)
+        let freshContext = agent.contextForFreshTurn(cwd: projectPath)
         // `beginDiscussTurn` appends the pending turn to the thread, mirrors it
-        // into the agent's transcript and enters `working(.discuss)`; it returns
-        // the session id to resume (`nil` for a fresh conversation).
-        let resume = agent.beginDiscussTurn(question: trimmed, apply: apply)
-        guard let turnID = thread.turns.last?.id else { return }
-        // A discussion continued from a review whose session can't be resumed
-        // carries the review summary as context on its first fresh turn.
-        let outgoing = resume == nil
-            ? DiscussionThread.question(trimmed, withReviewContext: thread.takeReviewContext())
-            : trimmed
+        // into the agent's transcript and enters `working(.discuss)`. Its own
+        // return value (the thread's session) is ignored — lineage decides resume.
+        _ = agent.beginDiscussTurn(question: trimmed, apply: apply)
+        guard thread.turns.last != nil else { return }
+        // A discussion continued from a segment whose session can't be resumed
+        // here carries that segment's summary as context on its first fresh turn.
+        let outgoing = DiscussionThread.question(trimmed, withReviewContext: freshContext)
         let taskRun = TaskRun(taskID: taskID, mode: .discuss, description: outgoing,
                               resume: resume, apply: apply)
         thread.activeRun = taskRun
@@ -2034,7 +2012,9 @@ final class TaskRunner {
         let onFinish: () -> Void = { [weak agent, weak taskRun] in
             guard let agent, let taskRun, agent.thread.activeRun === taskRun else { return }
             let error = taskRun.error
-            agent.completeDiscussTurn(error: error)
+            // Record lineage against the directory this turn actually ran in
+            // (#118), so the next composer resumes/reframes from THIS cwd.
+            agent.completeDiscussTurn(error: error, cwd: projectPath)
             agent.thread.activeRun = nil
             if apply, error == nil {
                 onApplied?()

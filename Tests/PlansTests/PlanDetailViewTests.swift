@@ -1158,6 +1158,57 @@ final class PlanDetailViewTests: XCTestCase {
         XCTAssertNil(PlanDetailView.finishedReviewRun(nil))
     }
 
+    // MARK: - RunLogContents footer (#118 — cost/turn summary line removed)
+
+    /// A clean finished run — a `done` carrying `costUsd`/`turns`, no denials,
+    /// no error — must render NO footer. The former `$… · N turns` summary row
+    /// was removed from the UI (the figures still persist to `RunOutcome`), so
+    /// `summary != nil` no longer forces a footer into existence.
+    @MainActor
+    func testCleanFinishedRunRendersNoFooter() {
+        let run = interactiveRun(mode: .review, ndjson: cleanFinish, finish: true)
+        // The cost/turn figures are still captured on the run (durable
+        // diagnostics) — their presence must NOT drive the footer.
+        XCTAssertNotNil(run.summary)
+        XCTAssertTrue(run.deniedTools.isEmpty)
+        XCTAssertFalse(
+            RunLogContents.shouldShowFooter(
+                hasFailureMessage: false,
+                hasDeniedTools: !run.deniedTools.isEmpty),
+            "A clean finished run (summary present, no denials, no error) must render no footer")
+    }
+
+    /// The footer still appears for the two cases that carry footer content:
+    /// a denied tool call and a failure message.
+    func testFooterStillShownForDenialAndFailure() {
+        // Denial only.
+        XCTAssertTrue(
+            RunLogContents.shouldShowFooter(hasFailureMessage: false, hasDeniedTools: true))
+        // Failure only.
+        XCTAssertTrue(
+            RunLogContents.shouldShowFooter(hasFailureMessage: true, hasDeniedTools: false))
+        // Both.
+        XCTAssertTrue(
+            RunLogContents.shouldShowFooter(hasFailureMessage: true, hasDeniedTools: true))
+    }
+
+    /// A finished run whose only "content" would have been the cost/turn summary
+    /// produces no footer, even with a real denied tool recorded alongside the
+    /// clean finish flipping the footer on (the denial, not the summary, is what
+    /// drives it). Here we assert the summary alone never does.
+    @MainActor
+    func testDeniedToolDrivesFooterNotSummary() {
+        let denial = #"{"kind":"denied","tool":"Bash"}"# + "\n"
+        let run = interactiveRun(mode: .review, ndjson: denial + cleanFinish, finish: true)
+        XCTAssertNotNil(run.summary)
+        XCTAssertFalse(run.deniedTools.isEmpty)
+        // Footer shows because of the denial.
+        XCTAssertTrue(
+            RunLogContents.shouldShowFooter(
+                hasFailureMessage: false,
+                hasDeniedTools: !run.deniedTools.isEmpty))
+    }
+
     // MARK: - Complete action gating
 
     func testCanCompleteForInReviewPlanWithBranch() {

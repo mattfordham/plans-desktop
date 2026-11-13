@@ -278,7 +278,10 @@ struct AgentDock: View {
     }
 
     /// The follow-up actions on a finished guided review (#083, now in the dock):
-    /// Discuss with Reviewer and Complete… (behind the explicit confirmation).
+    /// Complete… (behind the explicit confirmation). The former "Discuss with
+    /// Reviewer" button was removed in #118 — the dock's composer already
+    /// continues the reviewer's conversation via the agent's session lineage,
+    /// so a dedicated hand-off button is redundant and emptied the transcript.
     @ViewBuilder
     private func finishedReviewActions(_ row: TaskRow, run: TaskRun) -> some View {
         let canCompleteNow = PlanDetailView.canComplete(status: row.task.status,
@@ -288,15 +291,6 @@ struct AgentDock: View {
                                                         hasLiveRun: run.isRunning)
         HStack(spacing: 8) {
             Spacer(minLength: 0)
-            if canDiscuss {
-                Button {
-                    runner.continueReviewInDiscussion(projectPath: row.projectPath,
-                                                      taskID: row.task.id)
-                } label: {
-                    Label("Discuss with Reviewer", systemImage: "bubble.left.and.bubble.right")
-                }
-                .help("Continue the conversation with the reviewing agent")
-            }
             if canCompleteNow, let branch = row.task.branch {
                 Button {
                     if PlanDetailView.confirmComplete(taskID: row.task.id, title: row.title,

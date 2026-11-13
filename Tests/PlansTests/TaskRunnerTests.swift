@@ -2708,78 +2708,98 @@ final class TaskRunnerTests: XCTestCase {
         XCTAssertEqual(run.error, TaskRun.truncationError(for: "error_max_turns", mode: .review))
     }
 
-    // MARK: - Continuing a finished review as a discussion
+    // MARK: - Continuing a finished review as a discussion (#118: via lineage)
 
+    /// #118 case (b): a `.kept` review ran with the kept worktree as its cwd, so
+    /// the CLI can't resume its session from the project root. The composer must
+    /// therefore start a FRESH discuss turn (`resume == nil`) that carries the
+    /// review summary as context, while the transcript shows the user's plain
+    /// question — not the framed context — and the review `.run` segment survives.
     @MainActor
-    private func finishedReviewRun(location: ReviewLocation,
-                                   sessionID: String = "s-rev",
-                                   reply: String = "All observations confirmed.") -> TaskRun {
-        let run = TaskRun(taskID: "083", mode: .review, reviewLocation: location,
-                          outcomeLog: tempOutcomeLog())
-        run.markRunningForTesting(projectPath: "/proj")
-        run.ingestForTesting(#"{"kind":"session","sessionId":"\#(sessionID)"}"# + "\n"
-            + #"{"kind":"reply","text":"\#(reply)","sessionId":"\#(sessionID)"}"# + "\n"
+    func testDiscussAfterKeptReviewStartsFreshTurnCarryingSummaryContext() {
+        let (runner, runRec, discussRec) = makeRunLauncherRunner()
+        // A kept-worktree review runs and finishes, recording lineage with the
+        // worktree as its cwd and a nil resumable session (kept ⇒ not resumable).
+        runner.review(projectPath: "/proj", taskID: "083", location: .kept)
+        let reviewRun = runRec.runs[0]
+        reviewRun.markRunningForTesting(projectPath: "/proj")
+        reviewRun.ingestForTesting(
+            #"{"kind":"session","sessionId":"s-rev"}"# + "\n"
+            + #"{"kind":"reply","text":"All observations confirmed.","sessionId":"s-rev"}"# + "\n"
             + #"{"kind":"done","costUsd":0.5,"turns":4,"stopReason":"end_turn"}"# + "\n")
-        run.finishForTesting(projectPath: "/proj")
-        return run
-    }
+        reviewRun.finishForTesting(projectPath: "/proj")
+        runRec.finishers[0]()
 
-    @MainActor
-    func testContinueReviewInDiscussionResumesReviewSession() {
-        let runner = TaskRunner()
-        var launched: [TaskRun] = []
-        runner.discussLauncherForTesting = { run, _, _ in launched.append(run) }
-        runner.ingestRunForTesting(finishedReviewRun(location: .worktree))
+        let agent = runner.agent(for: "083", in: "/proj")
+        func reviewSegmentPresent() -> Bool {
+            agent?.transcript.contains {
+                if case let .run(run) = $0 { return run.mode == .review }
+                return false
+            } ?? false
+        }
+        XCTAssertTrue(reviewSegmentPresent(), "the review segment exists before discuss")
 
-        runner.continueReviewInDiscussion(projectPath: "/proj", taskID: "083")
-
-        let thread = runner.discussion(projectPath: "/proj", taskID: "083")
-        XCTAssertEqual(thread?.sessionID, "s-rev")
-        XCTAssertEqual(thread?.turns.count, 1)
-        XCTAssertEqual(thread?.turns.first?.reply, "All observations confirmed.")
-        XCTAssertTrue(thread?.turns.first?.isReviewSummary == true)
-        XCTAssertNil(runner.run(for: "083", in: "/proj"), "the finished review run is dismissed")
-
+        // Discussing from the dock must NOT resume (kept session isn't resumable
+        // from the project root) and must carry the review summary as context.
         runner.ask(projectPath: "/proj", taskID: "083", question: "Why step 2?")
-        XCTAssertEqual(launched.last?.resume, "s-rev")
-        XCTAssertEqual(launched.last?.description, "Why step 2?")
+        XCTAssertEqual(discussRec.runs.count, 1, "the discuss turn launched")
+        XCTAssertNil(discussRec.runs.last?.resume,
+                     "a kept review's session can't be resumed from the project root")
+        XCTAssertTrue(discussRec.runs.last?.description?.contains("All observations confirmed.") == true,
+                      "the outgoing description carries the review summary as context")
+        XCTAssertTrue(discussRec.runs.last?.description?.hasSuffix("Why step 2?") == true)
+        XCTAssertEqual(agent?.transcript.last.map { segment -> String? in
+            if case let .turn(turn) = segment { return turn.question }
+            return nil
+        } ?? nil, "Why step 2?",
+            "the transcript shows the user's plain question, not the framed context")
+        XCTAssertTrue(reviewSegmentPresent(),
+                      "the review .run segment must survive the discuss turn")
     }
 
-    /// A kept-worktree review ran with the worktree as its cwd, so its session
-    /// can't be resumed from the project root; the summary is carried as context
-    /// on the first question instead.
+    /// #118: discussing after a finished review must NOT empty the dock's data
+    /// source. The dock renders `agent.transcript`; the review `.run` segment must
+    /// SURVIVE the discuss turn so the chat can still be brought back. This is the
+    /// permanent transcript-survival assertion against the production
+    /// review → `ask` path (the defect lived in the now-removed
+    /// `continueReviewInDiscussion`, which called `dismissCurrentRun()` and
+    /// stripped the review segment — see the RED confirmation in #118's report).
     @MainActor
-    func testContinueKeptReviewInDiscussionCarriesSummaryAsContext() {
-        let runner = TaskRunner()
-        var launched: [TaskRun] = []
-        runner.discussLauncherForTesting = { run, _, _ in launched.append(run) }
-        runner.ingestRunForTesting(finishedReviewRun(location: .kept))
+    func testDiscussAfterReviewKeepsReviewSegmentInTranscript() {
+        let (runner, runRec, discussRec) = makeRunLauncherRunner()
+        // A worktree review runs through the run launcher and finishes, recording
+        // lineage (resumable session) for the agent.
+        runner.review(projectPath: "/proj", taskID: "083", location: .worktree)
+        let reviewRun = runRec.runs[0]
+        reviewRun.markRunningForTesting(projectPath: "/proj")
+        reviewRun.ingestForTesting(
+            #"{"kind":"session","sessionId":"s-rev"}"# + "\n"
+            + #"{"kind":"reply","text":"All observations confirmed.","sessionId":"s-rev"}"# + "\n"
+            + #"{"kind":"done","costUsd":0.5,"turns":4,"stopReason":"end_turn"}"# + "\n")
+        reviewRun.finishForTesting(projectPath: "/proj")
+        runRec.finishers[0]()
 
-        runner.continueReviewInDiscussion(projectPath: "/proj", taskID: "083")
+        // The review segment is now a finished `.run` in the transcript.
+        let agent = runner.agent(for: "083", in: "/proj")
+        XCTAssertNotNil(agent)
+        func reviewSegmentPresent() -> Bool {
+            agent?.transcript.contains {
+                if case let .run(run) = $0 { return run.mode == .review }
+                return false
+            } ?? false
+        }
+        XCTAssertTrue(reviewSegmentPresent(), "the review segment exists before discuss")
 
-        let thread = runner.discussion(projectPath: "/proj", taskID: "083")
-        XCTAssertNil(thread?.sessionID)
+        // Discussing from the dock resumes the review session and must keep the
+        // review `.run` segment — the dock's data source stays non-empty.
         runner.ask(projectPath: "/proj", taskID: "083", question: "Why step 2?")
-        XCTAssertNil(launched.last?.resume)
-        XCTAssertTrue(launched.last?.description?.contains("All observations confirmed.") == true)
-        XCTAssertTrue(launched.last?.description?.hasSuffix("Why step 2?") == true)
-        XCTAssertEqual(thread?.turns.last?.question, "Why step 2?",
-                       "the transcript shows the user's question, not the context")
-    }
-
-    @MainActor
-    func testContinueReviewInDiscussionIgnoresLiveOrNonReviewRuns() {
-        let runner = TaskRunner()
-        let live = TaskRun(taskID: "083", mode: .review, reviewLocation: .main,
-                           outcomeLog: tempOutcomeLog())
-        live.markRunningForTesting(projectPath: "/proj")
-        runner.ingestRunForTesting(live)
-        runner.continueReviewInDiscussion(projectPath: "/proj", taskID: "083")
-        // #117: the plan's agent already exists (its live review run lives there),
-        // so its thread is non-nil — but `continueReviewInDiscussion` is a no-op
-        // for a LIVE run, so the thread was never seeded and the run stays.
-        XCTAssertTrue(runner.discussion(projectPath: "/proj", taskID: "083")?.turns.isEmpty ?? true)
-        XCTAssertNotNil(runner.run(for: "083", in: "/proj"))
+        XCTAssertEqual(discussRec.runs.count, 1, "the discuss turn launched")
+        XCTAssertEqual(discussRec.runs.last?.resume, "s-rev",
+                       "the composer resumes the review session in the same directory")
+        XCTAssertFalse(agent?.transcript.isEmpty ?? true,
+                       "the dock's data source (agent.transcript) must not be emptied")
+        XCTAssertTrue(reviewSegmentPresent(),
+                      "the review .run segment must survive the discuss turn")
     }
 
     // MARK: - #117: single-gate routing through agents

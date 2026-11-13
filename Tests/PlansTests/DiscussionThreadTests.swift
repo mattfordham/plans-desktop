@@ -370,55 +370,12 @@ final class DiscussionThreadTests: XCTestCase {
         XCTAssertNil(runner.discussion(projectPath: "/p", taskID: "7"))
     }
 
-    // MARK: - Seeding from a finished review
+    // MARK: - Framing a fresh turn with review context (#118)
 
-    func testSeedFromReviewWithSessionResumesItAndShowsSummary() {
-        let thread = DiscussionThread()
-        thread.seedFromReview(sessionID: "s-rev", summary: "Review summary")
-        XCTAssertEqual(thread.sessionID, "s-rev")
-        XCTAssertEqual(thread.turns.count, 1)
-        XCTAssertEqual(thread.turns[0].reply, "Review summary")
-        XCTAssertTrue(thread.turns[0].isReviewSummary)
-        XCTAssertFalse(thread.isBusy)
-        XCTAssertEqual(thread.beginTurn(question: "next"), "s-rev")
-        XCTAssertNil(thread.takeReviewContext(), "a resumed session needs no extra context")
-    }
-
-    func testSeedFromReviewWithoutSessionCarriesContextOnce() {
-        let thread = DiscussionThread()
-        thread.seedFromReview(sessionID: nil, summary: "Review summary")
-        XCTAssertNil(thread.sessionID)
-        XCTAssertNil(thread.beginTurn(question: "next"))
-        XCTAssertEqual(thread.takeReviewContext(), "Review summary")
-        XCTAssertNil(thread.takeReviewContext(), "context is consumed by the first fresh turn")
-    }
-
-    func testSeedFromReviewIsIgnoredWhileBusy() {
-        let thread = DiscussionThread()
-        thread.beginTurn(question: "pending")
-        thread.seedFromReview(sessionID: "s-rev", summary: "Review summary")
-        XCTAssertNil(thread.sessionID)
-        XCTAssertEqual(thread.turns.count, 1)
-    }
-
-    /// If resuming the review session fails, the next ask starts fresh — and the
-    /// review summary comes back as context so it isn't lost.
-    func testFailedResumeOfReviewSessionFallsBackToSummaryContext() {
-        let thread = DiscussionThread()
-        thread.seedFromReview(sessionID: "s-rev", summary: "Review summary")
-        thread.beginTurn(question: "q")
-        thread.apply(.error(message: "No conversation found"))
-        XCTAssertNil(thread.sessionID)
-        XCTAssertEqual(thread.takeReviewContext(), "Review summary")
-    }
-
-    func testResetClearsReviewContext() {
-        let thread = DiscussionThread()
-        thread.seedFromReview(sessionID: nil, summary: "Review summary")
-        thread.reset()
-        XCTAssertNil(thread.takeReviewContext())
-    }
-
+    /// `question(_:withReviewContext:)` is still how a FRESH discuss turn carries
+    /// a prior segment's summary as context when its session can't be resumed in
+    /// the current directory (the review-seed plumbing it used to back was removed
+    /// in #118; the framing itself survives, driven now by the agent's lineage).
     func testQuestionWithReviewContext() {
         XCTAssertEqual(DiscussionThread.question("Why?", withReviewContext: nil), "Why?")
         let combined = DiscussionThread.question("Why?", withReviewContext: "Summary text")

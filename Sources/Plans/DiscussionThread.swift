@@ -18,9 +18,6 @@ struct DiscussionTurn: Identifiable, Equatable {
     let isResumed: Bool
     /// True when the user stopped this turn before it answered.
     var isCancelled: Bool = false
-    /// True for the synthetic opening turn that carries a finished guided
-    /// review's summary into the discussion (no question was asked).
-    var isReviewSummary: Bool = false
 }
 
 /// A multi-turn, read-only conversation about one plan.
@@ -42,14 +39,6 @@ final class DiscussionThread {
     /// alert).
     var activeRun: TaskRun?
 
-    /// The finished review's summary, kept so a discussion continued from a
-    /// review can fall back to it as context if its session can't be resumed.
-    private var reviewSummary: String?
-
-    /// Review summary to prepend to the next FRESH (non-resumed) turn's
-    /// question, consumed once by `takeReviewContext()`.
-    private var pendingReviewContext: String?
-
     /// True while the last turn is waiting on the agent.
     var isBusy: Bool { turns.last?.isPending ?? false }
 
@@ -62,35 +51,6 @@ final class DiscussionThread {
                                     activity: nil, error: nil, isPending: true,
                                     isResumed: resume != nil))
         return resume
-    }
-
-    /// Continues a finished guided review as this discussion: shows the review's
-    /// summary as an opening turn and, when `sessionID` is given, makes the next
-    /// turn resume the reviewer's session. Without a session the summary is
-    /// carried as context on the next question instead. Ignored while a turn is
-    /// pending.
-    func seedFromReview(sessionID: String?, summary: String?) {
-        guard !isBusy else { return }
-        let trimmed = summary?.trimmingCharacters(in: .whitespacesAndNewlines)
-        let text = (trimmed?.isEmpty ?? true) ? nil : trimmed
-        reviewSummary = text
-        if let sessionID {
-            self.sessionID = sessionID
-            pendingReviewContext = nil
-        } else {
-            self.sessionID = nil
-            pendingReviewContext = text
-        }
-        turns.append(DiscussionTurn(id: UUID(), question: "Guided review",
-                                    reply: text ?? "The review finished without a summary.",
-                                    activity: nil, error: nil, isPending: false,
-                                    isResumed: false, isReviewSummary: true))
-    }
-
-    /// Returns and clears the review context waiting for the next fresh turn.
-    func takeReviewContext() -> String? {
-        defer { pendingReviewContext = nil }
-        return pendingReviewContext
     }
 
     /// The question actually sent to the agent: `question` alone, or prefixed by
@@ -172,8 +132,6 @@ final class DiscussionThread {
         turns = []
         sessionID = nil
         activeRun = nil
-        reviewSummary = nil
-        pendingReviewContext = nil
     }
 
     /// A failed resumed turn may mean the session is gone, so drop it and let
@@ -182,9 +140,6 @@ final class DiscussionThread {
         turns[index].error = message
         if turns[index].isResumed {
             sessionID = nil
-            // A dead review session would lose the reviewer's findings; carry
-            // the summary into the fresh session instead.
-            pendingReviewContext = reviewSummary
         }
     }
 }

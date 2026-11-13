@@ -1762,8 +1762,17 @@ struct RunLogContents: View {
         return error
     }
 
+    /// Whether the footer region (denial note / edge-to-edge error banner) has
+    /// anything to render. Pure so it's unit testable without constructing the
+    /// view. (#118: a clean finished run — no denials, no failure — renders NO
+    /// footer; the former run-summary cost/turn line was removed from display.)
+    static func shouldShowFooter(hasFailureMessage: Bool, hasDeniedTools: Bool) -> Bool {
+        hasFailureMessage || hasDeniedTools
+    }
+
     private var hasFooter: Bool {
-        failureMessage != nil || !(run?.deniedTools.isEmpty ?? true) || run?.summary != nil
+        Self.shouldShowFooter(hasFailureMessage: failureMessage != nil,
+                              hasDeniedTools: !(run?.deniedTools.isEmpty ?? true))
     }
 
     @ViewBuilder
@@ -1773,7 +1782,7 @@ struct RunLogContents: View {
         }
     }
 
-    /// Denial note + summary (and, edge-to-edge, the error banner too, since the
+    /// Denial note (and, edge-to-edge, the error banner too, since the
     /// top of the log sits under the floating header).
     @ViewBuilder
     private var footer: some View {
@@ -1782,9 +1791,6 @@ struct RunLogContents: View {
             if let run, !run.deniedTools.isEmpty {
                 deniedSummary(count: run.deniedTools.count,
                               names: Array(run.deniedToolNames).sorted())
-            }
-            if let summary = run?.summary {
-                summaryRow(summary)
             }
         }
     }
@@ -1902,12 +1908,6 @@ struct RunLogContents: View {
                     .foregroundStyle(.secondary)
             }
         }
-    }
-
-    private func summaryRow(_ summary: (costUsd: Double, turns: Int)) -> some View {
-        Text(String(format: "$%.2f · %d turns", summary.costUsd, summary.turns))
-            .font(.callout)
-            .foregroundStyle(.secondary)
     }
 
     /// The run-summary denial note (task #092): a caution row listing the count

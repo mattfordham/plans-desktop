@@ -143,8 +143,18 @@ final class PlanAgent {
 
     /// Finalises a run segment: records its session/summary into lineage and
     /// returns the agent to `idle`. The segment stays in the transcript.
+    ///
+    /// A `.review` run records only a RESUMABLE review session
+    /// (`resumableReviewSession`): a `kept` review ran with the kept worktree as
+    /// its cwd, so the CLI can't resume its session from the project root —
+    /// recording a nil session makes the composer naturally carry the summary as
+    /// context instead of resuming a session the CLI can't find.
     func completeRunSegment(_ run: TaskRun) {
-        recordLineage(sessionID: run.sessionID,
+        let sessionID = run.mode == .review
+            ? TaskRunner.resumableReviewSession(sessionID: run.sessionID,
+                                                location: run.reviewLocation)
+            : run.sessionID
+        recordLineage(sessionID: sessionID,
                       cwd: run.runProjectPath ?? "",
                       summary: run.reply)
         state = .idle
@@ -182,7 +192,12 @@ final class PlanAgent {
     /// Finalises the pending discuss turn (any path): completes it on the thread,
     /// re-mirrors it, records lineage from the thread's session, and returns to
     /// `idle`.
-    func completeDiscussTurn(error: String?) {
+    ///
+    /// `cwd` is the directory the turn actually ran in (the project path the
+    /// discuss run started in), so chained discuss turns keep the lineage cwd
+    /// correct — using `lastSession?.cwd` would carry over a prior review's
+    /// worktree directory and make the next composer wrongly resume/reframe.
+    func completeDiscussTurn(error: String?, cwd: String = "") {
         guard let turnID = thread.turns.last?.id else {
             state = .idle
             return
@@ -190,7 +205,7 @@ final class PlanAgent {
         thread.completeTurn(id: turnID, error: error)
         mirrorLastTurn()
         recordLineage(sessionID: thread.sessionID,
-                      cwd: lastSession?.cwd ?? "",
+                      cwd: cwd,
                       summary: thread.turns.last?.reply)
         state = .idle
     }
