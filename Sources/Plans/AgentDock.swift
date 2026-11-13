@@ -93,6 +93,13 @@ struct AgentDock: View {
         collapsed ? nil : .infinity
     }
 
+    /// Collapsing hides only the transcript (#120).
+    static func showsTranscript(collapsed: Bool) -> Bool { !collapsed }
+
+    /// The footer — the "Ask about this plan…" composer, the Stop band, or a
+    /// parked question — stays visible whether or not the dock is collapsed.
+    static func showsFooter(collapsed: Bool) -> Bool { true }
+
     // MARK: - Vertical sizing (pure)
 
     /// The smallest height the dock can be dragged to. Keeps the header,
@@ -116,10 +123,12 @@ struct AgentDock: View {
     var body: some View {
         VStack(spacing: 0) {
             header
-            if !collapsed {
+            if Self.showsTranscript(collapsed: collapsed) {
                 Divider()
                 transcript
                     .frame(maxWidth: .infinity, minHeight: 0, maxHeight: .infinity)
+            }
+            if Self.showsFooter(collapsed: collapsed) {
                 footer
             }
         }
@@ -162,17 +171,10 @@ struct AgentDock: View {
     @ViewBuilder
     private var header: some View {
         HStack(spacing: 8) {
-            Button {
-                withAnimation(.snappy(duration: 0.2)) { collapsed.toggle() }
-            } label: {
-                Image(systemName: "chevron.right")
-                    .imageScale(.small)
-                    .foregroundStyle(.secondary)
-                    .rotationEffect(.degrees(collapsed ? 0 : 90))
-                    .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-            .help(collapsed ? "Expand the agent panel" : "Collapse the agent panel")
+            Image(systemName: "chevron.right")
+                .imageScale(.small)
+                .foregroundStyle(.secondary)
+                .rotationEffect(.degrees(collapsed ? 0 : 90))
             statusPill
             Spacer(minLength: 8)
             switch agentState {
@@ -196,6 +198,14 @@ struct AgentDock: View {
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 8)
+        // #120: the whole header row toggles collapse — not just the chevron.
+        // The Stop / New conversation buttons inside still take their own clicks.
+        .contentShape(Rectangle())
+        .onTapGesture {
+            withAnimation(.snappy(duration: 0.2)) { collapsed.toggle() }
+        }
+        .help(collapsed ? "Expand the agent panel" : "Collapse the agent panel")
+        .accessibilityAddTraits(.isButton)
     }
 
     /// Idle / `activityVerb`… / Needs your answer, tinted by state.

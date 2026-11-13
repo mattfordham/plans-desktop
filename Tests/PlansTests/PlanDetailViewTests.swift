@@ -1370,6 +1370,15 @@ final class PlanDetailViewTests: XCTestCase {
         XCTAssertEqual(AgentDock.bodyMaxHeight(collapsed: false), .infinity)
     }
 
+    /// Collapsing hides ONLY the transcript; the header and the footer (the
+    /// "Ask about this plan…" composer) stay put in both states.
+    func testCollapseHidesOnlyTheTranscript() {
+        XCTAssertFalse(AgentDock.showsTranscript(collapsed: true))
+        XCTAssertTrue(AgentDock.showsTranscript(collapsed: false))
+        XCTAssertTrue(AgentDock.showsFooter(collapsed: true))
+        XCTAssertTrue(AgentDock.showsFooter(collapsed: false))
+    }
+
     // MARK: - Run-log `.text` chunks render as block markdown (#119)
 
     /// The `.text(chunk)` run-log arm now renders through `MarkdownBlockView`,
