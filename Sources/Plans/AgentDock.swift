@@ -85,6 +85,14 @@ struct AgentDock: View {
         state != .idle
     }
 
+    /// The dock body's `maxHeight`: fill the offered height when expanded (the
+    /// container caps it at `agentDockHeight`), but `nil` — intrinsic, header-only
+    /// height — when collapsed. The collapsed container drops its cap and has
+    /// `layoutPriority(1)`, so an infinite frame there would swallow the column.
+    static func bodyMaxHeight(collapsed: Bool) -> CGFloat? {
+        collapsed ? nil : .infinity
+    }
+
     // MARK: - Vertical sizing (pure)
 
     /// The smallest height the dock can be dragged to. Keeps the header,
@@ -115,7 +123,7 @@ struct AgentDock: View {
                 footer
             }
         }
-        .frame(maxHeight: .infinity)
+        .frame(maxHeight: Self.bodyMaxHeight(collapsed: collapsed))
         .background(.bar)
         // #120: any agent action (execute/refine/review/discuss/capture/…) flips
         // the agent state; auto-expand the collapsed dock so the user sees it.

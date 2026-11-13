@@ -1357,6 +1357,19 @@ final class PlanDetailViewTests: XCTestCase {
         XCTAssertTrue(AgentDock.shouldAutoExpand(for: .needsInput))
     }
 
+    /// A collapsed dock must NOT claim unbounded height: the container drops its
+    /// `maxHeight` cap when collapsed and has `layoutPriority(1)`, so an infinite
+    /// frame would swallow the whole column and squeeze the plan body to zero.
+    func testCollapsedDockHasNoUnboundedMaxHeight() {
+        XCTAssertNil(AgentDock.bodyMaxHeight(collapsed: true))
+    }
+
+    /// An expanded dock fills the height its container offers (capped there by
+    /// the persisted `agentDockHeight`).
+    func testExpandedDockFillsOfferedHeight() {
+        XCTAssertEqual(AgentDock.bodyMaxHeight(collapsed: false), .infinity)
+    }
+
     // MARK: - Run-log `.text` chunks render as block markdown (#119)
 
     /// The `.text(chunk)` run-log arm now renders through `MarkdownBlockView`,
