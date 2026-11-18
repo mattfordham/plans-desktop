@@ -27,7 +27,7 @@
 
 <img src="docs/images/menubar-glance.png" width="280" alt="Plans menu-bar glance — per-project task counts by status in the macOS menu bar">
 
-![Plans browser window — cross-project task list with the selected plan's detail and agent dock](docs/images/browser-window.png)
+![Plans browser window — cross-project task list with a selected in-review plan's detail, action buttons, and agent dock](docs/images/browser-window.png)
 
 ## Requirements
 
