@@ -1343,7 +1343,7 @@ function readPlansTaskIDs(projectRoot: string): Set<string> {
  * EXTEND it (never remove an entry), so no guardrail can be turned off from
  * `.plans/config.json`.
  */
-const BASE_ALLOWED_TOOLS: string[] = [
+export const BASE_ALLOWED_TOOLS: string[] = [
   "Skill",
   "Agent",
   "Task",
@@ -1360,26 +1360,42 @@ const BASE_ALLOWED_TOOLS: string[] = [
   // allowlisted (task #051 root cause), which stranded the run. That
   // fix allowlisted only screenshot + metadata, so des-build still
   // cleared its get_metadata preflight and then aborted mid-build at
-  // Step 5 when it reached get_design_context. These three are the
-  // complete set des-build declares in its frontmatter, and all three
-  // are READ-ONLY, so they are safe to allow. Do NOT add any Figma
-  // write/edit tools here.
+  // Step 5 when it reached get_design_context. All of these are
+  // READ-ONLY / session-setup tools des-build declares in its
+  // frontmatter: the Dev Mode read tools (screenshot, metadata,
+  // design_context, and — added by plans-cc #057 — get_variable_defs),
+  // plus the plugin-flavoured `create_session`, the "create a file
+  // session" handshake des-build needs before reading Figma in a file.
+  // They are safe to allow. Do NOT add any Figma write/edit tools here.
   "mcp__figma-dev-mode-mcp-server__get_screenshot",
   "mcp__figma-dev-mode-mcp-server__get_metadata",
   "mcp__figma-dev-mode-mcp-server__get_design_context",
-  // Playwright tools for rendered-page verification. These six are the
-  // exact set plans-cc's plan-execute (visual-comparison stage) and
-  // des-build (`verify <url>`) declare in their frontmatter. Without
-  // them, `permissionMode: "acceptEdits"` denies them and the stage
-  // reports "Visual comparison NOT run: Playwright MCP unavailable".
-  // Add only these. Do NOT add interactive Playwright tools (click,
-  // type, fill_form, run_code_unsafe, etc.).
+  "mcp__figma-dev-mode-mcp-server__get_variable_defs",
+  // Plugin-flavoured Figma "create a file session" tool — des-build
+  // opens a file session before it can read Figma in that file.
+  "mcp__plugin_figma_figma__create_session",
+  // Playwright tools for rendered-page verification and local
+  // `/review/<slug>` interaction. plans-cc's plan-execute
+  // (visual-comparison stage) and des-build (`verify <url>`) declare
+  // the read/screenshot set in their frontmatter; without them,
+  // `permissionMode: "acceptEdits"` denies them and the stage reports
+  // "Visual comparison NOT run: Playwright MCP unavailable". close /
+  // click / type and reading the console are also deliberately allowed
+  // because des-build Step 8a drives the local `/review/<slug>` page
+  // (click toggles, open menus, type into search, read the console).
+  // The dangerous interactive tools MUST stay excluded:
+  // `mcp__playwright__browser_fill_form` and
+  // `mcp__playwright__browser_run_code_unsafe`.
   "mcp__playwright__browser_navigate",
   "mcp__playwright__browser_resize",
   "mcp__playwright__browser_take_screenshot",
   "mcp__playwright__browser_evaluate",
   "mcp__playwright__browser_snapshot",
   "mcp__playwright__browser_wait_for",
+  "mcp__playwright__browser_close",
+  "mcp__playwright__browser_click",
+  "mcp__playwright__browser_type",
+  "mcp__playwright__browser_console_messages",
   // Read-only Sentry tools (task #092). Under
   // `permissionMode: "acceptEdits"` MCP tools are not auto-approved, so
   // a headless capture/elaborate run that reaches for Sentry was
