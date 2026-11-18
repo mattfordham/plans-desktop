@@ -1,0 +1,3 @@
+HISTORY.md merge=union
+PROGRESS.md merge=ours
+config.json merge=ours

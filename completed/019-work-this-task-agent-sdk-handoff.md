@@ -1,0 +1,107 @@
+# Work This Task — Agent SDK Hand-off
+
+**ID:** 019
+**Created:** 2026-06-05T21:00
+**Type:** feature
+**Status:** completed
+**Branch:** feature/019-work-this-task-agent-sdk-handoff
+**Completed:** 2026-06-06T12:30
+
+## What
+Add a "Work this task" hand-off from the Plans app that launches a TypeScript Claude Agent SDK process to autonomously execute a plan task in its repo, streaming live progress back into Plans.
+
+## Why
+Adds value by closing the loop between *reading* a task in Plans and *acting* on it, without breaking the app's read-only contract (spec §2). Today Plans is a pure viewer — to actually work a task you must `cd` into the repo and run `/plan-execute` yourself. This feature lets the user trigger autonomous execution directly from the plan detail view; the writing is done by a separate Agent SDK process (driving the existing `plan-execute` skill), so Plans never mutates `.plans/` itself. The SDK's streamed, typed messages give live progress feedback — the reason the SDK was chosen over headless `claude -p`.
+
+## How
+- [x] Step 1: Scaffold a `tools/work-task/` Node subproject (TypeScript, `@anthropic-ai/claude-agent-sdk`). It takes `--project-root <abs path>` and `--task-id <NNN>` args and calls `query()` with `cwd` = project root, `permissionMode: "acceptEdits"`, `allowedTools` including the Agent tool, and a `maxBudgetUsd` ceiling. Prompt: instruct it to use the `plan-execute` skill on the given task id, **creating a git worktree** for isolation, do the work, run tests, and move the task to review. Auth: relies on the inherited `claude login` credential (no `ANTHROPIC_API_KEY`) — do NOT set an API-key env var.
+- [x] Step 2: In the Node script, map streamed SDK messages to a small, stable NDJSON line schema written to stdout — one JSON object per line: `{"kind":"activity","tool":"Edit","detail":"…"}`, `{"kind":"text","chunk":"…"}`, `{"kind":"done","costUsd":N,"turns":N,"stopReason":"…"}`, `{"kind":"error","message":"…"}`. Map `assistant`→`tool_use` blocks → `activity`; partial/assistant text → `text`; `result` (`total_cost_usd`/`num_turns`/`stop_reason`) → `done`; thrown/SDK errors → `error`. Keep raw SDK shapes out of the contract.
+- [x] Step 3: Add a build step that compiles `tools/work-task/` to a single runnable `run-task.js` (+ bundled `node_modules`, or a bundler like esbuild) and copies it into `Resources/work-task/` so it ships inside the `.app`. Update `build.sh` and `install.sh` to run the Node build and `cp -R` the output into `Contents/Resources/` alongside `Info.plist`/`Plans.icns`.
+- [x] Step 4: Add a `@Observable final class TaskRunner` (new file `Sources/Plans/TaskRunner.swift`), injected via `@Environment` from `PlansApp` so it is shared across detail windows. It holds `isRunning: Bool`, `lines: [RunEvent]`, `summary: (costUsd: Double, turns: Int)?`, `error: String?`, and the live `Process`. It exposes `run(projectPath:taskID:)` and `stop()`.
+- [x] Step 5: In `TaskRunner.run`, locate `node` by resolving PATH via a login shell (e.g. run `/bin/zsh -lc 'command -v node'` once and cache it) to handle homebrew/nvm installs; locate the script via `Bundle.main.url(forResource: "run-task", withExtension: "js", subdirectory: "work-task")`. Spawn `Foundation.Process` with args `["<script>", "--project-root", projectPath, "--task-id", taskID]`; read stdout via a `Pipe` + `FileHandle` readability handler, split on newlines, decode each line into a `RunEvent` (`Codable` enum matching the §schema), and append on the main actor. On a missing-node or missing-script condition, set `error` instead of spawning.
+- [x] Step 6: Define `RunEvent` as a `Codable` enum decoding the NDJSON `kind` discriminator (`activity`/`text`/`done`/`error`) in `Sources/Plans/TaskRunner.swift` (or a sibling file). This is the Swift mirror of the Node contract; changing the SDK never touches the UI as long as the contract holds.
+- [x] Step 7: In `PlanDetailView.detailHeader` (`Sources/Plans/PlanDetailView.swift:55`), add a "Work this task" button after the status line. Enable it only when `row.task.status` is `.elaborated` or `.inProgress` and `!row.task.isBlocked`; disable otherwise (and when `runner.isRunning`). Its action calls `runner.run(projectPath: row.projectPath, taskID: row.task.id)`.
+- [x] Step 8: Present a `.sheet(isPresented:)` bound to `runner.isRunning` over `PlanDetailView` showing a scrolling log of `runner.lines` (activity + text), the cost/turns summary on `done`, an error banner on `error`, and a **Stop** button wired to `runner.stop()` (which calls `process.terminate()`). On sheet dismiss / run completion, call `store.reload()` so the task's new status (`review`) is reflected by Plans' existing read path.
+- [x] Step 9: Handle window/process lifecycle: if the detail window closes mid-run, terminate the child process cleanly; ensure stdout reading is off the main thread and UI updates are hopped back to the main actor (Swift 6 concurrency). Guard against double-launch while `isRunning`.
+- [x] 👁 Step 10: Build and run the app (`./build.sh && open Plans.app`). Open an elaborated task's detail window, click "Work this task", and confirm: the sheet streams live activity, the task does real work on a worktree, the cost/turns summary appears, and the task flips to `review` in Plans after `store.reload()`. Confirm the button is disabled for `pending`/`completed` tasks and that Plans itself never writes `.plans/`.
+
+## Verification
+Verify the new functionality works end-to-end: from an `elaborated` (or `in-progress`) task's detail view, clicking "Work this task" spawns the bundled Node Agent SDK process scoped to that project's repo, which drives `plan-execute` on a git worktree using the inherited `claude login` credential. The modal sheet streams NDJSON-decoded progress (activity lines + text), shows a cost/turns summary on completion, and offers a working Stop button. After the run, `store.reload()` surfaces the task's updated status. The button is disabled for `pending`/`completed`/blocked tasks. Plans.app performs no `.plans/` writes itself (§2 intact). `build.sh`/`install.sh` bundle the compiled script into the `.app`. Build succeeds with no regressions to the existing viewer.
+
+## Impact Scope
+
+### Files to Modify
+- [ ] `Sources/Plans/PlanDetailView.swift` — Add "Work this task" button (status-gated) in `detailHeader`; mount the progress `.sheet`; trigger `store.reload()` after a run
+- [ ] `Sources/Plans/PlansApp.swift` — Instantiate and inject the `TaskRunner` `@Environment` object so it is shared across detail windows
+- [ ] `build.sh` — Build the Node subproject and copy `run-task.js` output into `Contents/Resources/work-task/`
+- [ ] `install.sh` — Same Node build + bundle step for the `/Applications` install path
+
+### Files to Create
+- [ ] `Sources/Plans/TaskRunner.swift` — `@Observable` runner: `Process` spawn, node/script resolution, stdout NDJSON reader, `RunEvent` `Codable` enum, `run`/`stop`
+- [ ] `tools/work-task/` — TypeScript Agent SDK subproject (`run-task.ts`, `package.json`, build config) that calls `query()` and emits the NDJSON progress contract
+
+### Related Files (may need updates)
+- `Sources/Plans/BrowserWindow.swift` — `TaskRow` / `BrowserViewModel.resolveRow` already provide `projectPath` + `task.id`; referenced read-only, no change expected
+- `Sources/Plans/TaskParser.swift` — `TaskStatus` enum read for button gating; no change expected
+- `Resources/` — Destination for the bundled `work-task/run-task.js`
+
+### UI Affected
+- Plan detail view (standalone window + any inline detail pane) — new "Work this task" button + modal progress sheet with Stop
+
+## Assumptions
+
+### Initial (from elaboration)
+_Interactive elaboration — design forks resolved with the user, not auto-picked._
+
+### Discovered during execution
+- [high] Do NOT bundle the SDK into a single `run-task.js`; ship a minimal production `node_modules` next to it. **Why:** `@anthropic-ai/claude-agent-sdk@0.3.167` resolves a per-platform native CLI binary (`@anthropic-ai/claude-agent-sdk-<platform>`, ~224MB) at `query()` time via `createRequire(import.meta.url).resolve(...)`, relative to the SDK's on-disk location. A single-file bundle breaks that resolution. So we keep the SDK `external` in esbuild and `build.mjs` copies only the SDK + the current platform's native package into `dist/node_modules`. Verified by running the copied `dist/` from an isolated tmp dir.
+- [high] Bundle artifact (`Tools/work-task/dist/`) is gitignored, not committed; only source (`run-task.ts`, `build.mjs`, `package.json`, `package-lock.json`, `tsconfig.json`) is tracked. **Why:** `dist/` is ~230MB (mostly the native binary) and is regenerated deterministically by `build.sh`/`install.sh` via `npm install && npm run build`.
+- [low] NDJSON `activity`/`text` are mapped from full `assistant` messages (walking `message.content` `tool_use`/`text` blocks), not from `stream_event` partial messages. **Why:** `includePartialMessages` is off by default; full assistant messages give stable, complete blocks and avoid reassembling partial deltas. Trade-off: text arrives per-turn rather than token-streamed.
+- [low] `stopReason` in the `done` line prefers `result.stop_reason` and falls back to `result.subtype`. **Why:** `subtype` is always present (`success` / `error_max_turns` / `error_max_budget_usd` / …) but `stop_reason` is the more meaningful model signal when set; TS narrowing also forced this ordering.
+- [low] `allowedTools` set to `[Agent, Task, Read, Write, Edit, Bash, Glob, Grep, TodoWrite]`. **Why:** plan wanted "the Agent tool" plus enough to do real work; `Skill` is auto-enabled by the SDK so it's omitted. Exact subagent tool name (`Agent` vs `Task`) is version-dependent, so both are listed.
+- [low] The new tool lives at `Tools/work-task/` (capital T), reusing the repo's existing `Tools/` dir, even though the plan wrote `tools/work-task/`. **Why:** macOS is case-insensitive; lowercase `tools/` resolved into the pre-existing `Tools/` (which holds `make-icon.swift`). Build scripts reference `Tools/work-task` to match the tracked casing.
+- [high] `RunEvent` is a pure value enum (NOT `Identifiable`); identity for the SwiftUI log list lives on a separate `struct LoggedEvent { let id = UUID(); let event: RunEvent }` wrapper, and `TaskRunner.lines` is `[LoggedEvent]`. **Why:** Swift enums can't carry stored properties, so a synthesized-at-decode `let id: UUID` on the enum failed to compile. The wrapper attaches a fresh UUID per decoded line (chosen over view-side `.enumerated()` so appends don't re-key earlier rows). Segment 3's sheet should iterate `runner.lines` and read `$0.event`.
+- [low] `.done` carries `stopReason: String?` (optional) in addition to `costUsd`/`turns`, even though `summary` only exposes cost+turns. **Why:** the Node contract emits `stopReason`; modeling it keeps the Swift mirror faithful and lets segment 3's summary show it if desired, while `decodeIfPresent` tolerates its absence.
+- [high] Unknown `kind` values throw a `DecodingError`; `RunEvent.parseLines` catches per-line decode failures with `try?` and SKIPS the bad line (also skips blank + malformed-JSON lines) rather than aborting the stream. **Why:** a future contract addition degrades gracefully — one unknown line is dropped, the rest of the NDJSON stream keeps flowing.
+- [low] Node resolution runs via `_Concurrency.Task.detached { Self.resolveNodePath() }` awaited from a main-actor `Task` (no `self` captured across the suspension), then spawns back on the main actor. Result cached in a lock-guarded `@unchecked Sendable NodePathCache` static. **Why:** the login-shell `command -v node` call blocks, so it's kept off the main actor; capturing `self` in the detached closure tripped Swift 6 "sending self risks data races", so resolution is self-free and only the main-actor continuation touches state. Note: project's `struct Task` shadows `_Concurrency.Task`, forcing the fully-qualified spelling.
+- [low] stderr is piped (`proc.standardError = Pipe()`) but NOT read/surfaced; only stdout NDJSON drives state. On a nonzero exit with no `done`/`error` line seen, `terminationHandler` sets a generic `error`. **Why:** the contract carries failures as `{"kind":"error"}` on stdout; stderr is incidental SDK/node noise. Draining stderr can be added in segment 3 if useful.
+- [high] Sheet presentation uses a custom `Binding(get: { runner.isRunning }, set: { _ in })` rather than `@Bindable $runner.isRunning`. **Why:** `isRunning` is `private(set)` on `TaskRunner`, so `@Bindable` can't synthesize a writable binding (compile error: "setter is inaccessible"). The read-only-style binding still auto-dismisses the sheet when the run ends (the flag flips false). The no-op setter encodes the decision that dismissing the sheet must NOT stop the run — the run only ends via completion or the explicit Stop button. macOS sheets aren't swipe-dismissable and the Done button only appears once `!isRunning`, so the no-op setter is never exercised while running.
+- [high] `store.reload()` fires in the sheet content's `.onDisappear` (not on the `done` event). **Why:** the sheet disappears both when the run completes (isRunning→false) and when stopped, so reloading on its disappearance covers every termination path with one hook and reliably surfaces the task's new `review` status via the existing read path.
+- [low] Auto-scroll uses `ScrollViewReader` + `.onChange(of: runner.lines.count)` scrolling to the last `LoggedEvent.id` with `anchor: .bottom`. **Why:** keeps the newest activity/text line visible as the stream grows; keyed on `count` so each append triggers exactly one scroll. Terminal `done`/`error` events render out-of-band (summary row / red error banner), so the list body shows only `.activity`/`.text`.
+- [high] Window-close cleanup: `PlanDetailView` has a top-level `.onDisappear { if runner.isRunning { runner.stop() } }` so closing a detail window mid-run terminates the child process. **Why/limitation:** `TaskRunner` is a SHARED single instance across detail windows, so this heuristic could, in theory, stop a run that was launched from a DIFFERENT window. In practice the run is modal (a sheet over the launching window) and the button is disabled while `isRunning`, so at most one window owns the active run — accepted as a simplification rather than adding per-window ownership tracking.
+- [low] Button uses SF Symbol `play.fill` with label "Work this task", placed at the end of `detailHeader`'s outer `VStack` (after the status `HStack`, `.padding(.top, 4)`). The gating rule is extracted to a pure `static func canWork(status:isBlocked:isRunning:)` on `PlanDetailView` and unit-tested. **Why:** a pure predicate keeps the enable logic testable without a UI harness (added `testCanWorkGating` to `TaskRunnerTests`).
+- [low] `AppDelegate` is now annotated `@MainActor`. **Why:** the shared `let taskRunner = TaskRunner()` default initializer is main-actor-isolated (`TaskRunner` is `@MainActor`), which a non-isolated `AppDelegate` couldn't satisfy ("main actor-isolated default value in a nonisolated context"). `NSApplicationDelegate` callbacks already run on the main thread, so isolating the whole delegate is safe and matches how `applicationDidFinishLaunching` already touches `store`.
+
+## Changes
+
+### Segment 1 (steps 1-3) — Node Agent SDK subproject + build plumbing
+- Created `Tools/work-task/` TypeScript subproject: `run-task.ts`, `build.mjs`, `package.json`, `package-lock.json`, `tsconfig.json`, `.gitignore`. Uses `@anthropic-ai/claude-agent-sdk@0.3.167`.
+- `run-task.ts`: parses `--project-root` / `--task-id` (errors + exit 1 if missing), calls `query()` with `cwd`=project root, `permissionMode: "acceptEdits"`, `maxBudgetUsd: 5.0`, `allowedTools` incl. Agent/Task. Prompt drives the `plan-execute` skill on the task id with a git worktree, leaving the task in `review`. No `ANTHROPIC_API_KEY` (inherits `claude login`).
+- NDJSON stdout contract: `assistant`→`tool_use`→`{kind:activity}`, `text`→`{kind:text}`, `result`→`{kind:done,costUsd,turns,stopReason}`, errors→`{kind:error}`. Verified against the installed SDK's `.d.ts`.
+- `build.mjs` (run via `npm run build`): esbuilds `run-task.ts` → `dist/run-task.js` (SDK external) + copies minimal production `node_modules` (SDK + current-platform native binary) into `dist/`. Runnable with plain `node run-task.js`.
+- Wired `build.sh` + `install.sh` to `npm install && npm run build` in `Tools/work-task` and `cp -R` the `dist/` output into `Plans.app/Contents/Resources/work-task/`.
+- Smoke test: `node run-task.js` (no args) emits an `{"kind":"error"...}` line and exits 1; `npx tsc --noEmit` clean. (No Swift changed this segment.)
+
+### Segment 2 (steps 4-6) — Swift TaskRunner + RunEvent contract mirror
+- Created `Sources/Plans/TaskRunner.swift`: `@MainActor @Observable final class TaskRunner` with `isRunning`, `lines: [LoggedEvent]`, `summary: (costUsd, turns)?`, `error: String?`, private live `Process`. Exposes `run(projectPath:taskID:)` and `stop()`.
+- `RunEvent` `Codable` enum mirrors the Node NDJSON contract: manual `init(from:)` switches on `kind` (`activity`/`text`/`done`/`error`); `.done` carries optional `stopReason`. Pure `static func parseLines(from:inout Data)` handles newline-splitting + partial-line buffering (skips malformed/blank lines via `try?`).
+- `run`: resolves `node` via cached `/bin/zsh -lc 'command -v node'` (detached, hops to main to spawn); resolves script via `Bundle.main.url(forResource:"run-task",withExtension:"js",subdirectory:"work-task")`; spawns `Process` reading stdout through a `Pipe` + `readabilityHandler`, decoding each line on the main actor. Missing node/script → sets `error` without spawning. `stop()` terminates the process. Guards against double-launch.
+- Created `Tests/PlansTests/TaskRunnerTests.swift`: 10 tests covering all 4 RunEvent shapes + malformed-line handling. `swift test --filter TaskRunnerTests` → 10 passed, 0 failures; package compiles.
+
+### Segment 3 (steps 7-9) — SwiftUI integration: button, progress sheet, lifecycle
+- `PlanDetailView.swift`: added a "Work this task" button (`play.fill`) at the end of `detailHeader`, gated by a pure `static func canWork(status:isBlocked:isRunning:)` (enabled only for `.elaborated`/`.inProgress`, unblocked, not already running); action calls `runner.run(projectPath:taskID:)`.
+- Mounted a `.sheet` (bound to the runner's running state) presenting a `RunProgressSheet` subview: auto-scrolling activity/text log (`ScrollViewReader` + `.onChange(of: lines.count)`), a cost/turns summary row on `done`, a red error banner on `error`, a **Stop** button (`runner.stop()`) and a **Done** button when finished. `store.reload()` fires on the sheet's `.onDisappear`.
+- Window-close lifecycle: top-level `.onDisappear { if runner.isRunning { runner.stop() } }` terminates the child process if the detail window closes mid-run. Off-main stdout reads + main-actor hops + double-launch guard verified already present in `TaskRunner` (segment 2), not duplicated.
+- `PlansApp.swift`: instantiated `let taskRunner = TaskRunner()` in `AppDelegate` and injected `.environment(taskRunner)` into the `plan-detail` scene (shared across detail windows). `AppDelegate` annotated `@MainActor` (TaskRunner's default init is main-actor-isolated).
+- Added `testCanWorkGating` to `TaskRunnerTests.swift`. `swift build` clean (Swift 6 strict concurrency); `swift test --filter TaskRunnerTests` → 11 passed, 0 failures.
+
+## Notes
+Design decisions (resolved during elaboration):
+- **Auth:** Claude Code subscription via `claude login` (NOT an API key). The spawned Node process inherits the logged-in credential from `~/.claude/`; do not set `ANTHROPIC_API_KEY`. Because Plans is personal tooling for a single developer (spec §3), subscription auth is permitted — the Agent SDK docs' "no claude.ai login for distributed products" restriction does not apply. Note: from 2026-06-15, SDK/subscription usage draws from a separate monthly Agent SDK credit pool. `maxBudgetUsd` is a dollar cap that applies cleanly to API-key auth; under subscription the bound is the plan/credit.
+- **Node + script location:** ship a pre-compiled `run-task.js` bundled in `Resources/work-task/`; resolve the `node` binary at runtime via a login shell (handles homebrew/nvm). Requires Node installed on the machine.
+- **Progress UI:** modal `.sheet()` over the detail view with a live log + Stop button; detail auto-refreshes via `store.reload()` when done.
+- **Run mode / guardrails:** run `plan-execute` on a **fresh git worktree** (isolation), `acceptEdits`, with a hard `maxBudgetUsd` ceiling and a per-run timeout — so an autonomous run can't wreck the working tree. (`plan-execute` accepts a `branch|worktree` arg.)
+- **Button gating:** enabled only for `elaborated` + `in-progress` tasks (real How checklist present), so the unattended run doesn't block on `plan-elaborate`'s `AskUserQuestion` prompts.
+- **Architecture (unchanged from capture):** Plans.app stays a pure read-only viewer; the separate TypeScript process is the sole writer, via the existing `plan-*` skills. Feedback is double-looped: live stdout panel + Plans' existing poll flipping the task to `review`.
+- TypeScript chosen over Python; SDK chosen over headless `claude -p` for streamed, typed progress.
+- No `Foundation.Process` precedent exists in the app today — spawn/stdout handling is net-new (Swift 6 structured concurrency; keep reads off the main thread).

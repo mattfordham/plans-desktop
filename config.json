@@ -1,0 +1,11 @@
+{
+  "git_commits": true,
+  "next_id": 125,
+  "idea_next_id": 1,
+  "segment_threshold": 4,
+  "sync": {
+    "remote": "origin",
+    "branch": "plans",
+    "auto_push": true
+  }
+}
