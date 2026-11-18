@@ -24,7 +24,7 @@
 - **Browser window** — a cross-project window for drilling into a project, plus
   a standalone detail window per plan showing its body and checklist.
 
-![Plans menu-bar glance — per-project task counts by status in the macOS menu bar](docs/images/menubar-glance.png)
+<img src="docs/images/menubar-glance.png" width="280" alt="Plans menu-bar glance — per-project task counts by status in the macOS menu bar">
 
 ![Plans browser window — cross-project task list with the selected plan's detail and agent dock](docs/images/browser-window.png)
 
