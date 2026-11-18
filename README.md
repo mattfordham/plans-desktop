@@ -1,12 +1,20 @@
 # Plans
 
-A native macOS app for viewing your [plans-cc](https://github.com/) tasks across
-**every** project on your machine, at a glance.
+[![Platform: macOS 15+](https://img.shields.io/badge/platform-macOS%2015%2B-black.svg)](https://www.apple.com/macos/)
+[![Swift 6.0](https://img.shields.io/badge/swift-6.0-orange.svg)](https://swift.org)
 
-plans-cc is a lightweight task-management system for Claude Code that stores
-tasks as markdown files in a `.plans/` directory at the root of each project. If
-you work across many projects, there's no single place to see what's in flight
-everywhere — you have to `cd` into each repo individually. **Plans** fixes that.
+**Plans is a native macOS app that shows your [plans-cc](https://github.com/mattfordham/plans-cc) tasks across *every* project on your machine, at a glance.** plans-cc stores tasks as markdown files in a `.plans/` directory at the root of each project, so if you work across many repos there's normally no single place to see what's in flight everywhere — you have to `cd` into each one. Plans fixes that with two always-available surfaces: a menu-bar glance and a cross-project browser window.
+
+## Contents
+
+**Get started**
+- [Two surfaces](#two-surfaces)
+- [Requirements](#requirements)
+- [Build & install](#build--install)
+
+**Reference**
+- [How it works](#how-it-works)
+- [Project layout](#project-layout)
 
 ## Two surfaces
 
@@ -15,6 +23,10 @@ everywhere — you have to `cd` into each repo individually. **Plans** fixes tha
   now, everywhere, without opening a window.
 - **Browser window** — a cross-project window for drilling into a project, plus
   a standalone detail window per plan showing its body and checklist.
+
+![Plans menu-bar glance — per-project task counts by status in the macOS menu bar](docs/images/menubar-glance.png)
+
+![Plans browser window — cross-project task browser with plan detail](docs/images/browser-window.png)
 
 ## Requirements
 
