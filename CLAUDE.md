@@ -103,3 +103,9 @@ swift test               # run the XCTest suite
   task complete.
 - Commit messages: describe what changed and why; do not attribute commits to
   Claude. Commit or push only when asked.
+- **Plan files are public.** `.plans/` lives on the `plans` branch of this public
+  repo. Never write other registered projects' names, paths, task ids/titles,
+  transcript paths, or service URLs (Sentry orgs, etc.) into plan files — the app
+  reads every project on the machine, so evidence from live data is tempting. Use
+  neutral placeholders (`Client A`, `~/Work/client-a`, `<session-id>`,
+  `https://<org>.sentry.io/issues/<id>/`) and `~` instead of `/Users/<name>`.
