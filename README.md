@@ -26,7 +26,7 @@
 
 ![Plans menu-bar glance — per-project task counts by status in the macOS menu bar](docs/images/menubar-glance.png)
 
-![Plans browser window — cross-project task browser with plan detail](docs/images/browser-window.png)
+![Plans browser window — cross-project task list grouped by status](docs/images/browser-window.png)
 
 ## Requirements
 
