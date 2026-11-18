@@ -21,8 +21,9 @@
 - **Menu bar glance** — a menu bar item showing, per project, a compact
   breakdown of task counts by status. The 20,000-foot view of what's hot right
   now, everywhere, without opening a window.
-- **Browser window** — a cross-project window for drilling into a project, plus
-  a standalone detail window per plan showing its body and checklist.
+- **Browser window** — a cross-project task browser: pick a status view or a
+  project in the sidebar, then select a plan to see its body, checklist, and an
+  agent dock for running and discussing it, all in the same window.
 
 <img src="docs/images/menubar-glance.png" width="280" alt="Plans menu-bar glance — per-project task counts by status in the macOS menu bar">
 
