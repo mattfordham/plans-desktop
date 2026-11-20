@@ -28,8 +28,8 @@
 - None.
 
 ## Observations
-- Step 1: ⏳ Deferred to review (branch: fix/125-fix-agent-panel-clipping-and-collapse @ 0fcf26a) — manual reproduce of the clipping before fix; no later step is functionally gated on it (the Diagnosis is already high-confidence)
-- Step 7: ⏳ Deferred to review (branch: fix/125-fix-agent-panel-clipping-and-collapse @ 0fcf26a) — launch app and verify collapsed-by-default per project, expand persistence across selection/relaunch, and single-container long-transcript scroll with no clipping/blank band
+- Step 1: ✓ User confirmed (branch: fix/125-fix-agent-panel-clipping-and-collapse @ 0fcf26a) (replayed at dcfc2ac) — manual reproduce of the clipping before fix; no later step is functionally gated on it (the Diagnosis is already high-confidence)
+- Step 7: ✓ User confirmed (branch: fix/125-fix-agent-panel-clipping-and-collapse @ 0fcf26a) (replayed at dcfc2ac) — launch app and verify collapsed-by-default per project, expand persistence across selection/relaunch, and single-container long-transcript scroll with no clipping/blank band
 
 ## Test Status
 - `swift build`: clean. `swift test --filter AgentDockTests`: 10/0. `swift test --filter PlanDetailViewTests`: 105/0.

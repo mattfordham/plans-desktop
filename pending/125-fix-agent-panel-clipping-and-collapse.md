@@ -3,7 +3,7 @@
 **ID:** 125
 **Created:** 2026-11-20T10:33
 **Type:** bug
-**Status:** review
+**Status:** in-review
 **Branch:** fix/125-fix-agent-panel-clipping-and-collapse
 
 ## What
