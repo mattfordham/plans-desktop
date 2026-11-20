@@ -6,7 +6,7 @@
 _None_
 
 ## Pending
-_None_
+- **#126** - "Ready for review" plans should still have the backlog option
 
 ## Elaborated
 _None_
@@ -25,7 +25,7 @@ _None_
 - **#120** - Make Agent Panel Collapsible (completed 2026-11-12)
 
 ## Stats
-- Pending: 0
+- Pending: 1
 - Elaborated: 0
 - In Progress: 0
 - Review: 1
