@@ -1,12 +1,12 @@
 # Current Progress
 
-**Last updated:** 2026-11-18
+**Last updated:** 2026-11-20
 
 ## Active Work
 _None_
 
 ## Pending
-_None_
+- **#125** - Fix agent panel clipping and collapse it by default
 
 ## Elaborated
 _None_
@@ -25,7 +25,7 @@ _None_
 - **#120** - Make Agent Panel Collapsible (completed 2026-11-12)
 
 ## Stats
-- Pending: 0
+- Pending: 1
 - Elaborated: 0
 - In Progress: 0
 - Review: 0
