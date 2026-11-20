@@ -3,7 +3,9 @@
 **ID:** 125
 **Created:** 2026-11-20T10:33
 **Type:** bug
-**Status:** elaborated
+**Status:** in-progress
+**Branch:** fix/125-fix-agent-panel-clipping-and-collapse
+**Worktree:** /Users/matt/Work/Open Source/plans-desktop/.worktrees/125-fix-agent-panel-clipping-and-collapse
 
 ## What
 The agent panel is sometimes clipped like in the screenshot. Additionally, this panel should never be open by default. It should always be collapsed unless user previously opened it for the viewed project.
