@@ -3,7 +3,9 @@
 **ID:** 127
 **Created:** 2026-11-20T14:11
 **Type:** bug
-**Status:** elaborated
+**Status:** in-progress
+**Branch:** fix/127-whitelist-read-only-denied-tools
+**Worktree:** /Users/matt/Work/Open Source/plans-desktop/.worktrees/127-whitelist-read-only-denied-tools
 
 ## What
 This should be whitelisted.
