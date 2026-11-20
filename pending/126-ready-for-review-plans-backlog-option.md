@@ -3,9 +3,8 @@
 **ID:** 126
 **Created:** 2026-11-20T00:00
 **Type:** bug
-**Status:** in-progress
+**Status:** review
 **Branch:** fix/126-ready-for-review-plans-backlog-option
-**Worktree:** /Users/matt/Work/Open Source/plans-desktop/.worktrees/126-ready-for-review-plans-backlog-option
 
 ## What
 "Ready for review" plans should still have the backlog option.
@@ -44,10 +43,10 @@ the test that pins the old behavior.
 **To confirm:** `plan-backlog`'s auto-pause (git `add -A` + default-branch checkout) fires ONLY when Status is `in-progress` or `in-review` (plan-backlog SKILL.md step 5); for `review` it is skipped entirely — so widening `canBacklog` to include `.review` moves no git state and needs no confirmation dialog, while `.inReview` must stay excluded to preserve that safety rule.
 
 ## How
-- [ ] Step 1: Add/extend a failing unit test in `Tests/PlansTests/PlanDetailViewTests.swift` asserting `PlanDetailView.canBacklog(status: .review, isBlocked: false)` is `true` while `.inReview`, `.inProgress`, `.completed`, and `nil` stay `false` (confirms the Diagnosis; agent-verifiable, so untagged).
-- [ ] Step 2: Widen `canBacklog(status:isBlocked:)` in `Sources/Plans/PlanDetailView.swift` to return `true` for `.pending`, `.elaborated`, and `.review` (leave `.inReview` excluded).
-- [ ] Step 3: Update the predicate's doc comment to explain that `.review` is safe (no auto-pause, no git state moved) while `.inReview` remains excluded because its auto-pause commits work and switches branches.
-- [ ] Step 4: Run the targeted test file (`swift test` filtered to `PlanDetailViewTests`) and confirm green.
+- [x] Step 1: Add/extend a failing unit test in `Tests/PlansTests/PlanDetailViewTests.swift` asserting `PlanDetailView.canBacklog(status: .review, isBlocked: false)` is `true` while `.inReview`, `.inProgress`, `.completed`, and `nil` stay `false` (confirms the Diagnosis; agent-verifiable, so untagged).
+- [x] Step 2: Widen `canBacklog(status:isBlocked:)` in `Sources/Plans/PlanDetailView.swift` to return `true` for `.pending`, `.elaborated`, and `.review` (leave `.inReview` excluded).
+- [x] Step 3: Update the predicate's doc comment to explain that `.review` is safe (no auto-pause, no git state moved) while `.inReview` remains excluded because its auto-pause commits work and switches branches.
+- [x] Step 4: Run the targeted test file (`swift test` filtered to `PlanDetailViewTests`) and confirm green.
 
 ## Verification
 - `PlanDetailView.canBacklog(status: .review, isBlocked: false)` returns `true`; `.inReview`, `.inProgress`, `.completed`, and `nil` still return `false`.
@@ -65,10 +64,13 @@ _Fewer than 3 files — skipped._
 - [high] No new UI, predicate, or per-row action is added; the fix is a one-predicate widening plus a test update. **Why:** Research confirmed the overflow-menu gate and the Backlog button already consume `canBacklog`, so widening it lights up the existing button automatically.
 
 ### Discovered during execution
-_To be filled during execution_
+- none
 
 ## Changes
-_To be filled during execution_
+- `Sources/Plans/PlanDetailView.swift` — Widened `canBacklog(status:isBlocked:)` from `status == .pending || status == .elaborated` to also include `|| status == .review`, so the Backlog action is now offered for "Ready for review" plans. `.inReview` stays excluded. Updated the predicate's doc comment (and the nearby `housekeepingActions` comment) to explain that `.review`'s `plan-backlog` auto-pause is skipped — no git state moved, no confirmation needed — while `.inReview` remains excluded because its auto-pause commits work and switches branches. No UI wiring changed: the existing overflow-menu gate and Backlog button already consume this predicate, so the button lights up automatically for review plans.
+- `Tests/PlansTests/PlanDetailViewTests.swift` — Renamed `testCanBacklogOnlyForPendingAndElaborated` → `testCanBacklogForPendingElaboratedAndReview`; moved `.review` into the TRUE assertions and kept `.inReview`/`.inProgress`/`.completed`/`nil` in the FALSE group; rewrote the doc comment accordingly. RED→GREEN confirmed (the old predicate failed the new `.review` assertion before the fix).
+
+**Tests:** `swift test --filter PlanDetailViewTests` — 105 tests, 0 failures. (Full suite not run — targeted-tests-only rule; deferred to review.)
 
 ## Notes
 Root cause and fix location identified via diagnostic research; see Diagnosis.
