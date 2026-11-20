@@ -3,8 +3,9 @@
 **ID:** 125
 **Created:** 2026-11-20T10:33
 **Type:** bug
-**Status:** in-review
+**Status:** completed
 **Branch:** fix/125-fix-agent-panel-clipping-and-collapse
+**Completed:** 2026-11-20T12:13
 
 ## What
 The agent panel is sometimes clipped like in the screenshot. Additionally, this panel should never be open by default. It should always be collapsed unless user previously opened it for the viewed project.
