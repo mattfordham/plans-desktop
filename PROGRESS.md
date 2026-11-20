@@ -6,10 +6,10 @@
 _None_
 
 ## Pending
-- **#125** - Fix agent panel clipping and collapse it by default
+_None_
 
 ## Elaborated
-_None_
+- **#125** - Fix agent panel clipping and collapse it by default
 
 ## Review
 _None_
@@ -25,8 +25,8 @@ _None_
 - **#120** - Make Agent Panel Collapsible (completed 2026-11-12)
 
 ## Stats
-- Pending: 1
-- Elaborated: 0
+- Pending: 0
+- Elaborated: 1
 - In Progress: 0
 - Review: 0
 - In Review: 0
