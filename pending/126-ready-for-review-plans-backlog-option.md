@@ -3,7 +3,9 @@
 **ID:** 126
 **Created:** 2026-11-20T00:00
 **Type:** bug
-**Status:** elaborated
+**Status:** in-progress
+**Branch:** fix/126-ready-for-review-plans-backlog-option
+**Worktree:** /Users/matt/Work/Open Source/plans-desktop/.worktrees/126-ready-for-review-plans-backlog-option
 
 ## What
 "Ready for review" plans should still have the backlog option.

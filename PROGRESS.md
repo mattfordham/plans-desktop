@@ -3,13 +3,13 @@
 **Last updated:** 2026-11-20
 
 ## Active Work
-_None_
+- **#126** - "Ready for review" plans should still have the backlog option (started 2026-11-20)
 
 ## Pending
 _None_
 
 ## Elaborated
-- **#126** - "Ready for review" plans should still have the backlog option
+_None_
 
 ## Review
 - **#125** - Fix agent panel clipping and collapse it by default
@@ -26,8 +26,8 @@ _None_
 
 ## Stats
 - Pending: 0
-- Elaborated: 1
-- In Progress: 0
+- Elaborated: 0
+- In Progress: 1
 - Review: 1
 - In Review: 0
 - Completed: 121
