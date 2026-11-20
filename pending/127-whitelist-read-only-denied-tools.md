@@ -3,9 +3,8 @@
 **ID:** 127
 **Created:** 2026-11-20T14:11
 **Type:** bug
-**Status:** in-progress
+**Status:** review
 **Branch:** fix/127-whitelist-read-only-denied-tools
-**Worktree:** /Users/matt/Work/Open Source/plans-desktop/.worktrees/127-whitelist-read-only-denied-tools
 
 ## What
 This should be whitelisted.
@@ -63,10 +62,10 @@ is needed: once allowlisted, the event never reaches `deniedTools` or the banner
 **To confirm:** Grep `BASE_ALLOWED_TOOLS` in `run-task.ts` and confirm `mcp__plugin_figma_figma__get_variable_defs` is not present (only the `figma-dev-mode-mcp-server` flavour and the plugin `create_session` are). This is agent-verifiable, so Step 1 is untagged.
 
 ## How
-- [ ] Step 1: Confirm the Diagnosis by extending `Tools/work-task/run-task.allowlist.test.ts`: add the four plugin-flavoured Figma read tools to the `PRESENT` array (`mcp__plugin_figma_figma__get_variable_defs`, `__get_screenshot`, `__get_metadata`, `__get_design_context`) and run `node --test run-task.allowlist.test.ts` — it must FAIL (RED), proving they are not yet on the allowlist. (agent-verifiable, so untagged)
-- [ ] Step 2: Add the same four plugin-flavoured read-tool entries to `BASE_ALLOWED_TOOLS` in `Tools/work-task/run-task.ts`, placed in the Figma read-tool block beside `mcp__plugin_figma_figma__create_session`. Enumerate each explicitly — no wildcard, no write/edit tools.
-- [ ] Step 3: Refresh the Figma allowlist comment (~1357–1376) so it names the plugin-flavoured read tools alongside the Dev-Mode flavours and still says "Do NOT add any Figma write/edit tools here" — mirror how #122 kept the comment's "complete set" wording current.
-- [ ] Step 4: Re-run the allowlist test (`node --test run-task.allowlist.test.ts`) and confirm it now PASSES (GREEN), including the unchanged `ABSENT` assertions (dangerous tools stay excluded). Also run the full launcher test group (`npm test` in `Tools/work-task/`, i.e. the three `node --test` files) to confirm no regression.
+- [x] Step 1: Confirm the Diagnosis by extending `Tools/work-task/run-task.allowlist.test.ts`: add the four plugin-flavoured Figma read tools to the `PRESENT` array (`mcp__plugin_figma_figma__get_variable_defs`, `__get_screenshot`, `__get_metadata`, `__get_design_context`) and run `node --test run-task.allowlist.test.ts` — it must FAIL (RED), proving they are not yet on the allowlist. (agent-verifiable, so untagged)
+- [x] Step 2: Add the same four plugin-flavoured read-tool entries to `BASE_ALLOWED_TOOLS` in `Tools/work-task/run-task.ts`, placed in the Figma read-tool block beside `mcp__plugin_figma_figma__create_session`. Enumerate each explicitly — no wildcard, no write/edit tools.
+- [x] Step 3: Refresh the Figma allowlist comment (~1357–1376) so it names the plugin-flavoured read tools alongside the Dev-Mode flavours and still says "Do NOT add any Figma write/edit tools here" — mirror how #122 kept the comment's "complete set" wording current.
+- [x] Step 4: Re-run the allowlist test (`node --test run-task.allowlist.test.ts`) and confirm it now PASSES (GREEN), including the unchanged `ABSENT` assertions (dangerous tools stay excluded). Also run the full launcher test group (`npm test` in `Tools/work-task/`, i.e. the three `node --test` files) to confirm no regression.
 
 ## Verification
 - `node --test run-task.allowlist.test.ts` passes: the four plugin-flavoured Figma read tools are present on `BASE_ALLOWED_TOOLS`, and `mcp__playwright__browser_fill_form` / `__browser_run_code_unsafe` remain absent.
@@ -84,10 +83,37 @@ _Fewer than 3 files modified (run-task.ts + its test) — section omitted._
 - [high] TDD RED-first in `run-task.allowlist.test.ts` by extending the existing `PRESENT` array, then GREEN by extending `BASE_ALLOWED_TOOLS`. **Why:** this is exactly #122's test structure and the project's TDD convention; the guard test already exists for this array.
 
 ### Discovered during execution
-_To be filled during execution_
+- [high] Ran `npm install` in `Tools/work-task/` because the worktree had no `node_modules` and the test imports `@anthropic-ai/claude-agent-sdk`, so `node --test` failed with `ERR_MODULE_NOT_FOUND` before any assertion ran. **Why:** that install-missing failure is not the TDD RED signal; a true RED must be an assertion failure. After installing (node_modules is gitignored, so no tracked-file change), the test produced the real RED: `AssertionError: expected mcp__plugin_figma_figma__get_variable_defs to be on BASE_ALLOWED_TOOLS`.
 
 ## Changes
-_To be filled during execution_
+Added the four plugin-flavoured (`mcp__plugin_figma_figma__…`) twins of the
+already-allowlisted Dev-Mode Figma read tools to the launcher's safe-default
+tool allowlist, so they are no longer hard-denied under
+`permissionMode: "acceptEdits"` and no `denied` event (and therefore no orange
+"incomplete information" banner) is emitted for them.
+
+**Files modified (2):**
+- `Tools/work-task/run-task.ts` — added `mcp__plugin_figma_figma__get_variable_defs`,
+  `__get_screenshot`, `__get_metadata`, `__get_design_context` to
+  `BASE_ALLOWED_TOOLS` in a dedicated sub-block directly after
+  `mcp__plugin_figma_figma__create_session` (~lines 1385–1393), and refreshed the
+  Figma read-tool comment (~1357–1377) to explain both tool-name flavours
+  (Dev-Mode + plugin), cite task #127, keep the "complete read set" wording
+  current, and retain "Do NOT add any Figma write/edit tools here." No wildcard;
+  no write/edit tools added.
+- `Tools/work-task/run-task.allowlist.test.ts` — added the same four tool names to
+  the `PRESENT` guard array so the allowlist is regression-protected (TDD RED
+  before the fix, GREEN after).
+
+**Tests:** `node --test run-task.allowlist.test.ts` → 2/2 pass (including the
+unchanged `ABSENT` assertions keeping `browser_fill_form` /
+`browser_run_code_unsafe` excluded). Full launcher group (`npm test` in
+`Tools/work-task/`) → 12/12 pass, no regression in the denials/modes tests.
+
+**Note:** `npm install` was run once in `Tools/work-task/` because the fresh
+worktree had no `node_modules` (otherwise `node --test` fails on a missing SDK
+import before any assertion). `node_modules/` is gitignored, so only the two
+in-scope source files are tracked changes.
 
 ## Notes
 Prior art: task #122 "Allow Benign Playwright And Figma MCP Tools" (completed) —

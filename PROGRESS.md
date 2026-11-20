@@ -3,7 +3,7 @@
 **Last updated:** 2026-11-20
 
 ## Active Work
-- **#127** - Whitelist read-only denied tool calls from the "incomplete information" warning (started 2026-11-20)
+_None_
 
 ## Pending
 _None_
@@ -12,7 +12,7 @@ _None_
 _None_
 
 ## Review
-_None_
+- **#127** - Whitelist read-only denied tool calls from the "incomplete information" warning
 
 ## In Review
 _None_
@@ -27,7 +27,7 @@ _None_
 ## Stats
 - Pending: 0
 - Elaborated: 0
-- In Progress: 1
-- Review: 0
+- In Progress: 0
+- Review: 1
 - In Review: 0
 - Completed: 123
