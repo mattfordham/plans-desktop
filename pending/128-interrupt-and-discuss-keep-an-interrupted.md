@@ -57,6 +57,9 @@ Add an explicit **hold** to the plan's `PlanAgent`. The hold is set only when a 
   - Click Close conversation, then fire off a plain Elaborate on another plan with no interaction. Confirm it starts clean.
 - [x] Step 8: Capture the Phase 2 follow-up as its own task: a persistent streaming-input runner with `query.interrupt()`, typing while working, and `AskUserQuestion` in held sessions. Then update `CLAUDE.md`'s agent dock note to describe the hold.
 
+## Issues
+- [x] Review feedback: keep the input field persistent (also while the agent works). Remove the Stop / Close conversation / New conversation buttons from the dock header. Sending a message while the agent works interrupts it, then discusses in the held session. All conversation buttons (Stop, Close/New conversation, Continue + skill chips) sit directly above the input field.
+
 ## Verification
 - `swift test` passes, including:
   - the new pure hold-transition tests (stop sets, kept review never sets, clean finish from the hold clears, discuss keeps, failure keeps);
@@ -106,6 +109,10 @@ _To be filled during elaboration_
 - [low] Composer chips are shown only while held and idle: Continue (always, whatever the status, since it resumes the interrupted run) plus Elaborate (canElaborate/canReElaborate/canReElaborateReview), Execute (canExecutePending/canWork/canExecuteReview), Review (canReview), Complete (canComplete). The dock emits an `ActionRoute` through an `onAction` closure that `PlanDetailView` maps onto its existing sheet flags / `confirmComplete`; the modals launch through `TaskRunner`, which applies the hold fallback. Continue picks the modal by the interrupted mode's family and the plan's CURRENT status (an interrupted execute on an in-progress plan opens the plain Execute modal). **Why:** no launch logic duplicated; the action bar and chips share one set of predicates and modals.
 - [low] Close conversation is a `.borderedProminent` header button through a new `TaskRunner.closeConversation(projectPath:taskID:)` wrapper. Continuing a review via the Review modal lets the user pick `kept`, which starts fresh (existing rule). **Why:** keeps the dock talking to the runner, matching New conversation's `resetDiscussion` path.
 - [low] The CLAUDE.md hold note is a new "Held conversation (#128)" bullet directly after the "Agent dock (#117)" bullet, not text folded into it. #129 is filed as `pending` (not elaborated) with only What/Why filled in. **Why:** the #117 bullet is already long, and a separate bullet keeps each one concise. Phase 2 still needs its own elaboration.
+- [high] Send-to-interrupt queues the message on the agent (`PlanAgent.queuedSend`) and drains it from `launchRun`'s finish closure right after `completeRunSegment`, so the turn starts only once `nextHold` has held the stopped run's session. `TaskRun.stop()` finishes synchronously, so in practice the turn launches within the same send; the dock also renders a queued message as a pending "Interrupting…" bubble in case a finish ever arrives later. A live discuss turn is cancelled via the existing `cancelDiscussionTurn` (which idles the agent synchronously) and the new turn launches right after in the same thread. **Why:** no sleeping/polling and no parallel resume bridge; the hold/lineage stay the only resume sources.
+- [low] `PlanAgent.sendDisposition` refuses when the agent is busy with nothing live to interrupt (inconsistent gate) or a send is already queued; `TaskRunner.send` returns `false` and the composer keeps its text. **Why:** never drop or double-launch a message.
+- [low] New conversation shows only when idle, unheld and there is something to clear: a thread turn or recorded lineage (`lastSession`), since `resetDiscussion` clears exactly those. Close / New conversation now use `.bordered` style in the row above the field (Continue stays prominent, Stop is destructive). **Why:** after a reset the button would otherwise linger over kept run logs it doesn't clear.
+- [low] A working agent on a plan that can't be discussed (or a capture placeholder) gets a buttons-only footer (`DockFooterMode.buttonsOnly`) holding just Stop; a parked non-discussable plan shows the question form plus Stop. **Why:** the header no longer has Stop, so it must stay reachable without a composer.
 
 ## Changes
 - **Segment 1 (steps 1–4, commit 920ca5b):**
@@ -121,6 +128,15 @@ _To be filled during elaboration_
   - `PlanDetailView.openDockAction` routes chips to the existing modals / Complete confirmation; `TaskRunner.closeConversation(projectPath:taskID:)`.
   - Tests: AgentDock/PlanAgent/DiscussionThread/TaskRunner 285 pass, PlanDetailViewTests 105 pass; `swift build` clean.
 - **Step 7 (manual check):** ⏳ deferred to review.
+- **Review fix (commit 1a47896):** persistent composer with send-to-interrupt.
+  - The dock header now holds only the chevron and status pill.
+  - The composer stays available while working or parked; its placeholder reads "Send to interrupt and discuss…". The "Stop to interrupt" band is gone.
+  - Sending while busy goes through the pure `PlanAgent.sendDisposition` and `TaskRunner.send`:
+    - a live run is stopped, and the queued message launches from its finish path, resuming the new hold;
+    - a live discuss turn is cancelled and re-sent.
+  - `AgentDock.conversationButtons` puts every conversation button in one row above the field: Stop while busy; Continue, skill chips and Close conversation when held; New conversation otherwise. It replaces `composerAffordances` and `idleHeaderAction`.
+  - `CLAUDE.md` dock notes updated.
+  - Tests: 407 pass across AgentDock, PlanAgent, TaskRunner, DiscussionThread and PlanDetailView.
 - **Segment 3 (step 8, commit 4d75c62):** Captured Phase 2 as #129 (persistent streaming-input runner, `query.interrupt()`, typing while working, `AskUserQuestion` in held sessions). Added a "Held conversation (#128)" bullet to `CLAUDE.md` after the agent dock note.
 
 ## Notes
