@@ -3,7 +3,8 @@
 **ID:** 128
 **Created:** 2026-11-21T08:30
 **Type:** feature
-**Status:** in-review
+**Status:** completed
+**Completed:** 2026-11-21T09:40
 **Branch:** feature/128-interrupt-and-discuss-keep-an-interrupted
 
 ## What
