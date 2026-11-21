@@ -3,10 +3,10 @@
 **Last updated:** 2026-11-21
 
 ## Active Work
-_None_
+- **#130** - Agent panel closed by default per plan, opened only by the user (started 2026-11-21)
 
 ## Pending
-- **#130** - Agent panel closed by default per plan, opened only by the user
+_None_
 
 ## Elaborated
 _None_
@@ -25,9 +25,9 @@ _None_
 - **#126** - "Ready for review" plans should still have the backlog option (completed 2026-11-20)
 
 ## Stats
-- Pending: 1
+- Pending: 0
 - Elaborated: 0
-- In Progress: 0
+- In Progress: 1
 - Review: 0
 - In Review: 0
 - Completed: 126
