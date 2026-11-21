@@ -3,11 +3,10 @@
 **Last updated:** 2026-11-21
 
 ## Active Work
-_None_
+- **#129** - Interrupt-and-discuss Phase 2: persistent streaming-input runner with real interrupt (started 2026-11-21)
 
 ## Pending
 - **#130** - Agent panel closed by default per plan, opened only by the user
-- **#129** - Interrupt-and-discuss Phase 2: persistent streaming-input runner with real interrupt
 
 ## Elaborated
 _None_
@@ -26,9 +25,9 @@ _None_
 - **#123** - Polish README for public sharing (completed 2026-11-18)
 
 ## Stats
-- Pending: 2
+- Pending: 1
 - Elaborated: 0
-- In Progress: 0
+- In Progress: 1
 - Review: 1
 - In Review: 0
 - Completed: 124

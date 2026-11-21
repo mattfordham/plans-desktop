@@ -3,7 +3,8 @@
 **ID:** 129
 **Created:** 2026-11-21T09:03
 **Type:** feature
-**Status:** elaborated
+**Status:** in-progress
+**Branch:** feature/129-interrupt-and-discuss-phase-2-persistent-runner
 
 ## What
 Follow-up to #128.
