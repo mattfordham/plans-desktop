@@ -6,6 +6,7 @@
 _None_
 
 ## Pending
+- **#130** - Agent panel closed by default per plan, opened only by the user
 - **#129** - Interrupt-and-discuss Phase 2: persistent streaming-input runner with real interrupt
 
 ## Elaborated
@@ -26,7 +27,7 @@ _None_
 - **#122** - Allow Benign Playwright And Figma MCP Tools (completed 2026-11-17)
 
 ## Stats
-- Pending: 1
+- Pending: 2
 - Elaborated: 0
 - In Progress: 0
 - Review: 2
