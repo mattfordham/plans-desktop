@@ -3,9 +3,8 @@
 **ID:** 130
 **Created:** 2026-11-21T09:13
 **Type:** bug
-**Status:** in-progress
+**Status:** review
 **Branch:** fix/130-agent-panel-closed-by-default-per-plan
-**Worktree:** /Users/matt/Work/Open Source/plans-desktop/.worktrees/130-agent-panel-closed-by-default-per-plan
 
 ## What
 The agent panel should be closed by default for every plan and only open when the user opens it. Its open/closed state should be remembered per plan.
@@ -89,13 +88,13 @@ the running macOS UI.)
 
 ## How
 - [ ] 👁 Step 1: Reproduce in the running app (`./build.sh`) — open the dock on plan A in a project, switch to plan B in the same project and confirm the dock is open there too; trigger a run on a collapsed plan and confirm it auto-expands; note the collapsed strip has no top border. (Confirms the Diagnosis before any fix; requires observing the macOS UI.)
-- [ ] Step 2: Re-key the open-state persistence per plan in `Sources/Plans/AgentDock.swift`: change `dockOpenedKey` (and the `dockWasOpened` / `setDockOpened` / `initialCollapsed` helpers) to take a per-plan identity (project path + task id) instead of `projectPath` alone — e.g. `dockOpenedKey(projectPath:taskID:)` producing `"agentDockOpened:<projectPath>#<taskID>"`. Keep the "remove key on collapse" semantics.
-- [ ] Step 3: Thread the task id from both call sites in `Sources/Plans/PlanDetailView.swift` into `ResizableAgentDock` (new `taskID` parameter alongside `projectPath`): `row.task.id` at the active-plan site (~line 181) and `captureRun?.taskID` at the capture-placeholder site (~line 323). Update `ResizableAgentDock`'s `init` and the `initialCollapsed` / `setDockOpened` calls to pass the per-plan key.
-- [ ] Step 4: Remove the auto-expand-on-activity in `Sources/Plans/AgentDock.swift`: delete the `.onChange(of: agentState)` handler in `AgentDock.body` (lines ~361-365) and remove the now-unused `shouldAutoExpand(for:)` pure helper. Confirm `agentState` has no other consumer that breaks; leave the footer-always-visible behaviour (`showsFooter`) untouched so a parked question stays reachable while collapsed.
-- [ ] Step 5: Give the collapsed strip a top border in `ResizableAgentDock.body`: render a leading `Divider()` (matching the expanded `handle`'s divider look) above `dock($collapsed)` in the collapsed branch (lines ~1011-1015) so the collapsed panel reads with the same top seam the expanded panel gets. Do not add drag behaviour to this divider — it is a static seam, not a resize handle. Introduce no size measurement (#096).
-- [ ] Step 6: Update the #125 tests in `Tests/PlansTests/AgentDockTests.swift` to the per-plan key: pass `taskID` to `dockOpenedKey` / `dockWasOpened` / `setDockOpened` / `initialCollapsed`, and add a test proving two plans in the SAME project keep independent open flags (the core regression this fixes).
-- [ ] Step 7: Update the #120 tests in `Tests/PlansTests/PlanDetailViewTests.swift`: remove the `shouldAutoExpand*` tests (the behaviour is gone) and, if a pure helper remains for collapse logic, assert the collapsed strip still shows the footer and now has a top-border seam insofar as it is unit-testable (otherwise rely on the Step 1 visual check).
-- [ ] Step 8: Run `swift build` and `swift test`; fix any references to the removed `shouldAutoExpand` / old `dockOpenedKey` signature until the suite is green.
+- [x] Step 2: Re-key the open-state persistence per plan in `Sources/Plans/AgentDock.swift`: change `dockOpenedKey` (and the `dockWasOpened` / `setDockOpened` / `initialCollapsed` helpers) to take a per-plan identity (project path + task id) instead of `projectPath` alone — e.g. `dockOpenedKey(projectPath:taskID:)` producing `"agentDockOpened:<projectPath>#<taskID>"`. Keep the "remove key on collapse" semantics.
+- [x] Step 3: Thread the task id from both call sites in `Sources/Plans/PlanDetailView.swift` into `ResizableAgentDock` (new `taskID` parameter alongside `projectPath`): `row.task.id` at the active-plan site (~line 181) and `captureRun?.taskID` at the capture-placeholder site (~line 323). Update `ResizableAgentDock`'s `init` and the `initialCollapsed` / `setDockOpened` calls to pass the per-plan key.
+- [x] Step 4: Remove the auto-expand-on-activity in `Sources/Plans/AgentDock.swift`: delete the `.onChange(of: agentState)` handler in `AgentDock.body` (lines ~361-365) and remove the now-unused `shouldAutoExpand(for:)` pure helper. Confirm `agentState` has no other consumer that breaks; leave the footer-always-visible behaviour (`showsFooter`) untouched so a parked question stays reachable while collapsed.
+- [x] Step 5: Give the collapsed strip a top border in `ResizableAgentDock.body`: render a leading `Divider()` (matching the expanded `handle`'s divider look) above `dock($collapsed)` in the collapsed branch (lines ~1011-1015) so the collapsed panel reads with the same top seam the expanded panel gets. Do not add drag behaviour to this divider — it is a static seam, not a resize handle. Introduce no size measurement (#096).
+- [x] Step 6: Update the #125 tests in `Tests/PlansTests/AgentDockTests.swift` to the per-plan key: pass `taskID` to `dockOpenedKey` / `dockWasOpened` / `setDockOpened` / `initialCollapsed`, and add a test proving two plans in the SAME project keep independent open flags (the core regression this fixes).
+- [x] Step 7: Update the #120 tests in `Tests/PlansTests/PlanDetailViewTests.swift`: remove the `shouldAutoExpand*` tests (the behaviour is gone) and, if a pure helper remains for collapse logic, assert the collapsed strip still shows the footer and now has a top-border seam insofar as it is unit-testable (otherwise rely on the Step 1 visual check).
+- [x] Step 8: Run `swift build` and `swift test`; fix any references to the removed `shouldAutoExpand` / old `dockOpenedKey` signature until the suite is green.
 
 ## Verification
 - `swift build` succeeds and `swift test` passes, including the updated #120/#125 tests and a new test proving two plans in one project keep independent dock-open flags.
@@ -126,10 +125,29 @@ the running macOS UI.)
 - [high] **The capture-placeholder dock uses `captureRun?.taskID` for its per-plan key.** Both `ResizableAgentDock` call sites already have a task id in scope; the capture site passes `captureRun?.taskID` and `captureRun?.runProjectPath ?? ""`. **Why:** the capture row is a real (synthetic) plan with its own id, and keying it consistently keeps its dock state from colliding with a sibling plan's.
 
 ### Discovered during execution
-_To be filled during execution_
+- none
 
 ## Changes
-_To be filled during execution_
+
+**`Sources/Plans/AgentDock.swift`**
+- Re-keyed the open-state persistence per plan: `dockOpenedKey`, `dockWasOpened`, `setDockOpened`, and `initialCollapsed` now take `(projectPath:taskID:)`. Key format is `"agentDockOpened:<projectPath>#<taskID>"`. "Remove key on collapse" semantics preserved.
+- Removed the auto-expand-on-activity: deleted the `.onChange(of: agentState)` handler in `AgentDock.body` and the now-unused `shouldAutoExpand(for:)` helper. `agentState` still drives the status pill, `dockFooterMode`, `conversationButtons`, and the composer placeholder — no broken consumers. `showsFooter` (footer-always-visible when collapsed) untouched, so a parked question stays reachable.
+- `ResizableAgentDock` gained a stored `taskID` property, threaded through its `init` and the `initialCollapsed` / `setDockOpened` calls.
+- Added a static leading `Divider()` above `dock($collapsed)` in the collapsed branch of `ResizableAgentDock.body`, giving the collapsed strip the same top seam the expanded strip gets from the resize `handle` — a static border, no drag gesture, no size measurement (#096).
+
+**`Sources/Plans/PlanDetailView.swift`**
+- Passed `taskID` into both `ResizableAgentDock` call sites: `row.task.id` at the active-plan site (~line 181) and `captureRun?.taskID ?? ""` at the capture-placeholder site (~line 323).
+
+**`Tests/PlansTests/AgentDockTests.swift`**
+- Re-pointed the #125 open-state tests at the per-plan signature (added `taskID:` to every `dockOpenedKey` / `dockWasOpened` / `setDockOpened` / `initialCollapsed` call). Renamed `testDockOpenedKeyIsNamespacedPerProject` → `testDockOpenedKeyIsNamespacedPerPlan`, with the expected key `"agentDockOpened:/a/project#1"`, keeping per-project distinctness and adding per-taskID distinctness.
+- Added `testPerPlanFlagsAreIndependentWithinAProject` — the core #130 regression guard: opening the dock on task `"1"` in a project leaves task `"2"` in the same project collapsed/unopened.
+
+**`Tests/PlansTests/PlanDetailViewTests.swift`**
+- Removed the obsolete #120 `shouldAutoExpand*` tests (the helper is gone).
+
+**Verification:** `swift build` clean; `swift test` green — 1063 tests, 0 failures. `shouldAutoExpand` no longer appears anywhere in `Sources/` or `Tests/`.
+
+**Deferred to review (👁 Step 1 and the visual Verification bullets):** requires observing the running macOS UI — per-plan open memory across sibling plans, no auto-expand on a background run, and the collapsed strip's new top-border seam.
 
 ## Notes
 _Additional context_
