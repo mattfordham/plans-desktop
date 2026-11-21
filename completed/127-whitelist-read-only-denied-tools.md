@@ -3,7 +3,8 @@
 **ID:** 127
 **Created:** 2026-11-20T14:11
 **Type:** bug
-**Status:** review
+**Status:** completed
+**Completed:** 2026-11-21T00:00
 **Branch:** fix/127-whitelist-read-only-denied-tools
 
 ## What
