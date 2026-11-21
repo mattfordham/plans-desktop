@@ -25,8 +25,8 @@ _None_
 - **#122** - Allow Benign Playwright And Figma MCP Tools (completed 2026-11-17)
 
 ## Stats
-- Pending: 1
-- Elaborated: 0
+- Pending: 0
+- Elaborated: 1
 - In Progress: 0
 - Review: 1
 - In Review: 0
