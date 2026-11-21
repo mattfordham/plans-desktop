@@ -52,7 +52,7 @@ Add an explicit **hold** to the plan's `PlanAgent`. The hold is set only when a 
   - The composer shows **Continue** (re-launches the interrupted mode with resume, through its existing modal or confirmation) plus Elaborate / Execute / Review / Complete chips, gated by the same `PlanDetailView` predicates.
   - Make the composer layout a pure static (e.g. `composerAffordances(hold:status:)`) with tests in `AgentDockTests.swift`.
   - No measured sizes (#096).
-- [ ] 👁 Step 7: **Manual check in the app.**
+- [x] 👁 Step 7: **Manual check in the app.**
   - Start an execute, Stop it mid-run, ask a question in the dock, then Continue. Confirm the agent remembers both the run and the discussion, and that no stray `claude` process remains after Stop (`ps`).
   - Click Close conversation, then fire off a plain Elaborate on another plan with no interaction. Confirm it starts clean.
 - [x] Step 8: Capture the Phase 2 follow-up as its own task: a persistent streaming-input runner with `query.interrupt()`, typing while working, and `AskUserQuestion` in held sessions. Then update `CLAUDE.md`'s agent dock note to describe the hold.
@@ -127,7 +127,7 @@ _To be filled during elaboration_
   - `AgentDock`: pure `composerAffordances`, `route(for:status:)`, `statusPillLabel(state:isHeld:)` ("Interrupted · conversation held"), `idleHeaderAction(isHeld:)` (Close conversation replaces New conversation while held). Continue + Elaborate/Execute/Review/Complete chips above the composer, gated by the action bar's predicates.
   - `PlanDetailView.openDockAction` routes chips to the existing modals / Complete confirmation; `TaskRunner.closeConversation(projectPath:taskID:)`.
   - Tests: AgentDock/PlanAgent/DiscussionThread/TaskRunner 285 pass, PlanDetailViewTests 105 pass; `swift build` clean.
-- **Step 7 (manual check):** ⏳ deferred to review.
+- **Step 7 (manual check):** ✓ confirmed by the user in review (after the persistent-composer fix).
 - **Review fix (commit 1a47896):** persistent composer with send-to-interrupt.
   - The dock header now holds only the chevron and status pill.
   - The composer stays available while working or parked; its placeholder reads "Send to interrupt and discuss…". The "Stop to interrupt" band is gone.
