@@ -3,8 +3,9 @@
 **ID:** 130
 **Created:** 2026-11-21T09:13
 **Type:** bug
-**Status:** review
+**Status:** completed
 **Branch:** fix/130-agent-panel-closed-by-default-per-plan
+**Completed:** 2026-11-21T10:33
 
 ## What
 The agent panel should be closed by default for every plan and only open when the user opens it. Its open/closed state should be remembered per plan.
