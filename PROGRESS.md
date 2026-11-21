@@ -1,9 +1,9 @@
 # Current Progress
 
-**Last updated:** 2026-11-20
+**Last updated:** 2026-11-21
 
 ## Active Work
-_None_
+- **#128** - Interrupt-and-discuss: keep an interrupted run's session alive (started 2026-11-21)
 
 ## Pending
 _None_
@@ -26,8 +26,8 @@ _None_
 
 ## Stats
 - Pending: 0
-- Elaborated: 1
-- In Progress: 0
+- Elaborated: 0
+- In Progress: 1
 - Review: 1
 - In Review: 0
 - Completed: 123

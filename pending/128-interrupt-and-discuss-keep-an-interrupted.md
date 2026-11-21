@@ -3,7 +3,9 @@
 **ID:** 128
 **Created:** 2026-11-21T08:30
 **Type:** feature
-**Status:** elaborated
+**Status:** in-progress
+**Branch:** feature/128-interrupt-and-discuss-keep-an-interrupted
+**Worktree:** /Users/matt/Work/Open Source/plans-desktop/.worktrees/128-interrupt-and-discuss-keep-an-interrupted
 
 ## What
 Interrupt-and-discuss: keep an interrupted run's session alive so the user can talk to the agent and then continue or switch skills in the same context.
