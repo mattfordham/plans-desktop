@@ -3,7 +3,9 @@
 **ID:** 131
 **Created:** 2026-11-21T23:02
 **Type:** feature
-**Status:** elaborated
+**Status:** in-progress
+**Branch:** feature/131-add-filter-for-completed
+**Worktree:** /Users/matt/Work/Open Source/plans-desktop/.worktrees/131-add-filter-for-completed
 
 ## What
 Add Filter for "Completed". Similar to Backlog.

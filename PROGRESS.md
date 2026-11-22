@@ -3,13 +3,13 @@
 **Last updated:** 2026-11-21
 
 ## Active Work
-_None_
+- **#131** - Add Filter for "Completed" (Similar to Backlog) (started 2026-11-22)
 
 ## Pending
 _None_
 
 ## Elaborated
-- **#131** - Add Filter for "Completed" (Similar to Backlog)
+_None_
 
 ## Review
 _None_
@@ -26,8 +26,8 @@ _None_
 
 ## Stats
 - Pending: 0
-- Elaborated: 1
-- In Progress: 0
+- Elaborated: 0
+- In Progress: 1
 - Review: 0
 - In Review: 0
 - Completed: 127
