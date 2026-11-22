@@ -6,7 +6,7 @@
 _None_
 
 ## Pending
-_None_
+- **#131** - Add Filter for "Completed" (Similar to Backlog)
 
 ## Elaborated
 _None_
@@ -25,7 +25,7 @@ _None_
 - **#125** - Fix agent panel clipping and collapse it by default (completed 2026-11-20)
 
 ## Stats
-- Pending: 0
+- Pending: 1
 - Elaborated: 0
 - In Progress: 0
 - Review: 0
