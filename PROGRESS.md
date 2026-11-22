@@ -6,10 +6,10 @@
 _None_
 
 ## Pending
-- **#131** - Add Filter for "Completed" (Similar to Backlog)
+_None_
 
 ## Elaborated
-_None_
+- **#131** - Add Filter for "Completed" (Similar to Backlog)
 
 ## Review
 _None_
@@ -25,8 +25,8 @@ _None_
 - **#125** - Fix agent panel clipping and collapse it by default (completed 2026-11-20)
 
 ## Stats
-- Pending: 1
-- Elaborated: 0
+- Pending: 0
+- Elaborated: 1
 - In Progress: 0
 - Review: 0
 - In Review: 0
