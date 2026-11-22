@@ -3,9 +3,8 @@
 **ID:** 131
 **Created:** 2026-11-21T23:02
 **Type:** feature
-**Status:** in-progress
+**Status:** review
 **Branch:** feature/131-add-filter-for-completed
-**Worktree:** /Users/matt/Work/Open Source/plans-desktop/.worktrees/131-add-filter-for-completed
 
 ## What
 Add Filter for "Completed". Similar to Backlog.
@@ -43,12 +42,12 @@ in the read-only detail column.
 - `Tests/PlansTests/BrowserWindowTests.swift` — smart-view tests to extend (`testSmartViewAllCasesOrder`, `testSmartViewLabelsAndVocabulary`) plus a new `completed` rows test.
 
 ## How
-- [ ] Step 1: In `Tests/PlansTests/BrowserWindowTests.swift`, add a failing `testSmartViewCompletedRowsAcrossProjects` (mirror `testSmartViewBacklogRowsAcrossProjects` at ~line 1519) asserting `BrowserViewModel.rows(in:matching: .completed)` returns the `.completed` tasks (from `ProjectTasks.tasks`) across projects in project/parser order. Also update `testSmartViewAllCasesOrder` (~line 1556) to expect `.completed` last in `allCases`, and extend `testSmartViewLabelsAndVocabulary` (~line 1532) with `SmartView.completed.label == TaskStatus.completed.filterLabel` / `.symbolName == TaskStatus.completed.symbolName` / `.color == TaskStatus.completed.glanceColor`. (TDD red: these fail to compile until Steps 2–4 land.)
-- [ ] Step 2: In `Sources/Plans/BrowserWindow.swift`, add `case completed` to the `SmartView` enum (~line 618), placed **last**, after `.backlog`, so it sits at the end of the sidebar "Status" section (`allCases` order == display order).
-- [ ] Step 3: Add a `.completed` arm to each of the three exhaustive `switch`es on `SmartView` (`label` ~621, `symbolName` ~635, `color` ~649), delegating to `TaskStatus.completed.filterLabel` / `TaskStatus.completed.symbolName` / `TaskStatus.completed.glanceColor` respectively — matching how the other real-status lenses (`.pending`, `.review`, `.inReview`, `.inProgress`) delegate to `TaskStatus.<case>.*`. Do NOT add new `backlog`-style statics; Completed is a real status.
-- [ ] Step 4: Add a `completedRows(_ project:) -> [TaskRow]` helper next to `backlogRows(_:)` (~line 1053) that maps `project.tasks.filter { $0.status == .completed }` to `TaskRow`s (same shape as `backlogRows`/`activeRows`, preserving parser order, no re-sort). Then add `case .completed: return projects.flatMap { completedRows($0) }` to `rows(in:matching:)` (~line 1306). Source from `project.tasks`, NOT `activeRows` (which drops `.completed`).
-- [ ] Step 5: Extend `resolveRow(in:id:)` (~line 922) so a completed row is resolvable: after the active and backlog lookups, also search `projects.flatMap { completedRows($0) }`. This lets a clicked completed plan open (read-only) in the detail column; without it `validSelection(_:in:)` would clear the selection. Keep active rows winning any id collision (search order: active → backlog → completed).
-- [ ] Step 6: Run `swift build` then `swift test`; confirm the new `.completed` tests pass, the two totality loops over `SmartView.allCases` (~lines 1545, 1758) still pass, and no other test regressed.
+- [x] Step 1: In `Tests/PlansTests/BrowserWindowTests.swift`, add a failing `testSmartViewCompletedRowsAcrossProjects` (mirror `testSmartViewBacklogRowsAcrossProjects` at ~line 1519) asserting `BrowserViewModel.rows(in:matching: .completed)` returns the `.completed` tasks (from `ProjectTasks.tasks`) across projects in project/parser order. Also update `testSmartViewAllCasesOrder` (~line 1556) to expect `.completed` last in `allCases`, and extend `testSmartViewLabelsAndVocabulary` (~line 1532) with `SmartView.completed.label == TaskStatus.completed.filterLabel` / `.symbolName == TaskStatus.completed.symbolName` / `.color == TaskStatus.completed.glanceColor`. (TDD red: these fail to compile until Steps 2–4 land.)
+- [x] Step 2: In `Sources/Plans/BrowserWindow.swift`, add `case completed` to the `SmartView` enum (~line 618), placed **last**, after `.backlog`, so it sits at the end of the sidebar "Status" section (`allCases` order == display order).
+- [x] Step 3: Add a `.completed` arm to each of the three exhaustive `switch`es on `SmartView` (`label` ~621, `symbolName` ~635, `color` ~649), delegating to `TaskStatus.completed.filterLabel` / `TaskStatus.completed.symbolName` / `TaskStatus.completed.glanceColor` respectively — matching how the other real-status lenses (`.pending`, `.review`, `.inReview`, `.inProgress`) delegate to `TaskStatus.<case>.*`. Do NOT add new `backlog`-style statics; Completed is a real status.
+- [x] Step 4: Add a `completedRows(_ project:) -> [TaskRow]` helper next to `backlogRows(_:)` (~line 1053) that maps `project.tasks.filter { $0.status == .completed }` to `TaskRow`s (same shape as `backlogRows`/`activeRows`, preserving parser order, no re-sort). Then add `case .completed: return projects.flatMap { completedRows($0) }` to `rows(in:matching:)` (~line 1306). Source from `project.tasks`, NOT `activeRows` (which drops `.completed`).
+- [x] Step 5: Extend `resolveRow(in:id:)` (~line 922) so a completed row is resolvable: after the active and backlog lookups, also search `projects.flatMap { completedRows($0) }`. This lets a clicked completed plan open (read-only) in the detail column; without it `validSelection(_:in:)` would clear the selection. Keep active rows winning any id collision (search order: active → backlog → completed).
+- [x] Step 6: Run `swift build` then `swift test`; confirm the new `.completed` tests pass, the two totality loops over `SmartView.allCases` (~lines 1545, 1758) still pass, and no other test regressed.
 - [ ] 👁 Step 7: Run the app (`./build.sh`) and visually confirm the sidebar "Status" section shows a "Completed" lens (checkmark glyph, green tint, last in the section) whenever any project has completed tasks, that selecting it lists completed tasks across projects, and that clicking one opens its plan read-only in the detail column.
 
 ## Verification
@@ -70,10 +69,56 @@ _Not applicable — fewer than 3 files are modified (`Sources/Plans/BrowserWindo
 - [high] Kept the generic `visibleSmartViews` zero-count hiding for the Completed lens (hidden when no project has completed tasks, except when selected). **Why:** Every other status lens behaves this way and the rule is applied generically to all `SmartView` cases; no special-casing is warranted.
 
 ### Discovered during execution
-_To be filled during execution_
+- [high] `resolveRow` searches active → backlog → completed, each as a separate guarded lookup so active wins any id collision (matching the pre-existing active-first precedence). **Why:** Step 5 mandates the order; `completedRows` scans `project.tasks`, which a stale poll could overlap with active/backlog, so active's truthful live state must win.
+- [high] Renamed `testResolveSelectedRowReturnsNilForCompletedTaskId` → `testResolveSelectedRowReturnsCompletedTaskRow`. Old assertion: `XCTAssertNil(resolveSelectedRow([p1], "/proj1/099"))` (completed id `099` unresolvable). New assertion: the same fixture (completed `099` in `tasks`, excluded from `activeTasks`) now resolves — `completed?.id == "/proj1/099"` and `completed?.task.status == .completed`; the active `001` still resolves. **Why:** completed rows are now resolvable so a clicked completed plan opens read-only.
+- [high] Renamed `testValidSelectionClearsCompletedPlan` → `testValidSelectionKeepsCompletedPlan`. Old assertion: after a plan left `activeTasks` (fixture had only `activeTasks`, empty `tasks`), `validSelection` returned `nil`. New assertion: `before`/`after` fixtures now populate `tasks` too; `after` keeps the task in `tasks` as `.completed` (absent from `activeTasks`), and `validSelection("/proj1/001", in: [after]) == "/proj1/001"` — the selection is KEPT. **Why:** a completed plan now stays selected and opens read-only instead of clearing. Note the old fixture's empty `tasks` would still have cleared (completedRows scans `tasks`), so the fixture was updated to express the intended "task moved to completed" state rather than "task vanished".
 
 ## Changes
-_To be filled during execution_
+Added a cross-project **"Completed"** smart view to the browser sidebar's "Status"
+section (Surface B), mirroring the existing "Backlog" lens.
+
+**`Sources/Plans/BrowserWindow.swift`:**
+- Added `case completed` to the `SmartView` enum, placed **last** (after `.backlog`),
+  so it renders at the end of the sidebar "Status" section (`allCases` order ==
+  display order).
+- Added `.completed` arms to all three exhaustive vocabulary `switch`es (`label`,
+  `symbolName`, `color`), each delegating to the centralized
+  `TaskStatus.completed.filterLabel` / `.symbolName` / `.glanceColor` — no new
+  `backlog`-style statics (Completed is a real status). Switches stay exhaustive;
+  no `default:` added.
+- Added a `completedRows(_ project:) -> [TaskRow]` helper next to `backlogRows(_:)`
+  mapping `project.tasks.filter { $0.status == .completed }` to `TaskRow`s (same
+  shape as `backlogRows`/`activeRows`, parser order preserved, no re-sort), and
+  routed `case .completed: return projects.flatMap { completedRows($0) }` in
+  `rows(in:matching:)`. Sourced from `project.tasks`, not `activeRows` (which drops
+  `.completed`).
+- Extended `resolveRow(in:id:)` with a third lookup over
+  `projects.flatMap { completedRows($0) }` (search order active → backlog →
+  completed, active wins id collisions) so a clicked completed row opens read-only
+  in the detail column rather than being cleared by `validSelection`. Updated the
+  doc comments on `resolveRow`/`validSelection` accordingly.
+
+**`Tests/PlansTests/BrowserWindowTests.swift`:**
+- Added `testSmartViewCompletedRowsAcrossProjects` (asserts `rows(in:matching: .completed)`
+  returns only `.completed` tasks from `ProjectTasks.tasks` in project/parser order).
+- Updated `testSmartViewAllCasesOrder` to expect `.completed` last in `allCases`.
+- Extended `testSmartViewLabelsAndVocabulary` with the three `.completed`
+  vocabulary assertions.
+- Rewrote two pre-existing tests to the new resolvable-completed behavior:
+  `testResolveSelectedRowReturnsNilForCompletedTaskId` →
+  `testResolveSelectedRowReturnsCompletedTaskRow`, and
+  `testValidSelectionClearsCompletedPlan` → `testValidSelectionKeepsCompletedPlan`.
+
+**Vocabulary files** (`TaskStatus+Glance.swift`, `TaskType+Glyph.swift`) and
+`TaskParser.swift` — unchanged (read-only references, as planned).
+
+**Verification:** `swift build` clean (one pre-existing, unrelated `Sendable`
+warning in `PlansStore`); `swift test --filter BrowserWindowTests` = 144 tests,
+0 failures (includes the new/updated `.completed` tests and the `SmartView.allCases`
+totality loops).
+
+Step 7 (👁 run the app and visually confirm the Completed lens) is deferred to
+`/plan-review` per worktree mode — see state file `## Observations`.
 
 ## Notes
 _Additional context_
