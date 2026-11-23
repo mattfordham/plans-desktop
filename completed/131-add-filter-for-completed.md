@@ -3,8 +3,9 @@
 **ID:** 131
 **Created:** 2026-11-21T23:02
 **Type:** feature
-**Status:** review
+**Status:** completed
 **Branch:** feature/131-add-filter-for-completed
+**Completed:** 2026-11-23T13:20
 
 ## What
 Add Filter for "Completed". Similar to Backlog.
