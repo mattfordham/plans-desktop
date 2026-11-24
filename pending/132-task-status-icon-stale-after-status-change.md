@@ -3,7 +3,9 @@
 **ID:** 132
 **Created:** 2026-11-24T12:21
 **Type:** bug
-**Status:** elaborated
+**Status:** in-progress
+**Branch:** fix/132-task-status-icon-stale-after-status-change
+**Worktree:** /Users/matt/Work/Open Source/plans-desktop/.worktrees/132-task-status-icon-stale-after-status-change
 
 ## What
 Plans are moving to the correct category when changed ("Review" in screenshot), but the status icons are getting stuck (showing the old status glyph) until I navigate away and back.

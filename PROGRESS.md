@@ -3,10 +3,10 @@
 **Last updated:** 2026-11-23
 
 ## Active Work
-_None_
+- **#132** - Task status icon stale after status change (started 2026-11-24)
 
 ## Pending
-- **#132** - Task status icon stale after status change until navigating away
+_None_
 
 ## Elaborated
 _None_
@@ -25,9 +25,9 @@ _None_
 - **#128** - Interrupt-and-discuss: keep an interrupted run's session alive (completed 2026-11-21)
 
 ## Stats
-- Pending: 1
+- Pending: 0
 - Elaborated: 0
-- In Progress: 0
+- In Progress: 1
 - Review: 0
 - In Review: 0
 - Completed: 128
