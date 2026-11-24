@@ -6,7 +6,7 @@
 _None_
 
 ## Pending
-_None_
+- **#132** - Task status icon stale after status change until navigating away
 
 ## Elaborated
 _None_
@@ -25,7 +25,7 @@ _None_
 - **#128** - Interrupt-and-discuss: keep an interrupted run's session alive (completed 2026-11-21)
 
 ## Stats
-- Pending: 0
+- Pending: 1
 - Elaborated: 0
 - In Progress: 0
 - Review: 0
