@@ -3,7 +3,8 @@
 **ID:** 132
 **Created:** 2026-11-24T12:21
 **Type:** bug
-**Status:** review
+**Status:** completed
+**Completed:** 2026-11-24T12:46
 **Branch:** fix/132-task-status-icon-stale-after-status-change
 
 ## What
