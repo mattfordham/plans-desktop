@@ -3,9 +3,8 @@
 **ID:** 132
 **Created:** 2026-11-24T12:21
 **Type:** bug
-**Status:** in-progress
+**Status:** review
 **Branch:** fix/132-task-status-icon-stale-after-status-change
-**Worktree:** /Users/matt/Work/Open Source/plans-desktop/.worktrees/132-task-status-icon-stale-after-status-change
 
 ## What
 Plans are moving to the correct category when changed ("Review" in screenshot), but the status icons are getting stuck (showing the old status glyph) until I navigate away and back.
@@ -34,10 +33,10 @@ The grouped list renders each section as a SwiftUI `Section` inside a single `La
 **To confirm:** Reproduce by changing a task's status from `in-progress` to `review` while the browser shows the status-grouped list, and confirm the row moves to the REVIEW group but keeps the old amber play glyph until navigating away and back — captured as a failing unit test on the row identity (agent-verifiable, so untagged).
 
 ## How
-- [ ] Step 1: Add a failing XCTest in `Tests/PlansTests/` that reproduces the identity bug: build a `TaskRow` for a given task at status `in-progress` and the same task id/project at status `review`, and assert the two produce DIFFERENT list identities (confirms the Diagnosis; agent-verifiable, so untagged). This drives extracting the identity into a testable value.
-- [ ] Step 2: Make the grouped-list row identity status-aware — expose a `listIdentity` on `TaskRow` (in `BrowserWindow.swift`) composed of the existing `id` plus the status-affecting state that drives `indicator` (status, isBlocked, isFailed), and use it as the `ForEach(..., id:)` in `sectionView` (`TaskListView.swift`). A status change now yields a fresh identity so SwiftUI rebuilds the row with the correct glyph, while rows stay lazy (laziness is unchanged — only the identity key changes).
-- [ ] Step 3: Keep the stable `id` for selection and any state that must survive a status change (e.g. `isSelected: selectedRowID == row.id` stays keyed on `row.id`), so changing the identity does not break selection or re-introduce eager building. Verify no other consumer relied on the `ForEach` id being status-independent.
-- [ ] Step 4: Run the targeted tests for the changed files and confirm the new regression test passes.
+- [x] Step 1: Add a failing XCTest in `Tests/PlansTests/` that reproduces the identity bug: build a `TaskRow` for a given task at status `in-progress` and the same task id/project at status `review`, and assert the two produce DIFFERENT list identities (confirms the Diagnosis; agent-verifiable, so untagged). This drives extracting the identity into a testable value.
+- [x] Step 2: Make the grouped-list row identity status-aware — expose a `listIdentity` on `TaskRow` (in `BrowserWindow.swift`) composed of the existing `id` plus the status-affecting state that drives `indicator` (status, isBlocked, isFailed), and use it as the `ForEach(..., id:)` in `sectionView` (`TaskListView.swift`). A status change now yields a fresh identity so SwiftUI rebuilds the row with the correct glyph, while rows stay lazy (laziness is unchanged — only the identity key changes).
+- [x] Step 3: Keep the stable `id` for selection and any state that must survive a status change (e.g. `isSelected: selectedRowID == row.id` stays keyed on `row.id`), so changing the identity does not break selection or re-introduce eager building. Verify no other consumer relied on the `ForEach` id being status-independent.
+- [x] Step 4: Run the targeted tests for the changed files and confirm the new regression test passes.
 - [ ] 👁 Step 5: Build and run the app, group the browser list by Status, change a task's status (or edit its `.plans` file's `**Status:**`), and confirm the row's icon updates in place to the new status glyph without navigating away and back. (Deferred to review in worktree/yolo mode.)
 
 ## Verification
@@ -56,10 +55,15 @@ _Fewer than 3 files modified; section omitted._
 - [low] Selection and other per-row state should remain keyed on the stable `id` (not the new status-aware identity). **Why:** Keeping `isSelected` on `row.id` is the conservative choice to avoid breaking selection when identity changes; the source description did not specify this interaction.
 
 ### Discovered during execution
-_To be filled during execution_
+- [low] Made `listIdentity` a `String` (the existing `id` plus a `#`-delimited suffix of status rawValue, a blocked flag, and a failure flag) rather than a `Hashable` struct. **Why:** `ForEach(id:)` just needs a stable `Hashable`; the existing `id` is already a `String`, so a string composite is the smallest, most readable change and avoids introducing a new nested type. A struct would work equally well.
+- [low] Included BOTH `isBlocked` and `isFailed` (`task.failure != nil`) in `listIdentity`, not just `status`. **Why:** `TaskRow.indicator` is derived from all three (blocked/failed take precedence over status in the glyph), so any of them changing can change the icon without `status` changing — the identity must cover every field that drives the glyph to prevent an analogous stale-icon case.
+- [high] Selection stays keyed on the stable `row.id` (`isSelected: selectedRowID == row.id` unchanged); only the `sectionView` inner `ForEach` diffing key moved to `listIdentity`. **Why:** The stable `id` is the selection/state-persistence key; changing identity on a status change must not drop the detail-column selection.
 
 ## Changes
-_To be filled during execution_
+- `Sources/Plans/BrowserWindow.swift` — added `TaskRow.listIdentity: String`, a status-aware list identity = the stable `id` plus a `#`-delimited suffix of `task.status.rawValue` (or `-` when nil), a blocked flag, and a failure flag. Documented why the grouped list must key on this (Section-in-LazyVStack flattening reuses a status-independent id and leaves the glyph stale). The stable `id` is unchanged and remains the selection/state key.
+- `Sources/Plans/TaskListView.swift` — changed `sectionView`'s inner `ForEach(Array(rows.enumerated()), id: \.element.id)` to `id: \.element.listIdentity`, so a status change yields a fresh identity and SwiftUI rebuilds the row with the correct icon. Laziness (the `Section` inside `LazyVStack`) is unchanged; `isSelected: selectedRowID == row.id` still keys on the stable `id`.
+- `Tests/PlansTests/BrowserWindowTests.swift` — added three regression tests under a `// MARK: - TaskRow.listIdentity (#132)` block: `testListIdentityChangesWhenStatusChanges`, `testListIdentityChangesWhenBlockedOrFailedChanges`, and `testStableIdUnchangedWhenStatusChanges`.
+- Targeted tests: `swift test --filter BrowserWindowTests` → 155 tests, 0 failures (includes the 3 new tests). RED confirmed first via `swift build --build-tests` (`no member 'listIdentity'`).
 
 ## Notes
 - Do NOT introduce `GeometryReader` / measured-size feedback (CLAUDE.md layout-loop warning #096/#063) — this is an identity/diffing bug, not a layout bug.

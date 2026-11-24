@@ -3,7 +3,7 @@
 **Last updated:** 2026-11-23
 
 ## Active Work
-- **#132** - Task status icon stale after status change (started 2026-11-24)
+_None_
 
 ## Pending
 _None_
@@ -12,7 +12,7 @@ _None_
 _None_
 
 ## Review
-_None_
+- **#132** - Task status icon stale after status change
 
 ## In Review
 _None_
@@ -27,7 +27,7 @@ _None_
 ## Stats
 - Pending: 0
 - Elaborated: 0
-- In Progress: 1
-- Review: 0
+- In Progress: 0
+- Review: 1
 - In Review: 0
 - Completed: 128
