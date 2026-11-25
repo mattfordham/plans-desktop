@@ -6,7 +6,7 @@
 _None_
 
 ## Pending
-_None_
+- **#133** - Add Checkbox To Auto-Elaborate On Execute When Not Already Elaborated
 
 ## Elaborated
 _None_
@@ -25,7 +25,7 @@ _None_
 - **#129** - Interrupt-and-discuss Phase 2: persistent streaming-input runner (completed 2026-11-21)
 
 ## Stats
-- Pending: 0
+- Pending: 1
 - Elaborated: 0
 - In Progress: 0
 - Review: 0
