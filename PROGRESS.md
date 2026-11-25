@@ -3,7 +3,7 @@
 **Last updated:** 2026-11-24
 
 ## Active Work
-- **#134** - Allow Elaborate (and Execute) on a Blocked Plan (started 2026-11-24)
+_None_
 
 ## Pending
 - **#133** - Add Checkbox To Auto-Elaborate On Execute When Not Already Elaborated
@@ -12,7 +12,7 @@
 _None_
 
 ## Review
-_None_
+- **#134** - Allow Elaborate (and Execute) on a Blocked Plan
 
 ## In Review
 _None_
@@ -27,7 +27,7 @@ _None_
 ## Stats
 - Pending: 1
 - Elaborated: 0
-- In Progress: 1
-- Review: 0
+- In Progress: 0
+- Review: 1
 - In Review: 0
 - Completed: 129
