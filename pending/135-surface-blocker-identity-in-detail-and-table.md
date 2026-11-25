@@ -3,7 +3,9 @@
 **ID:** 135
 **Created:** 2026-11-25T10:00
 **Type:** feature
-**Status:** elaborated
+**Status:** in-progress
+**Branch:** feature/135-surface-blocker-identity-in-detail-and-table
+**Worktree:** /Users/matt/Work/Open Source/plans-desktop/.worktrees/135-surface-blocker-identity-in-detail-and-table
 
 ## What
 A recent plan allowed "blocked" plans to be elaborated/executed. This is good, but we still need to see if a plan is blocked and by what plan. Add this information to the plan detail view and also to the table view somehow.

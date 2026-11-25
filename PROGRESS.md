@@ -3,10 +3,10 @@
 **Last updated:** 2026-11-25
 
 ## Active Work
-_None_
+- **#135** - Surface Which Plan Is Blocking In Detail And Table Views (started 2026-11-25)
 
 ## Pending
-- **#135** - Surface Which Plan Is Blocking In Detail And Table Views
+_None_
 
 ## Elaborated
 _None_
@@ -25,9 +25,9 @@ _None_
 - **#130** - Agent panel closed by default per plan, opened only by the user (completed 2026-11-21)
 
 ## Stats
-- Pending: 1
+- Pending: 0
 - Elaborated: 0
-- In Progress: 0
+- In Progress: 1
 - Review: 0
 - In Review: 0
 - Completed: 131
