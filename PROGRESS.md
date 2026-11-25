@@ -25,7 +25,7 @@ _None_
 - **#129** - Interrupt-and-discuss Phase 2: persistent streaming-input runner (completed 2026-11-21)
 
 ## Stats
-- Pending: 1
+- Pending: 2
 - Elaborated: 0
 - In Progress: 0
 - Review: 0
