@@ -3,7 +3,7 @@
 **Last updated:** 2026-11-24
 
 ## Active Work
-_None_
+- **#134** - Allow Elaborate (and Execute) on a Blocked Plan (started 2026-11-24)
 
 ## Pending
 - **#133** - Add Checkbox To Auto-Elaborate On Execute When Not Already Elaborated
@@ -25,9 +25,9 @@ _None_
 - **#129** - Interrupt-and-discuss Phase 2: persistent streaming-input runner (completed 2026-11-21)
 
 ## Stats
-- Pending: 2
+- Pending: 1
 - Elaborated: 0
-- In Progress: 0
+- In Progress: 1
 - Review: 0
 - In Review: 0
 - Completed: 129

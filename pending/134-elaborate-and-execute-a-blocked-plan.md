@@ -3,7 +3,9 @@
 **ID:** 134
 **Created:** 2026-11-24T19:31
 **Type:** feature
-**Status:** elaborated
+**Status:** in-progress
+**Branch:** feature/134-elaborate-and-execute-a-blocked-plan
+**Worktree:** /Users/matt/Work/Open Source/plans-desktop/.worktrees/134-elaborate-and-execute-a-blocked-plan
 
 ## What
 I think that even if a plan is blocked, I should be able to elaborate it and possibly even execute it.
