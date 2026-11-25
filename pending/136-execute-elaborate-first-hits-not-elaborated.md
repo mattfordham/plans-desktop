@@ -3,7 +3,9 @@
 **ID:** 136
 **Created:** 2026-11-25T11:52
 **Type:** bug
-**Status:** elaborated
+**Status:** in-progress
+**Branch:** fix/136-execute-elaborate-first-hits-not-elaborated
+**Worktree:** /Users/matt/Work/Open Source/plans-desktop/.worktrees/136-execute-elaborate-first-hits-not-elaborated
 
 ## What
 I'm pretty sure I executed this with the "elaborate first" checkbox enabled. It seems to not have worked.

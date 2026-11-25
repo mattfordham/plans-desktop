@@ -3,10 +3,10 @@
 **Last updated:** 2026-11-25
 
 ## Active Work
-_None_
+- **#136** - Execute with "elaborate first" enabled still hits the not-elaborated gate (started 2026-11-25)
 
 ## Pending
-- **#136** - Execute with "elaborate first" enabled still hits the not-elaborated gate (bug)
+_None_
 
 ## Elaborated
 _None_
@@ -25,9 +25,9 @@ _None_
 - **#131** - Add Filter for "Completed" (Similar to Backlog) (completed 2026-11-23)
 
 ## Stats
-- Pending: 1
+- Pending: 0
 - Elaborated: 0
-- In Progress: 0
+- In Progress: 1
 - Review: 0
 - In Review: 0
 - Completed: 132
