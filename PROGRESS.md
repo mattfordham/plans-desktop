@@ -6,7 +6,7 @@
 _None_
 
 ## Pending
-_None_
+- **#135** - Surface Which Plan Is Blocking In Detail And Table Views
 
 ## Elaborated
 _None_
@@ -25,7 +25,7 @@ _None_
 - **#130** - Agent panel closed by default per plan, opened only by the user (completed 2026-11-21)
 
 ## Stats
-- Pending: 0
+- Pending: 1
 - Elaborated: 0
 - In Progress: 0
 - Review: 0
