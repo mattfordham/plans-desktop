@@ -3,7 +3,9 @@
 **ID:** 133
 **Created:** 2026-11-24T17:11
 **Type:** feature
-**Status:** elaborated
+**Status:** in-progress
+**Branch:** feature/133-auto-elaborate-on-execute-checkbox
+**Worktree:** /Users/matt/Work/Open Source/plans-desktop/.worktrees/133-auto-elaborate-on-execute-checkbox
 
 ## What
 When executing a plan add a checkbox to automatically elaborate it if it's not already.

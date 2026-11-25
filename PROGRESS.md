@@ -3,10 +3,10 @@
 **Last updated:** 2026-11-24
 
 ## Active Work
-_None_
+- **#133** - Add Checkbox To Auto-Elaborate On Execute When Not Already Elaborated (started 2026-11-25)
 
 ## Pending
-- **#133** - Add Checkbox To Auto-Elaborate On Execute When Not Already Elaborated
+_None_
 
 ## Elaborated
 _None_
@@ -25,9 +25,9 @@ _None_
 - **#129** - Interrupt-and-discuss Phase 2: persistent streaming-input runner (completed 2026-11-21)
 
 ## Stats
-- Pending: 1
+- Pending: 0
 - Elaborated: 0
-- In Progress: 0
+- In Progress: 1
 - Review: 1
 - In Review: 0
 - Completed: 129
