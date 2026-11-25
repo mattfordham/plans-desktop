@@ -12,22 +12,22 @@ _None_
 _None_
 
 ## Review
-- **#134** - Allow Elaborate (and Execute) on a Blocked Plan
+_None_
 
 ## In Review
 _None_
 
 ## Recently Completed
+- **#134** - Allow Elaborate (and Execute) on a Blocked Plan (completed 2026-11-25)
 - **#133** - Add Checkbox To Auto-Elaborate On Execute When Not Already Elaborated (completed 2026-11-25)
 - **#132** - Task status icon stale after status change until navigating away (completed 2026-11-24)
 - **#131** - Add Filter for "Completed" (Similar to Backlog) (completed 2026-11-23)
 - **#130** - Agent panel closed by default per plan, opened only by the user (completed 2026-11-21)
-- **#127** - Whitelist read-only denied tool calls from the "incomplete information" warning (completed 2026-11-21)
 
 ## Stats
 - Pending: 0
 - Elaborated: 0
 - In Progress: 0
-- Review: 1
+- Review: 0
 - In Review: 0
-- Completed: 130
+- Completed: 131
