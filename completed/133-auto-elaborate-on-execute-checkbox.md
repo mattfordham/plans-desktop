@@ -3,7 +3,8 @@
 **ID:** 133
 **Created:** 2026-11-24T17:11
 **Type:** feature
-**Status:** review
+**Status:** completed
+**Completed:** 2026-11-25T09:19
 **Branch:** feature/133-auto-elaborate-on-execute-checkbox
 
 ## What
