@@ -3,7 +3,7 @@
 **Last updated:** 2026-11-25
 
 ## Active Work
-- **#135** - Surface Which Plan Is Blocking In Detail And Table Views (started 2026-11-25)
+_None_
 
 ## Pending
 _None_
@@ -12,7 +12,7 @@ _None_
 _None_
 
 ## Review
-_None_
+- **#135** - Surface Which Plan Is Blocking In Detail And Table Views
 
 ## In Review
 _None_
@@ -27,7 +27,7 @@ _None_
 ## Stats
 - Pending: 0
 - Elaborated: 0
-- In Progress: 1
-- Review: 0
+- In Progress: 0
+- Review: 1
 - In Review: 0
 - Completed: 131
