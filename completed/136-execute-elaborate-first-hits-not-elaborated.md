@@ -3,7 +3,8 @@
 **ID:** 136
 **Created:** 2026-11-25T11:52
 **Type:** bug
-**Status:** in-review
+**Status:** completed
+**Completed:** 2026-11-25T13:57
 **Branch:** fix/136-execute-elaborate-first-hits-not-elaborated
 
 ## What
