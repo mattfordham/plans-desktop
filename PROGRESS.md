@@ -6,7 +6,7 @@
 _None_
 
 ## Pending
-_None_
+- **#136** - Execute with "elaborate first" enabled still hits the not-elaborated gate (bug)
 
 ## Elaborated
 _None_
@@ -25,7 +25,7 @@ _None_
 - **#131** - Add Filter for "Completed" (Similar to Backlog) (completed 2026-11-23)
 
 ## Stats
-- Pending: 0
+- Pending: 1
 - Elaborated: 0
 - In Progress: 0
 - Review: 0
